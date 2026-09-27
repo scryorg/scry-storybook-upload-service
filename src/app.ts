@@ -39,10 +39,26 @@ const app = new OpenAPIHono<AppEnv>();
 app.use('*', logger());
 
 // Add API key authentication middleware to protected routes
-// This middleware validates the X-API-Key header against Firestore-stored keys
-app.use('/upload/*', apiKeyAuth());
-app.use('/presigned-url/*', apiKeyAuth());
-app.use('/upload-images/*', apiKeyAuth());
+// This middleware validates the X-API-Key header against Firestore-stored keys.
+//
+// The patterns MUST name the :project segment. apiKeyAuth reads the route's
+// project with c.req.param('project'), and a middleware only sees the params of
+// its own pattern: mounted on '/upload/*' it saw none, skipped the
+// project-mismatch check and validated the key against its own project, so any
+// project's key could write to any other project (upload-project-key-scope).
+// '/x/:project/*' also matches '/x/:project' itself.
+app.use('/upload/:project/*', apiKeyAuth());
+app.use('/presigned-url/:project/*', apiKeyAuth());
+app.use('/upload-images/:project/*', apiKeyAuth());
+
+/**
+ * Which key created a build (upload-project-key-scope): the key's Firestore doc
+ * id and the project it belongs to. Never the key value or a hash of it.
+ */
+function uploadedBy(key: AuthVariables['authenticatedApiKey']): Pick<CreateBuildData, 'uploadedByKeyId' | 'uploadedByKeyProject'> {
+  if (!key) return {};
+  return { uploadedByKeyId: key.id, uploadedByKeyProject: key.keyProjectId };
+}
 
 const PROJECT_SEGMENT_REGEX = /^[a-zA-Z0-9_-]+$/;
 const VERSION_SEGMENT_REGEX = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
@@ -405,6 +421,7 @@ app.openapi(uploadRoute, async (c) => {
         const buildData: CreateBuildData = {
           versionId: version,
           zipUrl: result.url,
+          ...uploadedBy(c.var.authenticatedApiKey),
           ...(coveragePayload && coverageUrl
             ? {
                 coverage: normalizeCoverageInput(coveragePayload, {
@@ -982,7 +999,8 @@ app.openapi(presignedUrlRoute, async (c) => {
       console.log(`[INFO] Creating build for presigned upload: project=${project}, version=${version}, zipUrl=${zipUrl}`);
       const build = await firestore.createBuild(project, {
         versionId: version,
-        zipUrl: zipUrl
+        zipUrl: zipUrl,
+        ...uploadedBy(c.var.authenticatedApiKey),
       });
       buildId = build.id;
       buildNumber = build.buildNumber;

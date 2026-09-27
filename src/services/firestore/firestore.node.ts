@@ -62,6 +62,8 @@ export class FirestoreServiceNode implements FirestoreService {
         // Build provenance (P13a); see CreateBuildData.
         ...(data.commitSha ? { commitSha: data.commitSha } : {}),
         ...(data.branch ? { branch: data.branch } : {}),
+        ...(data.uploadedByKeyId ? { uploadedByKeyId: data.uploadedByKeyId } : {}),
+        ...(data.uploadedByKeyProject ? { uploadedByKeyProject: data.uploadedByKeyProject } : {}),
       };
 
       transaction.set(buildRef, buildData);
@@ -368,6 +370,8 @@ export class FirestoreServiceNode implements FirestoreService {
       archivedBy: data.archivedBy,
       coverage: data.coverage,
       processingStatus: data.processingStatus,
+      ...(data.uploadedByKeyId ? { uploadedByKeyId: data.uploadedByKeyId } : {}),
+      ...(data.uploadedByKeyProject ? { uploadedByKeyProject: data.uploadedByKeyProject } : {}),
     };
   }
 }
