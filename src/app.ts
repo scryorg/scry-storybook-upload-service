@@ -39,10 +39,17 @@ const app = new OpenAPIHono<AppEnv>();
 app.use('*', logger());
 
 // Add API key authentication middleware to protected routes
-// This middleware validates the X-API-Key header against Firestore-stored keys
-app.use('/upload/*', apiKeyAuth());
-app.use('/presigned-url/*', apiKeyAuth());
-app.use('/upload-images/*', apiKeyAuth());
+// This middleware validates the X-API-Key header against Firestore-stored keys.
+//
+// The patterns MUST name the :project segment. apiKeyAuth reads the route's
+// project with c.req.param('project'), and a middleware only sees the params of
+// its own pattern: mounted on '/upload/*' it saw none, skipped the
+// project-mismatch check and validated the key against its own project, so any
+// project's key could write to any other project (upload-project-key-scope).
+// '/x/:project/*' also matches '/x/:project' itself.
+app.use('/upload/:project/*', apiKeyAuth());
+app.use('/presigned-url/:project/*', apiKeyAuth());
+app.use('/upload-images/:project/*', apiKeyAuth());
 
 const PROJECT_SEGMENT_REGEX = /^[a-zA-Z0-9_-]+$/;
 const VERSION_SEGMENT_REGEX = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
