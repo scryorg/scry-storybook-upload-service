@@ -70,7 +70,23 @@ export interface AuthVariables {
     name: string;
     prefix: string;
     projectId: string;
+    /** The project the key was minted for (from the key itself). */
+    keyProjectId: string;
   };
+}
+
+/**
+ * One structured line per authentication outcome (upload-project-key-scope).
+ * Carries the key's Firestore doc id and projects only; the key value, its
+ * prefix and any hash of it are never logged.
+ */
+function logAuth(
+  level: 'log' | 'warn',
+  fields: { outcome: string; keyId?: string; keyProject: string | null; routeProject?: string; method: string; path: string }
+): void {
+  const line = JSON.stringify({ event: 'upload_auth', ...fields });
+  if (level === 'warn') console.warn(line);
+  else console.log(line);
 }
 
 /**
@@ -137,6 +153,13 @@ export function apiKeyAuth(options: ApiKeyAuthOptions = {}) {
 
     // Validate project match if configured
     if (config.validateProjectMatch && routeProjectId && keyProjectId !== routeProjectId) {
+      logAuth('warn', {
+        outcome: 'project_mismatch',
+        keyProject: keyProjectId,
+        routeProject: routeProjectId,
+        method: c.req.method,
+        path: c.req.path,
+      });
       return c.json(
         {
           error: 'Project mismatch',
@@ -168,6 +191,16 @@ export function apiKeyAuth(options: ApiKeyAuthOptions = {}) {
       name: result.apiKey!.name,
       prefix: result.apiKey!.prefix,
       projectId,
+      keyProjectId,
+    });
+
+    logAuth('log', {
+      outcome: 'ok',
+      keyId: result.apiKey!.id,
+      keyProject: keyProjectId,
+      routeProject: routeProjectId,
+      method: c.req.method,
+      path: c.req.path,
     });
 
     // Update lastUsedAt timestamp (fire-and-forget to avoid latency)

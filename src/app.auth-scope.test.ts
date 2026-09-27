@@ -131,3 +131,108 @@ describe('upload-project-key-scope detection', () => {
     }
   });
 });
+
+describe('upload-project-key-scope detection: who uploaded, and every auth outcome logged', () => {
+  const KEY = 'scry_proj_victim_SECRETsecretSECRETsecret123456';
+  const ATTACKER_KEY = 'scry_proj_attacker_SECRETsecretSECRETsecret654321';
+  let logs: string[];
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    logs = [];
+    const capture = (...args: unknown[]) => {
+      logs.push(args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' '));
+    };
+    vi.spyOn(console, 'log').mockImplementation(capture);
+    vi.spyOn(console, 'warn').mockImplementation(capture);
+    vi.spyOn(console, 'error').mockImplementation(capture);
+    vi.spyOn(console, 'info').mockImplementation(capture);
+  });
+
+  const authLines = () =>
+    logs.filter((l) => l.includes('"event":"upload_auth"')).map((l) => JSON.parse(l.slice(l.indexOf('{'))));
+
+  it('the presigned route records the key doc id and key project on the build it creates', async () => {
+    const { server, firestore } = setup();
+    const res = await server.request('/presigned-url/victim/v1/storybook.zip', {
+      method: 'POST',
+      ...JSON_BODY({ contentType: 'application/zip' }),
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': KEY },
+    });
+    expect(res.status).toBe(200);
+    const data = (firestore.createBuild as any).mock.calls[0][1];
+    expect(data.uploadedByKeyId).toBe('k1');
+    expect(data.uploadedByKeyProject).toBe('victim');
+    expect(JSON.stringify(data)).not.toContain('SECRET');
+  });
+
+  it('the direct upload route records them too', async () => {
+    const { server, firestore } = setup();
+    const res = await server.request('/upload/victim/v1', {
+      method: 'POST',
+      ...ZIP,
+      headers: { 'Content-Type': 'application/zip', 'X-API-Key': KEY },
+    });
+    expect(res.status).toBe(201);
+    const data = (firestore.createBuild as any).mock.calls[0][1];
+    expect(data.uploadedByKeyId).toBe('k1');
+    expect(data.uploadedByKeyProject).toBe('victim');
+  });
+
+  it('one structured log line per authenticated request with keyId, keyProject and routeProject', async () => {
+    const { server } = setup();
+    await server.request('/upload/victim/v1/metadata', {
+      method: 'POST',
+      ...ZIP,
+      headers: { 'Content-Type': 'application/zip', 'X-API-Key': KEY },
+    });
+    const lines = authLines();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({
+      event: 'upload_auth',
+      outcome: 'ok',
+      keyId: 'k1',
+      keyProject: 'victim',
+      routeProject: 'victim',
+      method: 'POST',
+      path: '/upload/victim/v1/metadata',
+    });
+  });
+
+  it('a warn line on every 403 mismatch, naming both projects', async () => {
+    const { server } = setup();
+    const warn = console.warn as unknown as ReturnType<typeof vi.fn>;
+    const res = await server.request('/presigned-url/victim/v1/storybook.zip', {
+      method: 'POST',
+      ...JSON_BODY({}),
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': ATTACKER_KEY },
+    });
+    expect(res.status).toBe(403);
+    const warned = warn.mock.calls.map((a: unknown[]) => String(a[0])).filter((l: string) => l.includes('project_mismatch'));
+    expect(warned).toHaveLength(1);
+    expect(JSON.parse(warned[0])).toMatchObject({
+      event: 'upload_auth',
+      outcome: 'project_mismatch',
+      keyProject: 'attacker',
+      routeProject: 'victim',
+    });
+  });
+
+  it('the key value never appears in any log line, on success or on mismatch, on any route', async () => {
+    for (const route of ROUTES) {
+      for (const key of [KEY, ATTACKER_KEY]) {
+        const { server } = setup();
+        await server.request(route.path, {
+          method: route.method,
+          ...route.init,
+          headers: { ...route.init.headers, 'X-API-Key': key },
+        });
+      }
+    }
+    expect(authLines().length).toBeGreaterThanOrEqual(ROUTES.length * 2);
+    const all = logs.join('\n');
+    expect(all).not.toContain('SECRET');
+    expect(all).not.toContain('secret123456');
+    expect(all).not.toContain('secret654321');
+  });
+});

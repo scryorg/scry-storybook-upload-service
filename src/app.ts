@@ -51,6 +51,15 @@ app.use('/upload/:project/*', apiKeyAuth());
 app.use('/presigned-url/:project/*', apiKeyAuth());
 app.use('/upload-images/:project/*', apiKeyAuth());
 
+/**
+ * Which key created a build (upload-project-key-scope): the key's Firestore doc
+ * id and the project it belongs to. Never the key value or a hash of it.
+ */
+function uploadedBy(key: AuthVariables['authenticatedApiKey']): Pick<CreateBuildData, 'uploadedByKeyId' | 'uploadedByKeyProject'> {
+  if (!key) return {};
+  return { uploadedByKeyId: key.id, uploadedByKeyProject: key.keyProjectId };
+}
+
 const PROJECT_SEGMENT_REGEX = /^[a-zA-Z0-9_-]+$/;
 const VERSION_SEGMENT_REGEX = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
 const FILENAME_SEGMENT_REGEX = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
@@ -412,6 +421,7 @@ app.openapi(uploadRoute, async (c) => {
         const buildData: CreateBuildData = {
           versionId: version,
           zipUrl: result.url,
+          ...uploadedBy(c.var.authenticatedApiKey),
           ...(coveragePayload && coverageUrl
             ? {
                 coverage: normalizeCoverageInput(coveragePayload, {
@@ -989,7 +999,8 @@ app.openapi(presignedUrlRoute, async (c) => {
       console.log(`[INFO] Creating build for presigned upload: project=${project}, version=${version}, zipUrl=${zipUrl}`);
       const build = await firestore.createBuild(project, {
         versionId: version,
-        zipUrl: zipUrl
+        zipUrl: zipUrl,
+        ...uploadedBy(c.var.authenticatedApiKey),
       });
       buildId = build.id;
       buildNumber = build.buildNumber;

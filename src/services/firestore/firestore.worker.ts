@@ -124,6 +124,9 @@ export class FirestoreServiceWorker implements FirestoreService {
       // the code. Written only when the uploader knew it.
       ...(data.commitSha ? { commitSha: { stringValue: data.commitSha } } : {}),
       ...(data.branch ? { branch: { stringValue: data.branch } } : {}),
+      // Which key created the build (upload-project-key-scope): doc id + project, never the key.
+      ...(data.uploadedByKeyId ? { uploadedByKeyId: { stringValue: data.uploadedByKeyId } } : {}),
+      ...(data.uploadedByKeyProject ? { uploadedByKeyProject: { stringValue: data.uploadedByKeyProject } } : {}),
     };
 
     console.log('[FIRESTORE] createBuild writing build doc', {
@@ -770,6 +773,8 @@ export class FirestoreServiceWorker implements FirestoreService {
       archivedBy: fields.archivedBy?.stringValue,
       coverage: fields.coverage ? (this.fromFirestoreValue(fields.coverage) as any) : undefined,
       processingStatus: fields.processingStatus?.stringValue,
+      ...(fields.uploadedByKeyId?.stringValue ? { uploadedByKeyId: fields.uploadedByKeyId.stringValue } : {}),
+      ...(fields.uploadedByKeyProject?.stringValue ? { uploadedByKeyProject: fields.uploadedByKeyProject.stringValue } : {}),
     };
   }
 

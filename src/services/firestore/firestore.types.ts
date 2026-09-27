@@ -142,6 +142,14 @@ export interface Build {
    * Async processing state for screenshot metadata ingestion.
    */
   processingStatus?: BuildProcessingStatus;
+
+  /**
+   * Firestore doc id of the API key that created the build, and the project
+   * that key belongs to (upload-project-key-scope). Never the key value or a
+   * hash of it. Absent when the service runs without API-key auth.
+   */
+  uploadedByKeyId?: string;
+  uploadedByKeyProject?: string;
 }
 
 /**
@@ -172,6 +180,14 @@ export interface CreateBuildData {
 
   /** Branch the build was produced from, when known (P13a). */
   branch?: string;
+
+  /**
+   * Firestore doc id of the API key that created the build, and the project
+   * that key belongs to (upload-project-key-scope). Never the key value or a
+   * hash of it. Absent when the service runs without API-key auth.
+   */
+  uploadedByKeyId?: string;
+  uploadedByKeyProject?: string;
 }
 
 // ============= UPLOAD TYPES =============
