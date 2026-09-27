@@ -157,7 +157,12 @@ export function parseCiTimings(input: unknown): CiTimingsParse {
       }
       kept[key] = value as number;
     }
-    if (Object.keys(kept).length > 0) out.timeLostMs = kept;
+    // `{}` is meaningful: sbcov lost no time to failures (absent means an older
+    // sbcov that does not report it), and the ci-time-budget alert tells the two
+    // apart. Keep `{}` when `{}` was sent; a record whose every entry was dropped
+    // stays absent, because storing `{}` would claim nothing was lost.
+    const sentEntries = Object.keys(input.timeLostMs).length;
+    if (Object.keys(kept).length > 0 || sentEntries === 0) out.timeLostMs = kept;
   }
 
   if (Object.keys(out).length === 0) {

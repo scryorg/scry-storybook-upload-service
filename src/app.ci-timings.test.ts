@@ -243,6 +243,31 @@ describe('regression-storybook-preview-ci-runtime: CI timings stored with the up
     }
   });
 
+  it('guarantee-7 timeLostMs {} (nothing lost) is stored as {}, distinct from absent (older sbcov)', async () => {
+    const firestore = createFirestore();
+    const server = createTestServer({ storage: createStorage(), firestore });
+    await presign(server, { contentType: 'application/zip', ciTimings: { ...PRE_UPLOAD, timeLostMs: {} } });
+    expect((firestore.createBuild as any).mock.calls[0][1].ciTimings.timeLostMs).toEqual({});
+
+    const alone = createFirestore();
+    await presign(createTestServer({ storage: createStorage(), firestore: alone }), { contentType: 'application/zip', ciTimings: { timeLostMs: {} } });
+    expect((alone.createBuild as any).mock.calls[0][1].ciTimings).toEqual({ timeLostMs: {} });
+
+    const { timeLostMs: _omit, ...withoutTimeLost } = PRE_UPLOAD;
+    const older = createFirestore();
+    await presign(createTestServer({ storage: createStorage(), firestore: older }), { contentType: 'application/zip', ciTimings: withoutTimeLost });
+    expect('timeLostMs' in (older.createBuild as any).mock.calls[0][1].ciTimings).toBe(false);
+  });
+
+  it('guarantee-7 a timeLostMs whose every entry is out of bounds is not stored as {} (that would claim nothing was lost)', async () => {
+    const firestore = createFirestore();
+    const server = createTestServer({ storage: createStorage(), firestore });
+    await presign(server, { contentType: 'application/zip', ciTimings: { ...PRE_UPLOAD, timeLostMs: { timeout: -1, 'Bad Key': 5 } } });
+    const stored = (firestore.createBuild as any).mock.calls[0][1].ciTimings;
+    expect('timeLostMs' in stored).toBe(false);
+    expect(logged(warnSpy)).toContain('ci_timings_field_dropped=2');
+  });
+
   it('guarantee-7 unknown keys dropped: extra keys are stripped, timeLostMs keeps only short reason keys with sane values', async () => {
     const firestore = createFirestore();
     const server = createTestServer({ storage: createStorage(), firestore });
