@@ -77,18 +77,6 @@ export interface FirestoreService {
   ): Promise<Build | null>;
 
   /**
-   * Finds a build by its per-project build number.
-   *
-   * Build numbers are unique within a project (one counter per project), so
-   * this is an exact lookup; the caller checks the versionId it expects.
-   * Optional so older test doubles need not grow it.
-   */
-  getBuildByNumber?(
-    projectId: string,
-    buildNumber: number
-  ): Promise<Build | null>;
-
-  /**
    * Updates a build record
    * @param projectId The project identifier
    * @param buildId The build identifier

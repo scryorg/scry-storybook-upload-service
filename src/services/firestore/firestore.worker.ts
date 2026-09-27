@@ -358,31 +358,6 @@ export class FirestoreServiceWorker implements FirestoreService {
   }
 
   /**
-   * Finds a build by its build number. A single-field equality filter, so no
-   * composite index is needed.
-   */
-  async getBuildByNumber(
-    projectId: string,
-    buildNumber: number
-  ): Promise<Build | null> {
-    const token = await this.getAccessToken();
-    const structuredQuery = {
-      from: [{ collectionId: 'builds' }],
-      where: {
-        fieldFilter: {
-          field: { fieldPath: 'buildNumber' },
-          op: 'EQUAL',
-          value: { integerValue: String(buildNumber) },
-        },
-      },
-      limit: 1,
-    };
-    const docs = await this.queryDocuments(`projects/${projectId}`, structuredQuery, token);
-    if (docs.length === 0) return null;
-    return this.convertDocToBuild(docs[0].name.split('/').pop()!, docs[0].fields);
-  }
-
-  /**
    * Updates a build record
    */
   async updateBuild(

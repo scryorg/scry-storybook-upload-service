@@ -194,23 +194,6 @@ export class FirestoreServiceNode implements FirestoreService {
   }
 
   /**
-   * Finds a build by its build number (unique per project).
-   */
-  async getBuildByNumber(
-    projectId: string,
-    buildNumber: number
-  ): Promise<Build | null> {
-    const snapshot = await this.db
-      .collection(`projects/${projectId}/builds`)
-      .where('buildNumber', '==', buildNumber)
-      .limit(1)
-      .get();
-    if (snapshot.empty) return null;
-    const doc = snapshot.docs[0];
-    return this.convertDocToBuild(doc.id, doc.data());
-  }
-
-  /**
    * Updates a build record
    */
   async updateBuild(

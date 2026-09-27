@@ -180,6 +180,14 @@ describe('normalizeCoverageInput() coverage.execution', () => {
     expect('execution' in normalizeCoverageInput(base, opts)).toBe(false);
     expect('execution' in normalizeCoverageInput({ ...base, execution: null }, opts)).toBe(false);
     expect('execution' in normalizeCoverageInput({ ...base, execution: { executed: false } }, opts)).toBe(false);
+    // sbcov writes zeros when it did not execute: that is "not run", not "ran in 0 ms".
+    expect(
+      'execution' in
+        normalizeCoverageInput(
+          { ...base, execution: { executed: false, summary: { total: 0, passed: 0, failed: 0, skipped: 0, duration: 0, notIndexed: 0 } } },
+          opts
+        )
+    ).toBe(false);
 
     const partial = normalizeCoverageInput(
       { ...base, execution: { summary: { total: 3, passed: 3, failed: 0, duration: -1, notIndexed: 'x' } } },
