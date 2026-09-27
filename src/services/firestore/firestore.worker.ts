@@ -127,6 +127,9 @@ export class FirestoreServiceWorker implements FirestoreService {
       // Which key created the build (upload-project-key-scope): doc id + project, never the key.
       ...(data.uploadedByKeyId ? { uploadedByKeyId: { stringValue: data.uploadedByKeyId } } : {}),
       ...(data.uploadedByKeyProject ? { uploadedByKeyProject: { stringValue: data.uploadedByKeyProject } } : {}),
+      // CI timings (storybook-preview-ci-runtime). Written only when the
+      // deployer sent them; absent is never stored as zeros.
+      ...(data.ciTimings ? { ciTimings: this.toFirestoreValue(data.ciTimings) } : {}),
     };
 
     console.log('[FIRESTORE] createBuild writing build doc', {
@@ -152,6 +155,7 @@ export class FirestoreServiceWorker implements FirestoreService {
       status: 'active',
       createdAt: now,
       createdBy: this.config.serviceAccountId,
+      ...(data.ciTimings ? { ciTimings: data.ciTimings } : {}),
     };
   }
 
@@ -354,6 +358,31 @@ export class FirestoreServiceWorker implements FirestoreService {
   }
 
   /**
+   * Finds a build by its build number. A single-field equality filter, so no
+   * composite index is needed.
+   */
+  async getBuildByNumber(
+    projectId: string,
+    buildNumber: number
+  ): Promise<Build | null> {
+    const token = await this.getAccessToken();
+    const structuredQuery = {
+      from: [{ collectionId: 'builds' }],
+      where: {
+        fieldFilter: {
+          field: { fieldPath: 'buildNumber' },
+          op: 'EQUAL',
+          value: { integerValue: String(buildNumber) },
+        },
+      },
+      limit: 1,
+    };
+    const docs = await this.queryDocuments(`projects/${projectId}`, structuredQuery, token);
+    if (docs.length === 0) return null;
+    return this.convertDocToBuild(docs[0].name.split('/').pop()!, docs[0].fields);
+  }
+
+  /**
    * Updates a build record
    */
   async updateBuild(
@@ -373,6 +402,7 @@ export class FirestoreServiceWorker implements FirestoreService {
     if (updates.processingStatus) fields.processingStatus = { stringValue: updates.processingStatus };
     if (updates.commitSha) fields.commitSha = { stringValue: updates.commitSha };
     if (updates.branch) fields.branch = { stringValue: updates.branch };
+    if (updates.ciTimings) fields.ciTimings = this.toFirestoreValue(updates.ciTimings);
 
     await this.patchDocument(buildPath, fields, token);
   }
@@ -775,6 +805,7 @@ export class FirestoreServiceWorker implements FirestoreService {
       processingStatus: fields.processingStatus?.stringValue,
       ...(fields.uploadedByKeyId?.stringValue ? { uploadedByKeyId: fields.uploadedByKeyId.stringValue } : {}),
       ...(fields.uploadedByKeyProject?.stringValue ? { uploadedByKeyProject: fields.uploadedByKeyProject.stringValue } : {}),
+      ...(fields.ciTimings ? { ciTimings: this.fromFirestoreValue(fields.ciTimings) as any } : {}),
     };
   }
 

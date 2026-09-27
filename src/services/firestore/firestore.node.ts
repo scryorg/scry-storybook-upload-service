@@ -64,6 +64,8 @@ export class FirestoreServiceNode implements FirestoreService {
         ...(data.branch ? { branch: data.branch } : {}),
         ...(data.uploadedByKeyId ? { uploadedByKeyId: data.uploadedByKeyId } : {}),
         ...(data.uploadedByKeyProject ? { uploadedByKeyProject: data.uploadedByKeyProject } : {}),
+        // CI timings (storybook-preview-ci-runtime); absent when not sent.
+        ...(data.ciTimings ? { ciTimings: data.ciTimings } : {}),
       };
 
       transaction.set(buildRef, buildData);
@@ -81,6 +83,7 @@ export class FirestoreServiceNode implements FirestoreService {
         createdAt: new Date(),
         createdBy: this.serviceAccountId,
         coverage: data.coverage,
+        ...(data.ciTimings ? { ciTimings: data.ciTimings } : {}),
       };
     });
   }
@@ -186,6 +189,23 @@ export class FirestoreServiceNode implements FirestoreService {
       return null;
     }
 
+    const doc = snapshot.docs[0];
+    return this.convertDocToBuild(doc.id, doc.data());
+  }
+
+  /**
+   * Finds a build by its build number (unique per project).
+   */
+  async getBuildByNumber(
+    projectId: string,
+    buildNumber: number
+  ): Promise<Build | null> {
+    const snapshot = await this.db
+      .collection(`projects/${projectId}/builds`)
+      .where('buildNumber', '==', buildNumber)
+      .limit(1)
+      .get();
+    if (snapshot.empty) return null;
     const doc = snapshot.docs[0];
     return this.convertDocToBuild(doc.id, doc.data());
   }
@@ -372,6 +392,7 @@ export class FirestoreServiceNode implements FirestoreService {
       processingStatus: data.processingStatus,
       ...(data.uploadedByKeyId ? { uploadedByKeyId: data.uploadedByKeyId } : {}),
       ...(data.uploadedByKeyProject ? { uploadedByKeyProject: data.uploadedByKeyProject } : {}),
+      ...(data.ciTimings ? { ciTimings: data.ciTimings } : {}),
     };
   }
 }
