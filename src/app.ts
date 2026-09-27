@@ -20,6 +20,7 @@ import type { ApiKeyService } from './services/apikey/apikey.service.js';
 import { apiKeyAuth, type AuthVariables } from './middleware/auth.js';
 import { extractGitContext, normalizeCoverageInput } from './coverage/coverage.js';
 import { parseMultipartFormData } from './utils/multipart.js';
+import { ciEventFields, mergeCiTimings, parseCiTimings, type CiTimings, type CiTimingsParse } from './ci-timings/ci-timings.js';
 
 // Define the application's environment, including injectable variables.
 export type AppEnv = {
@@ -58,6 +59,29 @@ app.use('/upload-images/:project/*', apiKeyAuth());
 function uploadedBy(key: AuthVariables['authenticatedApiKey']): Pick<CreateBuildData, 'uploadedByKeyId' | 'uploadedByKeyProject'> {
   if (!key) return {};
   return { uploadedByKeyId: key.id, uploadedByKeyProject: key.keyProjectId };
+}
+
+/**
+ * One log line per build-creating upload saying whether CI timings came with it
+ * (storybook-preview-ci-runtime). `ci_timings_absent=1` / `ci_timings_invalid=1`
+ * are the counters: an older deployer sends none, which is expected and counted,
+ * never stored as zeros; an invalid block is counted at warn with its paths.
+ */
+function logCiTimings(
+  route: string,
+  ids: { project: string; version: string; buildNumber?: number },
+  parsed: CiTimingsParse
+): void {
+  const where = `route=${route} project=${ids.project} version=${ids.version} build=${ids.buildNumber ?? 'none'}`;
+  if (parsed.status === 'ok') {
+    console.log(`[INFO] ci_timings ${where} ci_timings=stored fields=${Object.keys(parsed.ciTimings).join(',')}`);
+  } else if (parsed.status === 'absent') {
+    console.log(`[INFO] ci_timings ${where} ci_timings=absent ci_timings_absent=1`);
+  } else {
+    console.warn(
+      `[WARN] ci_timings ${where} ci_timings=invalid ci_timings_invalid=1 not stored; build unaffected: ${parsed.issues.join('; ')}`
+    );
+  }
 }
 
 const PROJECT_SEGMENT_REGEX = /^[a-zA-Z0-9_-]+$/;
@@ -292,6 +316,8 @@ app.openapi(uploadRoute, async (c) => {
     let file: File;
     let coveragePayload: unknown | undefined;
     let coverageUrl: string | undefined;
+    // Optional `ciTimings` form field (JSON), same contract as the presigned body.
+    let ciTimingsRaw: string | undefined;
 
     const contentType = c.req.header('content-type') || '';
     console.log(`[INFO] Upload content-type: ${contentType || 'unknown'}`);
@@ -309,6 +335,8 @@ app.openapi(uploadRoute, async (c) => {
 
         const coverageFile = formData.get('coverage') as File | null;
         const coverageJson = formData.get('coverageJson') as string | null;
+        const ciTimingsField = formData.get('ciTimings');
+        if (typeof ciTimingsField === 'string') ciTimingsRaw = ciTimingsField;
 
         if (coverageFile) {
           const text = await coverageFile.text();
@@ -341,6 +369,7 @@ app.openapi(uploadRoute, async (c) => {
 
           const coverageFile = parsed.files.coverage;
           const coverageJson = parsed.fields.coverageJson;
+          if (typeof parsed.fields.ciTimings === 'string') ciTimingsRaw = parsed.fields.ciTimings;
 
           if (coverageFile) {
             const text = await coverageFile.text();
@@ -417,11 +446,21 @@ app.openapi(uploadRoute, async (c) => {
     let buildNumber: number | undefined;
     
     if (firestore) {
+      let ciParsed: CiTimingsParse = { status: 'absent' };
+      if (ciTimingsRaw !== undefined) {
+        try {
+          ciParsed = parseCiTimings(JSON.parse(ciTimingsRaw));
+        } catch {
+          ciParsed = { status: 'invalid', issues: ['ciTimings: not JSON'] };
+        }
+      }
+      const ciTimings = ciParsed.status === 'ok' ? ciParsed.ciTimings : undefined;
       try {
         const buildData: CreateBuildData = {
           versionId: version,
           zipUrl: result.url,
           ...uploadedBy(c.var.authenticatedApiKey),
+          ...(ciTimings ? { ciTimings } : {}),
           ...(coveragePayload && coverageUrl
             ? {
                 coverage: normalizeCoverageInput(coveragePayload, {
@@ -440,6 +479,7 @@ app.openapi(uploadRoute, async (c) => {
         buildId = build.id;
         buildNumber = build.buildNumber;
         console.log(`[INFO] Build created: id=${buildId}, number=${buildNumber}`);
+        logCiTimings('upload', { project, version, buildNumber }, ciParsed);
 
         // Opens the funnel (playbook §5.5): uploaded -> processed -> indexed ->
         // searched. Not awaited, and trackEvent swallows its own errors — an
@@ -449,6 +489,7 @@ app.openapi(uploadRoute, async (c) => {
           buildId,
           buildNumber,
           versionId: version,
+          ...ciEventFields(ciTimings),
         });
 
         // Enqueue build for async processing (LLM inspection, embeddings, vector DB)
@@ -874,6 +915,124 @@ app.openapi(metadataUploadRoute, async (c) => {
   }
 });
 
+/**
+ * CI timings: the deployer's final record (storybook-preview-ci-runtime, ISSUES.md #54).
+ *
+ * The presigned-URL call stores the pre-upload part (analyze, execute, archive,
+ * counts, versions, runner, CI ids, budget) when it creates the build; this
+ * route merges what is only known after the metadata ZIP (uploadMs,
+ * deployerTotalMs, jobElapsedMs / jobTimeSource / jobTimeReason).
+ *
+ * Auth is the '/upload/*' API-key middleware, like every other upload route:
+ * the key must belong to :project. The build must exist in that project with
+ * that version, else 404. Idempotent: the same record twice leaves the same
+ * document. A 404 from a service without this route is expected by the
+ * deployer (it logs "not stored" and carries on).
+ */
+const CiTimingsParamsSchema = ProjectVersionParamsSchema.extend({
+  buildNumber: z
+    .string()
+    .regex(/^[1-9]\d{0,8}$/, 'buildNumber must be a positive integer')
+    .openapi({ example: '42' }),
+});
+
+const CiTimingsResponseSchema = z.object({
+  success: z.boolean(),
+  buildId: z.string(),
+  buildNumber: z.number(),
+  stored: z.array(z.string()),
+});
+
+const ciTimingsRoute = createRoute({
+  method: 'post',
+  path: '/upload/:project/:version/builds/:buildNumber/ci-timings',
+  request: {
+    params: CiTimingsParamsSchema,
+  },
+  responses: {
+    200: {
+      description: 'CI timings merged into the build document',
+      content: { 'application/json': { schema: CiTimingsResponseSchema } },
+    },
+    400: {
+      description: 'Body is not a valid ciTimings record (the error names the paths)',
+      content: { 'application/json': { schema: ErrorResponseSchema } },
+    },
+    401: {
+      description: 'Unauthorized',
+      content: { 'application/json': { schema: AuthErrorResponseSchema } },
+    },
+    403: {
+      description: 'API key does not belong to the requested project',
+      content: { 'application/json': { schema: AuthErrorResponseSchema } },
+    },
+    404: {
+      description: 'No build with that number for this project and version',
+      content: { 'application/json': { schema: ErrorResponseSchema } },
+    },
+    500: {
+      description: 'Internal server error',
+      content: { 'application/json': { schema: ErrorResponseSchema } },
+    },
+  },
+});
+
+app.openapi(ciTimingsRoute, async (c) => {
+  const { project, version, buildNumber: buildNumberParam } = c.req.valid('param');
+  const buildNumber = Number(buildNumberParam);
+  const firestore = c.var.firestore;
+
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Body must be JSON: {"ciTimings": {...}}' }, 400);
+  }
+  // Accept {ciTimings: {...}} (the presigned body's key) or the bare record.
+  const record =
+    body && typeof body === 'object' && !Array.isArray(body) && 'ciTimings' in (body as object)
+      ? (body as { ciTimings: unknown }).ciTimings
+      : body;
+  const parsed = parseCiTimings(record);
+  if (parsed.status === 'invalid') {
+    console.warn(
+      `[WARN] ci_timings route=ci-timings project=${project} version=${version} build=${buildNumber} ci_timings_invalid=1: ${parsed.issues.join('; ')}`
+    );
+    return c.json({ error: `Invalid ciTimings: ${parsed.issues.join('; ')}` }, 400);
+  }
+  if (parsed.status === 'absent') {
+    return c.json({ error: 'No ciTimings fields to store' }, 400);
+  }
+
+  if (!firestore || !firestore.getBuildByNumber) {
+    return c.json({ error: 'Firestore not configured' }, 500);
+  }
+
+  try {
+    const build = await firestore.getBuildByNumber(project, buildNumber);
+    if (!build || build.versionId !== version) {
+      return c.json({ error: 'Build not found for this project, version and build number' }, 404);
+    }
+
+    const merged = mergeCiTimings(build.ciTimings, parsed.ciTimings);
+    await firestore.updateBuild(project, build.id, { ciTimings: merged });
+    console.log(
+      `[INFO] ci_timings route=ci-timings project=${project} version=${version} build=${buildNumber} ci_timings=merged fields=${Object.keys(parsed.ciTimings).join(',')}`
+    );
+
+    return c.json(
+      { success: true, buildId: build.id, buildNumber, stored: Object.keys(parsed.ciTimings) },
+      200
+    );
+  } catch (error) {
+    console.error('CI timings error:', error);
+    return c.json(
+      { error: `CI timings failed: ${error instanceof Error ? error.message : 'Unknown error'}` },
+      500
+    );
+  }
+});
+
 // File retrieval route
 const retrievalRoute = createRoute({
   method: 'get',
@@ -930,7 +1089,12 @@ const presignedUrlRoute = createRoute({
       content: {
         'application/json': {
           schema: z.object({
-            contentType: z.string().optional()
+            contentType: z.string().optional(),
+            // Validated in the handler, not here: an invalid block must not
+            // fail the upload, only go unstored (and counted).
+            ciTimings: z.unknown().optional().openapi({
+              description: 'Pre-upload CI timings from the deployer (storybook-preview-ci-runtime). Optional; stored on the build as ciTimings.',
+            }),
           })
         }
       }
@@ -970,10 +1134,12 @@ app.openapi(presignedUrlRoute, async (c) => {
   const { project, version, filename } = c.req.valid('param');
   
   let contentType = 'application/octet-stream';
+  let ciTimingsInput: unknown;
   
   try {
     const body = await c.req.json();
     contentType = body.contentType || contentType;
+    ciTimingsInput = body?.ciTimings;
   } catch (e) {
     // If no JSON body, use default content type
   }
@@ -996,16 +1162,21 @@ app.openapi(presignedUrlRoute, async (c) => {
       // Construct the URL that will be available after upload
       const zipUrl = data.url.split('?')[0]; // Remove query parameters to get the base URL
       
+      const ciParsed = parseCiTimings(ciTimingsInput);
+      const ciTimings: CiTimings | undefined = ciParsed.status === 'ok' ? ciParsed.ciTimings : undefined;
+
       console.log(`[INFO] Creating build for presigned upload: project=${project}, version=${version}, zipUrl=${zipUrl}`);
       const build = await firestore.createBuild(project, {
         versionId: version,
         zipUrl: zipUrl,
         ...uploadedBy(c.var.authenticatedApiKey),
+        ...(ciTimings ? { ciTimings } : {}),
       });
       buildId = build.id;
       buildNumber = build.buildNumber;
       
       console.log(`[INFO] Build record created for presigned upload: ID=${buildId}, Number=${buildNumber}`);
+      logCiTimings('presigned-url', { project, version, buildNumber }, ciParsed);
 
       // Opens the funnel (playbook §5.5). This is the route the deployer
       // actually uses — the emitter was first added only to POST /upload, a
@@ -1018,6 +1189,7 @@ app.openapi(presignedUrlRoute, async (c) => {
         buildId,
         buildNumber,
         versionId: version,
+        ...ciEventFields(ciTimings),
       });
     } catch (firestoreError) {
       // Log error but don't fail the presigned URL generation

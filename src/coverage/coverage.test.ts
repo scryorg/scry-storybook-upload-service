@@ -126,3 +126,65 @@ describe('extractGitContext()', () => {
     expect(extractGitContext({ git: { branch: 'main' } })).toEqual({ branch: 'main' });
   });
 });
+
+// storybook-preview-ci-runtime: sbcov's report has always carried how long
+// execution took; the normaliser dropped it, so builds from deployer 0.7.x
+// recorded no execute time at all.
+describe('normalizeCoverageInput() coverage.execution', () => {
+  const base = {
+    summary: {
+      componentCoverage: 0.9,
+      propCoverage: 0.8,
+      variantCoverage: 0.7,
+      passRate: 0.95,
+      totalComponents: 100,
+      componentsWithStories: 80,
+      failingStories: 2,
+    },
+    qualityGate: { passed: true, checks: [] },
+    generatedAt: '2026-09-27T00:00:00.000Z',
+  };
+  const opts = { reportUrl: 'https://r2.example/coverage-report.json' };
+
+  it('regression-storybook-preview-ci-runtime: keeps execution.summary as coverage.execution', () => {
+    const normalized = normalizeCoverageInput(
+      {
+        ...base,
+        execution: {
+          executed: true,
+          executedAt: '2026-09-27T00:00:00.000Z',
+          summary: { total: 461, passed: 417, failed: 44, skipped: 0, duration: 1_064_000, declared: 461, notIndexed: 44 },
+          stories: [],
+        },
+      },
+      opts
+    );
+    expect(normalized.execution).toEqual({
+      durationMs: 1_064_000,
+      total: 461,
+      passed: 417,
+      failed: 44,
+      notIndexed: 44,
+    });
+  });
+
+  it('prefers durationMs when a newer sbcov sends it', () => {
+    const normalized = normalizeCoverageInput(
+      { ...base, execution: { summary: { total: 1, passed: 1, failed: 0, duration: 5, durationMs: 212_000 } } },
+      opts
+    );
+    expect(normalized.execution?.durationMs).toBe(212_000);
+  });
+
+  it('guarantee-7 absent-not-zero: no execution in the report means no coverage.execution, and missing members stay missing', () => {
+    expect('execution' in normalizeCoverageInput(base, opts)).toBe(false);
+    expect('execution' in normalizeCoverageInput({ ...base, execution: null }, opts)).toBe(false);
+    expect('execution' in normalizeCoverageInput({ ...base, execution: { executed: false } }, opts)).toBe(false);
+
+    const partial = normalizeCoverageInput(
+      { ...base, execution: { summary: { total: 3, passed: 3, failed: 0, duration: -1, notIndexed: 'x' } } },
+      opts
+    );
+    expect(partial.execution).toEqual({ total: 3, passed: 3, failed: 0 });
+  });
+});

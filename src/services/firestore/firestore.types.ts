@@ -1,3 +1,7 @@
+import type { CiTimings } from '../../ci-timings/ci-timings.js';
+
+export type { CiTimings };
+
 /**
  * Represents the status of a build in the system
  */
@@ -60,6 +64,20 @@ export interface BuildCoverage {
    * ISO timestamp when the report was generated.
    */
   generatedAt: string;
+
+  /**
+   * sbcov's own execution summary (storybook-preview-ci-runtime). Absent when
+   * the report had none; members sbcov did not send are absent, never 0.
+   */
+  execution?: CoverageExecution;
+}
+
+export interface CoverageExecution {
+  durationMs?: number;
+  total?: number;
+  passed?: number;
+  failed?: number;
+  notIndexed?: number;
 }
 
 /**
@@ -150,6 +168,12 @@ export interface Build {
    */
   uploadedByKeyId?: string;
   uploadedByKeyProject?: string;
+
+  /**
+   * How much CI time the deploy took, as the deployer measured it
+   * (storybook-preview-ci-runtime). Absent when the deployer sent none.
+   */
+  ciTimings?: CiTimings;
 }
 
 /**
@@ -188,6 +212,12 @@ export interface CreateBuildData {
    */
   uploadedByKeyId?: string;
   uploadedByKeyProject?: string;
+
+  /**
+   * How much CI time the deploy took, as the deployer measured it
+   * (storybook-preview-ci-runtime). Absent when the deployer sent none.
+   */
+  ciTimings?: CiTimings;
 }
 
 // ============= UPLOAD TYPES =============
@@ -258,4 +288,10 @@ export interface UpdateBuildData {
 
   /** Branch the build was produced from (P13a). */
   branch?: string;
+
+  /**
+   * How much CI time the deploy took, as the deployer measured it
+   * (storybook-preview-ci-runtime). Absent when the deployer sent none.
+   */
+  ciTimings?: CiTimings;
 }

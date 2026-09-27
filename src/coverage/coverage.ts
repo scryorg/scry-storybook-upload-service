@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { BuildCoverage, CoverageSummary, QualityGateResult } from '../services/firestore/firestore.types.js';
+import type { BuildCoverage, CoverageExecution, CoverageSummary, QualityGateResult } from '../services/firestore/firestore.types.js';
 
 /**
  * A normalized summary we store on Firestore build documents.
@@ -129,6 +129,38 @@ export function extractGitContext(input: unknown): BuildGitContext {
 }
 
 /**
+ * sbcov's own execution summary, kept as `coverage.execution`
+ * (storybook-preview-ci-runtime, ISSUES.md #54).
+ *
+ * The report has always said how long story execution took
+ * (`execution.summary.duration`, ms) and how it went; the normaliser dropped it,
+ * so a build from deployer 0.7.x recorded no execute time anywhere. Each member
+ * is kept only when it is a finite non-negative number; the whole block is
+ * absent when the report ran no execution. Never a made-up 0.
+ */
+export function extractCoverageExecution(input: unknown): CoverageExecution | undefined {
+  const execution = (input as Record<string, any> | null | undefined)?.execution;
+  if (!execution || typeof execution !== 'object') return undefined;
+  const summary = execution.summary;
+  if (!summary || typeof summary !== 'object') return undefined;
+
+  const num = (value: unknown): number | undefined =>
+    typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
+
+  const picked: CoverageExecution = {
+    durationMs: num(summary.durationMs) ?? num(summary.duration),
+    total: num(summary.total),
+    passed: num(summary.passed),
+    failed: num(summary.failed),
+    notIndexed: num(summary.notIndexed),
+  };
+  const kept = Object.fromEntries(
+    Object.entries(picked).filter(([, v]) => v !== undefined)
+  ) as CoverageExecution;
+  return Object.keys(kept).length > 0 ? kept : undefined;
+}
+
+/**
  * Normalize multiple client coverage payload shapes into the stable Firestore shape.
  */
 export function normalizeCoverageInput(input: unknown, options: NormalizeCoverageOptions): BuildCoverage {
@@ -151,10 +183,13 @@ export function normalizeCoverageInput(input: unknown, options: NormalizeCoverag
 
   const qualityGate: QualityGateResult = anyParsed.qualityGate;
 
+  const execution = extractCoverageExecution(input);
+
   return {
     reportUrl: options.reportUrl,
     summary,
     qualityGate,
     generatedAt: anyParsed.generatedAt,
+    ...(execution ? { execution } : {}),
   };
 }
