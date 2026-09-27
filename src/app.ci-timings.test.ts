@@ -63,7 +63,6 @@ function createFirestore(overrides: Partial<FirestoreService> = {}): FirestoreSe
     getProjectBuilds: vi.fn(async () => []),
     getBuildByVersion: vi.fn(async () => null),
     getLatestBuild: vi.fn(async () => null),
-    getBuildByNumber: vi.fn(async () => null),
     updateBuild: vi.fn(async () => undefined),
     updateBuildCoverage: vi.fn(async () => undefined),
     archiveBuild: vi.fn(async () => undefined),
@@ -185,28 +184,58 @@ describe('regression-storybook-preview-ci-runtime: CI timings stored with the up
     expect('ciStoryCount' in event).toBe(false);
   });
 
-  it('guarantee-7 bad values rejected: a negative, a >24 h and an oversized string are not stored; the build is still created and the drop is counted', async () => {
-    for (const bad of [
-      { executeMs: -1 },
-      { executeMs: 24 * 60 * 60 * 1000 },
-      { executeMs: Number.NaN },
-      { executeMs: '212000' },
-      { sbcovVersion: 'x'.repeat(200) },
-      { runner: 'my-laptop' },
-      { stories: { declared: 1.5 } },
-      { ci: { runId: 'a b c; drop' } },
-      { failedTimeShare: 1.2 },
-      { failedTimeShare: -0.1 },
-      { concurrency: 0 },
-      { concurrency: 65 },
-      { concurrency: 2.5 },
-    ]) {
+  it('guarantee-7 bad values dropped field by field: each out-of-bounds leaf is dropped and counted, the rest of the record is stored, the build is still created', async () => {
+    const cases: Array<[Record<string, unknown>, (t: any) => void]> = [
+      [{ executeMs: -1 }, (t) => expect('executeMs' in t).toBe(false)],
+      [{ executeMs: 24 * 60 * 60 * 1000 }, (t) => expect('executeMs' in t).toBe(false)],
+      [{ executeMs: Number.NaN }, (t) => expect('executeMs' in t).toBe(false)],
+      [{ executeMs: '212000' }, (t) => expect('executeMs' in t).toBe(false)],
+      [{ sbcovVersion: 'x'.repeat(200) }, (t) => expect('sbcovVersion' in t).toBe(false)],
+      [{ runner: 'my-laptop' }, (t) => expect('runner' in t).toBe(false)],
+      [{ stories: { ...PRE_UPLOAD.stories, declared: 1.5 } }, (t) => expect(t.stories).toEqual({ passed: 457, failed: 4, timeouts: 0, notIndexed: 4 })],
+      [{ ci: { ...PRE_UPLOAD.ci, runId: 'a b c; drop' } }, (t) => expect(t.ci).toEqual({ provider: 'github', runAttempt: 1, workflow: 'Storybook preview', job: 'deploy' })],
+      [{ ci: { ...PRE_UPLOAD.ci, job: 'deploy\u0000\u001b[31m' } }, (t) => expect('job' in t.ci).toBe(false)],
+      [{ failedTimeShare: 1.2 }, (t) => expect('failedTimeShare' in t).toBe(false)],
+      [{ failedTimeShare: -0.1 }, (t) => expect('failedTimeShare' in t).toBe(false)],
+      [{ concurrency: 0 }, (t) => expect('concurrency' in t).toBe(false)],
+      [{ concurrency: 65 }, (t) => expect('concurrency' in t).toBe(false)],
+      [{ concurrency: 2.5 }, (t) => expect('concurrency' in t).toBe(false)],
+    ];
+    for (const [bad, check] of cases) {
       logSpy.mockClear();
       warnSpy.mockClear();
       const firestore = createFirestore();
       const server = createTestServer({ storage: createStorage(), firestore });
 
       const res = await presign(server, { contentType: 'application/zip', ciTimings: { ...PRE_UPLOAD, ...bad } });
+      expect(res.status, JSON.stringify(bad)).toBe(200);
+      const stored = (firestore.createBuild as any).mock.calls[0][1].ciTimings;
+      expect(stored, JSON.stringify(bad)).toBeDefined();
+      check(stored);
+      // everything else survives
+      expect(stored.analyzeMs, JSON.stringify(bad)).toBe(PRE_UPLOAD.analyzeMs);
+      expect(stored.deployerVersion, JSON.stringify(bad)).toBe('0.8.0');
+      expect(logged(warnSpy), JSON.stringify(bad)).toContain('ci_timings_field_dropped=1');
+    }
+  });
+
+  it('guarantee-7 printable strings are kept: a workflow name with & , \' ( ) # and unicode is stored as sent', async () => {
+    const firestore = createFirestore();
+    const server = createTestServer({ storage: createStorage(), firestore });
+    const ci = { ...PRE_UPLOAD.ci, workflow: "Build & test, it's #1 (preview) — ünïcode", job: 'deploy [macOS]' };
+
+    await presign(server, { contentType: 'application/zip', ciTimings: { ...PRE_UPLOAD, ci } });
+    const stored = (firestore.createBuild as any).mock.calls[0][1].ciTimings;
+    expect(stored.ci).toEqual(ci);
+    expect(logged(warnSpy)).not.toContain('ci_timings_field_dropped');
+  });
+
+  it('guarantee-7 structural problems reject the whole record: not stored, counted invalid, build still created', async () => {
+    for (const bad of ['a string', [1, 2], 42, { stories: 5 }, { ci: 'github' }, { timeLostMs: [1] }]) {
+      warnSpy.mockClear();
+      const firestore = createFirestore();
+      const server = createTestServer({ storage: createStorage(), firestore });
+      const res = await presign(server, { contentType: 'application/zip', ciTimings: bad });
       expect(res.status, JSON.stringify(bad)).toBe(200);
       const data = (firestore.createBuild as any).mock.calls[0][1];
       expect('ciTimings' in data, JSON.stringify(bad)).toBe(false);
@@ -242,14 +271,14 @@ describe('regression-storybook-preview-ci-runtime: CI timings stored with the up
   });
 });
 
-describe('POST /upload/:project/:version/builds/:buildNumber/ci-timings', () => {
+describe('POST /upload/:project/:version/builds/:buildId/ci-timings', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     vi.spyOn(console, 'log').mockImplementation(() => undefined);
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
   });
 
-  const url = '/upload/my-proj/pr-123/builds/7/ci-timings';
+  const url = '/upload/my-proj/pr-123/builds/build-7/ci-timings';
   const post = (server: ReturnType<typeof createTestServer>, body: unknown, headers: Record<string, string> = {}, path = url) =>
     server.request(path, {
       method: 'POST',
@@ -259,7 +288,7 @@ describe('POST /upload/:project/:version/builds/:buildNumber/ci-timings', () => 
 
   it('merges the final record into the build ciTimings', async () => {
     const build = makeBuild({ ciTimings: PRE_UPLOAD as any });
-    const firestore = createFirestore({ getBuildByNumber: vi.fn(async () => build) });
+    const firestore = createFirestore({ getBuild: vi.fn(async () => build) });
     const server = createTestServer({ storage: createStorage(), firestore });
 
     const res = await post(server, { ciTimings: FINAL });
@@ -267,7 +296,7 @@ describe('POST /upload/:project/:version/builds/:buildNumber/ci-timings', () => 
     const body = await res.json();
     expect(body.buildId).toBe('build-7');
 
-    expect(firestore.getBuildByNumber).toHaveBeenCalledWith('my-proj', 7);
+    expect(firestore.getBuild).toHaveBeenCalledWith('my-proj', 'build-7');
     expect(firestore.updateBuild).toHaveBeenCalledWith('my-proj', 'build-7', {
       ciTimings: { ...PRE_UPLOAD, ...FINAL },
     });
@@ -276,7 +305,7 @@ describe('POST /upload/:project/:version/builds/:buildNumber/ci-timings', () => 
   it('accepts the record as the bare body too, and is idempotent', async () => {
     let doc = makeBuild({ ciTimings: PRE_UPLOAD as any });
     const firestore = createFirestore({
-      getBuildByNumber: vi.fn(async () => doc),
+      getBuild: vi.fn(async () => doc),
       updateBuild: vi.fn(async (_p: string, _b: string, u: any) => {
         doc = { ...doc, ...u };
       }),
@@ -292,7 +321,7 @@ describe('POST /upload/:project/:version/builds/:buildNumber/ci-timings', () => 
 
   it('merges nested blocks rather than replacing them', async () => {
     const build = makeBuild({ ciTimings: { stories: { declared: 461 }, ci: { runId: '1' } } as any });
-    const firestore = createFirestore({ getBuildByNumber: vi.fn(async () => build) });
+    const firestore = createFirestore({ getBuild: vi.fn(async () => build) });
     const server = createTestServer({ storage: createStorage(), firestore });
 
     await post(server, { ciTimings: { stories: { passed: 457 }, ci: { runAttempt: 2 } } });
@@ -302,20 +331,37 @@ describe('POST /upload/:project/:version/builds/:buildNumber/ci-timings', () => 
     });
   });
 
-  it('guarantee-7 bad values rejected: 400 with the issue paths, nothing written', async () => {
-    const firestore = createFirestore({ getBuildByNumber: vi.fn(async () => makeBuild()) });
+  it('guarantee-7 a bad field is dropped and counted, the rest is merged, and the response names what was dropped', async () => {
+    const build = makeBuild({ ciTimings: PRE_UPLOAD as any });
+    const firestore = createFirestore({ getBuild: vi.fn(async () => build) });
     const server = createTestServer({ storage: createStorage(), firestore });
 
-    const res = await post(server, { ciTimings: { uploadMs: -3, jobTimeSource: 'guess' } });
-    expect(res.status).toBe(400);
+    const res = await post(server, { ciTimings: { ...FINAL, uploadMs: -3, jobTimeSource: 'guess' } });
+    expect(res.status).toBe(200);
     const body = await res.json();
+    expect(body.dropped).toEqual(['ciTimings.uploadMs', 'ciTimings.jobTimeSource']);
+    const merged = (firestore.updateBuild as any).mock.calls[0][2].ciTimings;
+    expect(merged.uploadMs).toBeUndefined();
+    expect(merged.jobTimeSource).toBeUndefined();
+    expect(merged.deployerTotalMs).toBe(FINAL.deployerTotalMs);
+  });
+
+  it('guarantee-7 400 with the paths when nothing storable is left or the shape is wrong; nothing written', async () => {
+    const firestore = createFirestore({ getBuild: vi.fn(async () => makeBuild()) });
+    const server = createTestServer({ storage: createStorage(), firestore });
+
+    const allBad = await post(server, { ciTimings: { uploadMs: -3, jobTimeSource: 'guess' } });
+    expect(allBad.status).toBe(400);
+    const body = await allBad.json();
     expect(body.error).toContain('uploadMs');
     expect(body.error).toContain('jobTimeSource');
+
+    expect((await post(server, { ciTimings: { stories: 5 } })).status).toBe(400);
     expect(firestore.updateBuild).not.toHaveBeenCalled();
   });
 
   it('rejects a body that is not an object or is empty', async () => {
-    const firestore = createFirestore({ getBuildByNumber: vi.fn(async () => makeBuild()) });
+    const firestore = createFirestore({ getBuild: vi.fn(async () => makeBuild()) });
     const server = createTestServer({ storage: createStorage(), firestore });
 
     expect((await post(server, [1, 2])).status).toBe(400);
@@ -323,8 +369,8 @@ describe('POST /upload/:project/:version/builds/:buildNumber/ci-timings', () => 
     expect(firestore.updateBuild).not.toHaveBeenCalled();
   });
 
-  it('404 when the build number does not exist for the project', async () => {
-    const firestore = createFirestore({ getBuildByNumber: vi.fn(async () => null) });
+  it('404 when the build id does not exist in the project', async () => {
+    const firestore = createFirestore({ getBuild: vi.fn(async () => null) });
     const server = createTestServer({ storage: createStorage(), firestore });
 
     const res = await post(server, { ciTimings: FINAL });
@@ -332,9 +378,9 @@ describe('POST /upload/:project/:version/builds/:buildNumber/ci-timings', () => 
     expect(firestore.updateBuild).not.toHaveBeenCalled();
   });
 
-  it('404 when the build number belongs to another version of the project', async () => {
+  it('404 when the build belongs to another version of the project', async () => {
     const firestore = createFirestore({
-      getBuildByNumber: vi.fn(async () => makeBuild({ versionId: 'main' })),
+      getBuild: vi.fn(async () => makeBuild({ versionId: 'main' })),
     });
     const server = createTestServer({ storage: createStorage(), firestore });
 
@@ -343,11 +389,35 @@ describe('POST /upload/:project/:version/builds/:buildNumber/ci-timings', () => 
     expect(firestore.updateBuild).not.toHaveBeenCalled();
   });
 
-  it('400 on a non-numeric build number', async () => {
+  it('404 when the build document names a different project', async () => {
+    const firestore = createFirestore({ getBuild: vi.fn(async () => makeBuild({ projectId: 'other-proj' })) });
+    const server = createTestServer({ storage: createStorage(), firestore });
+    const res = await post(server, { ciTimings: FINAL });
+    expect(res.status).toBe(404);
+    expect(firestore.updateBuild).not.toHaveBeenCalled();
+  });
+
+  it('400 on a build id with unsafe characters (no Firestore path traversal)', async () => {
     const firestore = createFirestore();
     const server = createTestServer({ storage: createStorage(), firestore });
-    const res = await post(server, { ciTimings: FINAL }, {}, '/upload/my-proj/pr-123/builds/abc/ci-timings');
-    expect(res.status).toBe(400);
+    for (const id of ['a.b', '%2E%2E', 'x%2Fy', 'a'.repeat(129)]) {
+      const res = await post(server, { ciTimings: FINAL }, {}, `/upload/my-proj/pr-123/builds/${id}/ci-timings`);
+      expect([400, 404], id).toContain(res.status);
+    }
+    expect(firestore.getBuild).not.toHaveBeenCalled();
+  });
+
+  it('the presigned and direct upload responses both return buildId for this route', async () => {
+    const firestore = createFirestore();
+    const server = createTestServer({ storage: createStorage(), firestore });
+    const presigned = await (await server.request('/presigned-url/my-proj/pr-123/storybook.zip', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ contentType: 'application/zip' }),
+    })).json();
+    expect(presigned.buildId).toBe('build-7');
+    const direct = await (await server.request('/upload/my-proj/pr-123', {
+      method: 'POST', headers: { 'Content-Type': 'application/zip' }, body: new Uint8Array([1, 2, 3]),
+    })).json();
+    expect(direct.data.buildId).toBe('build-7');
   });
 
   describe('auth (same as the other upload routes)', () => {
@@ -364,7 +434,7 @@ describe('POST /upload/:project/:version/builds/:buildNumber/ci-timings', () => 
     };
 
     it('401 without an API key', async () => {
-      const firestore = createFirestore({ getBuildByNumber: vi.fn(async () => makeBuild()) });
+      const firestore = createFirestore({ getBuild: vi.fn(async () => makeBuild()) });
       const server = createTestServer({ storage: createStorage(), firestore, apiKeyService });
       const res = await post(server, { ciTimings: FINAL });
       expect(res.status).toBe(401);
@@ -372,16 +442,16 @@ describe('POST /upload/:project/:version/builds/:buildNumber/ci-timings', () => 
     });
 
     it("403 with another project's key, nothing read or written", async () => {
-      const firestore = createFirestore({ getBuildByNumber: vi.fn(async () => makeBuild()) });
+      const firestore = createFirestore({ getBuild: vi.fn(async () => makeBuild()) });
       const server = createTestServer({ storage: createStorage(), firestore, apiKeyService });
       const res = await post(server, { ciTimings: FINAL }, { 'X-API-Key': 'scry_proj_other-proj_abcdef' });
       expect(res.status).toBe(403);
-      expect(firestore.getBuildByNumber).not.toHaveBeenCalled();
+      expect(firestore.getBuild).not.toHaveBeenCalled();
       expect(firestore.updateBuild).not.toHaveBeenCalled();
     });
 
     it("200 with the project's own key", async () => {
-      const firestore = createFirestore({ getBuildByNumber: vi.fn(async () => makeBuild()) });
+      const firestore = createFirestore({ getBuild: vi.fn(async () => makeBuild()) });
       const server = createTestServer({ storage: createStorage(), firestore, apiKeyService });
       const res = await post(server, { ciTimings: FINAL }, { 'X-API-Key': 'scry_proj_my-proj_abcdef' });
       expect(res.status).toBe(200);

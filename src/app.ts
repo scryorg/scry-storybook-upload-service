@@ -65,7 +65,9 @@ function uploadedBy(key: AuthVariables['authenticatedApiKey']): Pick<CreateBuild
  * One log line per build-creating upload saying whether CI timings came with it
  * (storybook-preview-ci-runtime). `ci_timings_absent=1` / `ci_timings_invalid=1`
  * are the counters: an older deployer sends none, which is expected and counted,
- * never stored as zeros; an invalid block is counted at warn with its paths.
+ * never stored as zeros; a structurally invalid block is counted at warn with
+ * its paths. `ci_timings_field_dropped=N` counts single out-of-bounds fields
+ * dropped from an otherwise stored block.
  */
 function logCiTimings(
   route: string,
@@ -75,6 +77,11 @@ function logCiTimings(
   const where = `route=${route} project=${ids.project} version=${ids.version} build=${ids.buildNumber ?? 'none'}`;
   if (parsed.status === 'ok') {
     console.log(`[INFO] ci_timings ${where} ci_timings=stored fields=${Object.keys(parsed.ciTimings).join(',')}`);
+    if (parsed.dropped.length > 0) {
+      console.warn(
+        `[WARN] ci_timings ${where} ci_timings_field_dropped=${parsed.dropped.length} out of bounds, not stored; rest stored: ${parsed.dropped.join(', ')}`
+      );
+    }
   } else if (parsed.status === 'absent') {
     console.log(`[INFO] ci_timings ${where} ci_timings=absent ci_timings_absent=1`);
   } else {
@@ -923,17 +930,21 @@ app.openapi(metadataUploadRoute, async (c) => {
  * route merges what is only known after the metadata ZIP (uploadMs,
  * deployerTotalMs, jobElapsedMs / jobTimeSource / jobTimeReason).
  *
- * Auth is the '/upload/*' API-key middleware, like every other upload route:
- * the key must belong to :project. The build must exist in that project with
+ * Keyed by the buildId the presigned-URL (`buildId`) and direct upload
+ * (`data.buildId`) responses return, not the build number: the per-project
+ * counter is not atomic, so two concurrent uploads can share a number.
+ *
+ * Auth is the upload API-key middleware, like every other upload route: the
+ * key must belong to :project. The build must exist under that project with
  * that version, else 404. Idempotent: the same record twice leaves the same
  * document. A 404 from a service without this route is expected by the
  * deployer (it logs "not stored" and carries on).
  */
 const CiTimingsParamsSchema = ProjectVersionParamsSchema.extend({
-  buildNumber: z
+  buildId: z
     .string()
-    .regex(/^[1-9]\d{0,8}$/, 'buildNumber must be a positive integer')
-    .openapi({ example: '42' }),
+    .regex(/^[A-Za-z0-9_-]{1,128}$/, 'buildId must be a Firestore document id')
+    .openapi({ example: 'q3Xk9TzP0aBcDeFgHiJk' }),
 });
 
 const CiTimingsResponseSchema = z.object({
@@ -941,11 +952,13 @@ const CiTimingsResponseSchema = z.object({
   buildId: z.string(),
   buildNumber: z.number(),
   stored: z.array(z.string()),
+  /** Fields that were out of bounds and not stored (counted as ci_timings_field_dropped). */
+  dropped: z.array(z.string()),
 });
 
 const ciTimingsRoute = createRoute({
   method: 'post',
-  path: '/upload/:project/:version/builds/:buildNumber/ci-timings',
+  path: '/upload/:project/:version/builds/:buildId/ci-timings',
   request: {
     params: CiTimingsParamsSchema,
   },
@@ -955,7 +968,7 @@ const ciTimingsRoute = createRoute({
       content: { 'application/json': { schema: CiTimingsResponseSchema } },
     },
     400: {
-      description: 'Body is not a valid ciTimings record (the error names the paths)',
+      description: 'Body is not a ciTimings record, or nothing in it was storable (the error names the paths)',
       content: { 'application/json': { schema: ErrorResponseSchema } },
     },
     401: {
@@ -967,7 +980,7 @@ const ciTimingsRoute = createRoute({
       content: { 'application/json': { schema: AuthErrorResponseSchema } },
     },
     404: {
-      description: 'No build with that number for this project and version',
+      description: 'No build with that id for this project and version',
       content: { 'application/json': { schema: ErrorResponseSchema } },
     },
     500: {
@@ -978,8 +991,7 @@ const ciTimingsRoute = createRoute({
 });
 
 app.openapi(ciTimingsRoute, async (c) => {
-  const { project, version, buildNumber: buildNumberParam } = c.req.valid('param');
-  const buildNumber = Number(buildNumberParam);
+  const { project, version, buildId } = c.req.valid('param');
   const firestore = c.var.firestore;
 
   let body: unknown;
@@ -996,7 +1008,7 @@ app.openapi(ciTimingsRoute, async (c) => {
   const parsed = parseCiTimings(record);
   if (parsed.status === 'invalid') {
     console.warn(
-      `[WARN] ci_timings route=ci-timings project=${project} version=${version} build=${buildNumber} ci_timings_invalid=1: ${parsed.issues.join('; ')}`
+      `[WARN] ci_timings route=ci-timings project=${project} version=${version} buildId=${buildId} ci_timings_invalid=1: ${parsed.issues.join('; ')}`
     );
     return c.json({ error: `Invalid ciTimings: ${parsed.issues.join('; ')}` }, 400);
   }
@@ -1004,24 +1016,30 @@ app.openapi(ciTimingsRoute, async (c) => {
     return c.json({ error: 'No ciTimings fields to store' }, 400);
   }
 
-  if (!firestore || !firestore.getBuildByNumber) {
+  if (!firestore) {
     return c.json({ error: 'Firestore not configured' }, 500);
   }
 
   try {
-    const build = await firestore.getBuildByNumber(project, buildNumber);
-    if (!build || build.versionId !== version) {
-      return c.json({ error: 'Build not found for this project, version and build number' }, 404);
+    // getBuild reads projects/{project}/builds/{buildId}, so a build of another
+    // project is simply not found; the projectId check is belt and braces.
+    const build = await firestore.getBuild(project, buildId);
+    if (!build || build.versionId !== version || (build.projectId && build.projectId !== project)) {
+      return c.json({ error: 'Build not found for this project, version and build id' }, 404);
     }
 
     const merged = mergeCiTimings(build.ciTimings, parsed.ciTimings);
     await firestore.updateBuild(project, build.id, { ciTimings: merged });
-    console.log(
-      `[INFO] ci_timings route=ci-timings project=${project} version=${version} build=${buildNumber} ci_timings=merged fields=${Object.keys(parsed.ciTimings).join(',')}`
-    );
+    logCiTimings('ci-timings', { project, version, buildNumber: build.buildNumber }, parsed);
 
     return c.json(
-      { success: true, buildId: build.id, buildNumber, stored: Object.keys(parsed.ciTimings) },
+      {
+        success: true,
+        buildId: build.id,
+        buildNumber: build.buildNumber,
+        stored: Object.keys(parsed.ciTimings),
+        dropped: parsed.dropped,
+      },
       200
     );
   } catch (error) {

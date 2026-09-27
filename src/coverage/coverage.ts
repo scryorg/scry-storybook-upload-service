@@ -141,6 +141,9 @@ export function extractGitContext(input: unknown): BuildGitContext {
 export function extractCoverageExecution(input: unknown): CoverageExecution | undefined {
   const execution = (input as Record<string, any> | null | undefined)?.execution;
   if (!execution || typeof execution !== 'object') return undefined;
+  // sbcov writes a zeroed summary when it did not execute; that is "not run",
+  // not "ran in 0 ms", so nothing is recorded.
+  if (execution.executed === false) return undefined;
   const summary = execution.summary;
   if (!summary || typeof summary !== 'object') return undefined;
 
