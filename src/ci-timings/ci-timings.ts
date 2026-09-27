@@ -85,6 +85,10 @@ export const CiTimingsSchema = z.object({
     .optional(),
   budgetMs: Ms.optional(),
   overBudget: z.boolean().optional(),
+  /** Share of execute time spent on stories that failed, 0..1 (the >25% alert check). */
+  failedTimeShare: z.number().finite().min(0).max(1).optional(),
+  /** sbcov worker count the run used. */
+  concurrency: z.number().int().min(1).max(64).optional(),
 });
 
 export type CiTimings = z.infer<typeof CiTimingsSchema>;

@@ -87,6 +87,8 @@ const PRE_UPLOAD = {
   ci: { provider: 'github', runId: '18123456789', runAttempt: 1, workflow: 'Storybook preview', job: 'deploy' },
   budgetMs: 350_500,
   overBudget: false,
+  failedTimeShare: 0.12,
+  concurrency: 4,
 };
 
 /** What it sends after the metadata ZIP. */
@@ -193,6 +195,11 @@ describe('regression-storybook-preview-ci-runtime: CI timings stored with the up
       { runner: 'my-laptop' },
       { stories: { declared: 1.5 } },
       { ci: { runId: 'a b c; drop' } },
+      { failedTimeShare: 1.2 },
+      { failedTimeShare: -0.1 },
+      { concurrency: 0 },
+      { concurrency: 65 },
+      { concurrency: 2.5 },
     ]) {
       logSpy.mockClear();
       warnSpy.mockClear();
