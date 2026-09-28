@@ -21,6 +21,16 @@ function response(status: number, headers: Record<string, string> = {}): Respons
   } as unknown as Response;
 }
 
+/** Same as `response()`, but with a body whose `cancel()` is a spy so a test can assert on it. */
+function responseWithBody(status: number, headers: Record<string, string> = {}) {
+  const cancel = vi.fn().mockResolvedValue(undefined);
+  const res = {
+    ...response(status, headers),
+    body: { cancel },
+  } as unknown as Response;
+  return { res, cancel };
+}
+
 describe('isRetryableFirestoreError (ledger F85/F86)', () => {
   it('retries a thrown/network failure (no response at all)', () => {
     expect(isRetryableFirestoreError(null)).toBe(true);
@@ -59,6 +69,14 @@ describe('parseRetryAfterMs', () => {
     expect(parseRetryAfterMs(null, 4_000)).toBeNull();
     expect(parseRetryAfterMs(undefined, 4_000)).toBeNull();
     expect(parseRetryAfterMs('not-a-date', 4_000)).toBeNull();
+  });
+
+  it('F11: treats an HTTP-date already in the past as a 0ms delay, not null (still capped)', () => {
+    const now = Date.parse('2026-09-28T20:00:00Z');
+    // 30s before `now` -- an already-elapsed Retry-After.
+    expect(parseRetryAfterMs('Mon, 28 Sep 2026 19:59:30 GMT', 60_000, now)).toBe(0);
+    // Capped means 0 stays 0 even with a tiny cap.
+    expect(parseRetryAfterMs('Mon, 28 Sep 2026 19:59:30 GMT', 0, now)).toBe(0);
   });
 });
 
@@ -172,6 +190,52 @@ describe('retryFetch (ledger F85/F86: no Firestore call site retried a transient
 
     await expect(retryFetch(doFetch, { sleep, attempts: 4 })).rejects.toThrow('always down');
     expect(doFetch).toHaveBeenCalledTimes(4);
+  });
+
+  it('F11: drains/cancels a retried response\'s body before sleeping', async () => {
+    const { sleep } = fakeSleep();
+    const { res: first, cancel } = responseWithBody(429);
+    const doFetch = vi.fn()
+      .mockResolvedValueOnce(first)
+      .mockResolvedValueOnce(response(200));
+
+    const res = await retryFetch(doFetch, { sleep });
+
+    expect(res.status).toBe(200);
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it('F11: never drains a body on the response finally returned (last attempt / success)', async () => {
+    const { sleep } = fakeSleep();
+    const { res: last, cancel } = responseWithBody(503);
+    const doFetch = vi.fn(async () => last);
+
+    const res = await retryFetch(doFetch, { sleep, attempts: 1 });
+
+    expect(res.status).toBe(503);
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
+  it('F11: does not throw when a retried response has no body (test doubles, already-consumed bodies)', async () => {
+    const { sleep } = fakeSleep();
+    const doFetch = vi.fn()
+      .mockResolvedValueOnce(response(429))
+      .mockResolvedValueOnce(response(200));
+
+    await expect(retryFetch(doFetch, { sleep })).resolves.toMatchObject({ status: 200 });
+  });
+
+  it('F11: an already-past Retry-After HTTP-date is honoured as a 0ms delay instead of falling back to backoff', async () => {
+    const { sleep, slept } = fakeSleep();
+    const pastDate = new Date(Date.now() - 60_000).toUTCString();
+    const doFetch = vi.fn()
+      .mockResolvedValueOnce(response(429, { 'retry-after': pastDate }))
+      .mockResolvedValueOnce(response(200));
+
+    const res = await retryFetch(doFetch, { sleep, random: () => 1 });
+
+    expect(res.status).toBe(200);
+    expect(slept).toEqual([0]);
   });
 
   it('logs each retry without ever including a token, bearer header or request body', async () => {
