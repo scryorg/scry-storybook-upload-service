@@ -297,7 +297,48 @@ describe('FirestoreServiceWorker', () => {
     expect(build?.id).toBe('build-latest');
   });
 
-  it('updateBuild() PATCHes only provided fields (including coverage conversion)', async () => {
+  it('guarantee-2-single-field-unchanged: every existing single-field patchDocument() caller is byte-identical after the fix (processingStatus, coverage)', async () => {
+    // A mask of one field, repeated once, is identical to the pre-fix comma-join for n=1 -- there is
+    // no comma to mis-parse. Proves updateProcessingStatus() and updateBuildCoverage() (the two
+    // single-field callers that existed before commitSha/branch) are unaffected by the fix.
+    const calls: Array<{ url: string; body: any }> = [];
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ url, body: JSON.parse(String(init?.body ?? '{}')) });
+      return { ok: true, status: 200, json: async () => ({}) } as any;
+    });
+
+    // @ts-expect-error - test override
+    globalThis.fetch = fetchMock;
+
+    const svc = createSvc();
+    await svc.updateProcessingStatus('my-project', 'build-123', 'queued');
+    await svc.updateBuildCoverage('my-project', 'build-123', {
+      reportUrl: 'https://r2/c.json',
+      summary: {
+        componentCoverage: 0.9,
+        propCoverage: 0.8,
+        variantCoverage: 0.7,
+        passRate: 0.95,
+        totalComponents: 1,
+        componentsWithStories: 1,
+        failingStories: 0,
+      },
+      qualityGate: { passed: true, checks: [] },
+      generatedAt: '2026-01-01T00:00:00.000Z',
+    });
+
+    expect(calls).toHaveLength(2);
+    const processingStatusParams = new URL(calls[0].url).searchParams.getAll('updateMask.fieldPaths');
+    expect(processingStatusParams).toEqual(['processingStatus']);
+    expect(calls[0].url).not.toContain(',');
+    expect(calls[0].body.fields.processingStatus.stringValue).toBe('queued');
+
+    const coverageParams = new URL(calls[1].url).searchParams.getAll('updateMask.fieldPaths');
+    expect(coverageParams).toEqual(['coverage']);
+    expect(calls[1].url).not.toContain(',');
+  });
+
+  it('guarantee-1-repeated-mask-params: updateBuild() PATCHes only provided fields with one updateMask.fieldPaths per field (including coverage conversion)', async () => {
     const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       const method = (init?.method || 'GET').toUpperCase();
       expect(method).toBe('PATCH');
@@ -349,7 +390,7 @@ describe('FirestoreServiceWorker', () => {
     });
   });
 
-  it('updateBuild() sends the exact repeated-param query string for a provenance write (upload-provenance-updatemask, ISSUES.md #61)', async () => {
+  it('guarantee-1-repeated-mask-params: updateBuild() sends the exact repeated-param query string for a provenance write (upload-provenance-updatemask, ISSUES.md #61)', async () => {
     // Reproduces the real production call sites (app.ts coverage + metadata routes, both added by
     // PR #25) that set commitSha+branch together. Before the fix, patchDocument() sent a single
     // `updateMask.fieldPaths=commitSha,branch` param; Firestore's REST API parses that as one field
