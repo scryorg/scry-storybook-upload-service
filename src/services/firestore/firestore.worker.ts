@@ -735,8 +735,21 @@ export class FirestoreServiceWorker implements FirestoreService {
     const quoteFieldPath = (fieldPath: string) =>
       needsBackticks(fieldPath) ? `\`${fieldPath.replace(/`/g, '\\`')}\`` : fieldPath;
 
+    const fieldKeys = Object.keys(fields);
+    // F9 (upload-provenance-updatemask security review): a PATCH sent with NO
+    // updateMask.fieldPaths param at all is a full-document replace per Firestore's
+    // documented REST contract, not a no-op -- an empty mask here would silently wipe
+    // every other field on the document. Every current caller always passes at least
+    // one field; fail closed (throw, never fetch) instead of ever sending that request.
+    if (fieldKeys.length === 0) {
+      throw new Error(
+        `patchDocument() called with an empty update mask for "${path}" -- refusing to send a ` +
+        'mask-less Firestore PATCH, which Firestore treats as a full-document replace (F9)'
+      );
+    }
+
     const params = new URLSearchParams();
-    for (const key of Object.keys(fields)) {
+    for (const key of fieldKeys) {
       params.append('updateMask.fieldPaths', quoteFieldPath(key));
     }
 
@@ -762,7 +775,7 @@ export class FirestoreServiceWorker implements FirestoreService {
         path,
         status: response.status,
         statusText: response.statusText,
-        fieldPaths: Object.keys(fields),
+        fieldPaths: fieldKeys,
         body: errorBody.slice(0, 2000),
       });
       throw new Error(`Failed to patch document: ${response.status} ${response.statusText}`);

@@ -390,6 +390,22 @@ describe('FirestoreServiceWorker', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it('regression-empty-updatemask: updateBuild() with no fields to update throws instead of sending a mask-less PATCH (F9)', async () => {
+    // Firestore treats a PATCH with NO updateMask.fieldPaths param at all as a full-document
+    // replace, not a no-op -- if this were ever allowed through, it would silently wipe the
+    // entire build document (versionId, zipUrl, status, everything). updateBuild({}) resolves to
+    // an empty `fields` object, so it must fail closed before any fetch is attempted.
+    const fetchMock = vi.fn();
+    // @ts-expect-error - test override
+    globalThis.fetch = fetchMock;
+
+    const svc = createSvc();
+    await expect(svc.updateBuild('my-project', 'build-9', {})).rejects.toThrow(
+      /empty update mask/i
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('updateBuild() logs a non-2xx patchDocument response (no token/secrets) and still throws', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const fetchMock = vi.fn(async () => ({
