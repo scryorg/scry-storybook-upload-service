@@ -1,6 +1,6 @@
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import { StorageService, UploadResult } from './storage.service.js';
+import { StorageService, StorageObjectMeta, StorageObjectRange, UploadResult } from './storage.service.js';
 
 // Define the shape of the configuration object, similar to the Node.js version.
 type R2Config = {
@@ -69,6 +69,44 @@ export class R2S3StorageService implements StorageService {
     const signedUrl = await getSignedUrl(this.s3, command, { expiresIn: 3600 }); // URL valid for 1 hour
 
     return { url: signedUrl, key: key };
+  }
+
+  /**
+   * HEADs an object via the native R2 binding: size and content type, no body transfer.
+   * Used by the bundle upload route (capture-sources) to size-check before reading.
+   */
+  async head(key: string): Promise<StorageObjectMeta | null> {
+    const object = await this.bucket.head(key);
+    if (!object) return null;
+    return { size: object.size, contentType: object.httpMetadata?.contentType };
+  }
+
+  /**
+   * Streams an object's body via the native R2 binding.
+   */
+  async getObjectStream(key: string): Promise<ReadableStream | null> {
+    const object = await this.bucket.get(key);
+    if (!object) return null;
+    return object.body;
+  }
+
+  /**
+   * Reads a byte range of an object's body via the native R2 binding's own `range` option (ledger
+   * F49) — no S3-compatible `Range` header needed, R2 supports this natively.
+   */
+  async getObjectRange(key: string, range: StorageObjectRange): Promise<Uint8Array | null> {
+    if (range.length <= 0) return new Uint8Array(0);
+    const object = await this.bucket.get(key, { range: { offset: range.offset, length: range.length } });
+    if (!object) return null;
+    return new Uint8Array(await object.arrayBuffer());
+  }
+
+  /**
+   * Deletes a single object via the native R2 binding. A no-op if it does not exist
+   * (R2's delete is idempotent).
+   */
+  async delete(key: string): Promise<void> {
+    await this.bucket.delete(key);
   }
 
   /**

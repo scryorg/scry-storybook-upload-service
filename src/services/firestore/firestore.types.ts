@@ -3,6 +3,33 @@ import type { CiTimings } from '../../ci-timings/ci-timings.js';
 export type { CiTimings };
 
 /**
+ * Where a build's captures came from (capture-sources, contract §4). Absent means legacy
+ * Storybook web (the sole source before this feature) — every reader treats "no source field" the
+ * same as `{kind: 'storybook', platform: 'web'}` (G1).
+ *
+ * The upload service only ever writes `kind`/`platform` (from the CLI's `?source=<sourceKey>`
+ * query param, parsed and validated before the bundle exists — see `src/bundle/source-key.ts`).
+ * `framework`, `tool` and `device` are read from the bundle's manifest, which only build
+ * processing sees (contract §4: "written by upload service at create, completed by processing").
+ */
+export interface BuildSource {
+  kind: string;
+  platform?: string;
+  framework?: string;
+  tool?: { name?: string; version?: string };
+  device?: { name?: string; os?: string };
+}
+
+/** One validator problem, on the same shape `@scrymore/scf`'s `ValidationIssue` uses, so the CLI and
+ *  the build document report identical messages for the same bundle (G7). */
+export interface BuildValidationIssue {
+  code: string;
+  id?: string;
+  path?: string;
+  message: string;
+}
+
+/**
  * Represents the status of a build in the system
  */
 export type BuildStatus = 'active' | 'archived';
@@ -174,6 +201,18 @@ export interface Build {
    * (storybook-preview-ci-runtime). Absent when the deployer sent none.
    */
   ciTimings?: CiTimings;
+
+  /**
+   * Where this build's captures came from (capture-sources). Absent = legacy Storybook web.
+   */
+  source?: BuildSource;
+
+  /**
+   * The vendored `@scrymore/scf` validator's errors for this build's bundle, when the bundle
+   * upload route (`/upload/:project/:version/bundle/complete`) rejected it (G7). Set alongside
+   * `processingStatus: 'failed'`; absent otherwise.
+   */
+  validationErrors?: BuildValidationIssue[];
 }
 
 /**
@@ -218,6 +257,11 @@ export interface CreateBuildData {
    * (storybook-preview-ci-runtime). Absent when the deployer sent none.
    */
   ciTimings?: CiTimings;
+
+  /**
+   * Where this build's captures came from (capture-sources). Absent = legacy Storybook web.
+   */
+  source?: BuildSource;
 }
 
 // ============= UPLOAD TYPES =============
@@ -294,4 +338,11 @@ export interface UpdateBuildData {
    * (storybook-preview-ci-runtime). Absent when the deployer sent none.
    */
   ciTimings?: CiTimings;
+
+  /**
+   * The vendored `@scrymore/scf` validator's errors for this build's bundle
+   * (`/upload/:project/:version/bundle/complete`, G7). Set alongside
+   * `processingStatus: 'failed'` when the bundle is rejected.
+   */
+  validationErrors?: BuildValidationIssue[];
 }

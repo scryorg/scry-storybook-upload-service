@@ -7,6 +7,7 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
+    "check-scf-vendor": "node scripts/check-scf-vendor.mjs",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
@@ -56,6 +57,7 @@
     "@cloudflare/workers-types": "^4.20250913.0",
     "@types/node": "^24.4.0",
     "@vitest/coverage-v8": "^3.2.4",
+    "archiver": "7.0.1",
     "concurrently": "^9.1.2",
     "jest-mock": "^30.0.5",
     "supertest": "^7.0.0",

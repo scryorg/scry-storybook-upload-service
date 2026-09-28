@@ -19,6 +19,29 @@ export interface UploadResult {
 }
 
 /**
+ * Metadata returned by a HEAD check, without downloading the object body.
+ */
+export interface StorageObjectMeta {
+  size: number;
+  contentType?: string;
+}
+
+/**
+ * A byte range to read from an object, relative to its start. Used by the capture-sources bundle
+ * route (ledger F49) to read just a ZIP's tail (its end-of-central-directory record, then its
+ * central directory) before ever opening a full stream over the — potentially huge — rest of it.
+ */
+export interface StorageObjectRange {
+  /** 0-based byte offset from the start of the object. */
+  offset: number;
+  /** Number of bytes to read, starting at `offset`. An implementation clamps this to whatever is
+   *  actually left in the object rather than erroring — a caller that already knows the object's
+   *  real size (every caller here does, from a prior `head()`) never needs to ask for more than
+   *  what's left, but a shorter response is never treated as a failure on its own. */
+  length: number;
+}
+
+/**
  * Defines the contract for all storage operations within the application.
  * Any class implementing this interface can be used as the storage backend.
  */
@@ -40,7 +63,31 @@ export interface StorageService {
    */
   getPresignedUploadUrl(key: string, contentType: string): Promise<{ url: string; key: string }>;
 
-  // Other methods like delete, get, list can be added here as needed.
+  /**
+   * HEADs an object: its size and content type, without downloading the body.
+   * Used to size-check an upload (capture-sources bundle route) before reading it.
+   * @returns The object's metadata, or null if it does not exist.
+   */
+  head(key: string): Promise<StorageObjectMeta | null>;
+
+  /**
+   * Streams an object's body.
+   * @returns The object's body as a web ReadableStream, or null if it does not exist.
+   */
+  getObjectStream(key: string): Promise<ReadableStream | null>;
+
+  /**
+   * Reads a byte range of an object's body, without downloading the whole object (ledger F49).
+   * @returns exactly the bytes in `[range.offset, range.offset + range.length)` (fewer, if the
+   *   object is shorter than that), or `null` if the object does not exist.
+   */
+  getObjectRange(key: string, range: StorageObjectRange): Promise<Uint8Array | null>;
+
+  /**
+   * Deletes a single object. A no-op if it does not already exist.
+   * @param key The object's key.
+   */
+  delete(key: string): Promise<void>;
 
   /**
    * Deletes all objects with keys matching the given prefix.

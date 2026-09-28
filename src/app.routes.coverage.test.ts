@@ -9,12 +9,14 @@ function createTestServer(options: {
   storage: StorageService;
   firestore?: FirestoreService;
   cleanupToken?: string;
+  queue?: { send: (payload: unknown) => Promise<void> };
 }) {
   const wrapper = new Hono<AppEnv>();
   wrapper.use('*', async (c, next) => {
     c.set('storage', options.storage);
     if (options.firestore) c.set('firestore', options.firestore);
     if (options.cleanupToken) c.set('cleanupToken', options.cleanupToken);
+    if (options.queue) c.set('processingQueue', options.queue as unknown as Queue);
     await next();
   });
   wrapper.route('/', app);
@@ -30,6 +32,9 @@ describe('app routes (coverage)', () => {
     const storage: StorageService = {
       upload: vi.fn() as any,
       getPresignedUploadUrl: vi.fn() as any,
+      head: vi.fn() as any,
+      getObjectStream: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
     const server = createTestServer({ storage });
@@ -46,6 +51,9 @@ describe('app routes (coverage)', () => {
     const storage: StorageService = {
       upload: vi.fn() as any,
       getPresignedUploadUrl: vi.fn() as any,
+      head: vi.fn() as any,
+      getObjectStream: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
     const server = createTestServer({ storage });
@@ -62,6 +70,9 @@ describe('app routes (coverage)', () => {
     const storage: StorageService = {
       upload: vi.fn() as any,
       getPresignedUploadUrl: vi.fn() as any,
+      head: vi.fn() as any,
+      getObjectStream: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: deleteByPrefix as any,
     };
     const disabledServer = createTestServer({ storage });
@@ -84,6 +95,9 @@ describe('app routes (coverage)', () => {
     const storage: StorageService = {
       upload: vi.fn() as any,
       getPresignedUploadUrl: vi.fn() as any,
+      head: vi.fn() as any,
+      getObjectStream: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
     const server = createTestServer({ storage });
@@ -105,6 +119,9 @@ describe('app routes (coverage)', () => {
     const storage: StorageService = {
       upload: vi.fn() as any,
       getPresignedUploadUrl: vi.fn() as any,
+      head: vi.fn() as any,
+      getObjectStream: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
     const server = createTestServer({ storage });
@@ -124,6 +141,9 @@ describe('app routes (coverage)', () => {
     const storage: StorageService = {
       upload: vi.fn() as any,
       getPresignedUploadUrl: vi.fn() as any,
+      head: vi.fn() as any,
+      getObjectStream: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
     const server = createTestServer({ storage });
@@ -149,6 +169,9 @@ describe('app routes (coverage)', () => {
     const storage: StorageService = {
       upload: vi.fn() as any,
       getPresignedUploadUrl: vi.fn() as any,
+      head: vi.fn() as any,
+      getObjectStream: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
     const server = createTestServer({ storage });
@@ -172,6 +195,9 @@ describe('app routes (coverage)', () => {
     const storage: StorageService = {
       upload: uploadMock as any,
       getPresignedUploadUrl: vi.fn() as any,
+      head: vi.fn() as any,
+      getObjectStream: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
 
@@ -207,12 +233,66 @@ describe('app routes (coverage)', () => {
     expect(uploadMock).toHaveBeenCalledWith('my-proj/v1/storybook.zip', expect.anything(), 'application/zip');
   });
 
+  // capture-sources ledger F2: this route used to also enqueue the raw upload itself (stored as
+  // storybook.zip) as the processing zipKey, which build processing would then read as a static
+  // site and index as unmatched raw images. Nothing calls this route except this file's own tests
+  // (checked with a grep across every repo on this box), so the fix is to simply stop enqueuing.
+  it('POST /upload/:project/:version never enqueues (F2): it creates the build but sends nothing to the processing queue', async () => {
+    const uploadMock = vi.fn(async (key: string) => ({ url: `https://storage.test/${key}`, path: key }));
+    const storage: StorageService = {
+      upload: uploadMock as any,
+      getPresignedUploadUrl: vi.fn() as any,
+      head: vi.fn() as any,
+      getObjectStream: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
+      deleteByPrefix: vi.fn() as any,
+    };
+    const createBuild = vi.fn(async () => ({
+      id: 'build-1',
+      projectId: 'my-proj',
+      versionId: 'v1',
+      buildNumber: 1,
+      zipUrl: 'https://storage.test/my-proj/v1/storybook.zip',
+      status: 'active' as const,
+      createdAt: new Date(),
+      createdBy: 'test',
+    }));
+    const firestore: FirestoreService = {
+      createBuild: createBuild as any,
+      getBuild: vi.fn() as any,
+      getProjectBuilds: vi.fn() as any,
+      getBuildByVersion: vi.fn() as any,
+      getLatestBuild: vi.fn() as any,
+      updateBuild: vi.fn() as any,
+      updateBuildCoverage: vi.fn() as any,
+      archiveBuild: vi.fn() as any,
+      deleteBuild: vi.fn() as any,
+      trackEvent: vi.fn(async () => undefined) as any,
+    };
+    const send = vi.fn(async () => undefined);
+    const server = createTestServer({ storage, firestore, queue: { send } });
+
+    const form = new FormData();
+    form.set('file', new File([new Uint8Array([1, 2, 3])], 'storybook.zip', { type: 'application/zip' }));
+
+    const res = await server.request('/upload/my-proj/v1', { method: 'POST', body: form });
+
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.data.buildId).toBe('build-1');
+    expect(createBuild).toHaveBeenCalled(); // the route still creates the build...
+    expect(send).not.toHaveBeenCalled(); // ...it just never tells the queue about it
+  });
+
   it('POST /presigned-url/:project/:version/:filename uses default contentType if JSON body is invalid and creates build for .zip', async () => {
     const storage: StorageService = {
       upload: vi.fn() as any,
       getPresignedUploadUrl: vi.fn(async (key: string, contentType: string) => {
         return { url: `https://signed.example/${key}?sig=1`, key, contentType } as any;
       }) as any,
+      head: vi.fn() as any,
+      getObjectStream: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
 
@@ -267,6 +347,9 @@ describe('app routes (coverage)', () => {
     const storage: StorageService = {
       upload: vi.fn() as any,
       getPresignedUploadUrl: vi.fn(async (key: string) => ({ url: `https://signed.example/${key}?sig=1`, key })) as any,
+      head: vi.fn() as any,
+      getObjectStream: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
 
@@ -302,6 +385,9 @@ describe('app routes (coverage)', () => {
     const storage: StorageService = {
       upload: vi.fn() as any,
       getPresignedUploadUrl: vi.fn() as any,
+      head: vi.fn() as any,
+      getObjectStream: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
     const server = createTestServer({ storage });
@@ -318,6 +404,9 @@ describe('app routes (coverage)', () => {
     const storage: StorageService = {
       upload: vi.fn() as any,
       getPresignedUploadUrl: vi.fn() as any,
+      head: vi.fn() as any,
+      getObjectStream: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
     const server = createTestServer({ storage });
@@ -334,6 +423,9 @@ describe('app routes (coverage)', () => {
     const storage: StorageService = {
       upload: vi.fn() as any,
       getPresignedUploadUrl: vi.fn() as any,
+      head: vi.fn() as any,
+      getObjectStream: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
 
@@ -363,6 +455,9 @@ describe('app routes (coverage)', () => {
     const storage: StorageService = {
       upload: vi.fn() as any,
       getPresignedUploadUrl: vi.fn() as any,
+      head: vi.fn() as any,
+      getObjectStream: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
 
@@ -393,6 +488,9 @@ describe('app routes (coverage)', () => {
     const storage: StorageService = {
       upload: uploadMock as any,
       getPresignedUploadUrl: vi.fn() as any,
+      head: vi.fn() as any,
+      getObjectStream: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
 
