@@ -130,6 +130,8 @@ export class FirestoreServiceWorker implements FirestoreService {
       // CI timings (storybook-preview-ci-runtime). Written only when the
       // deployer sent them; absent is never stored as zeros.
       ...(data.ciTimings ? { ciTimings: this.toFirestoreValue(data.ciTimings) } : {}),
+      // Where this build's captures came from (capture-sources); absent = legacy Storybook web.
+      ...(data.source ? { source: this.toFirestoreValue(data.source) } : {}),
     };
 
     console.log('[FIRESTORE] createBuild writing build doc', {
@@ -156,6 +158,7 @@ export class FirestoreServiceWorker implements FirestoreService {
       createdAt: now,
       createdBy: this.config.serviceAccountId,
       ...(data.ciTimings ? { ciTimings: data.ciTimings } : {}),
+      ...(data.source ? { source: data.source } : {}),
     };
   }
 
@@ -378,6 +381,7 @@ export class FirestoreServiceWorker implements FirestoreService {
     if (updates.commitSha) fields.commitSha = { stringValue: updates.commitSha };
     if (updates.branch) fields.branch = { stringValue: updates.branch };
     if (updates.ciTimings) fields.ciTimings = this.toFirestoreValue(updates.ciTimings);
+    if (updates.validationErrors) fields.validationErrors = this.toFirestoreValue(updates.validationErrors);
 
     await this.patchDocument(buildPath, fields, token);
   }
@@ -781,6 +785,8 @@ export class FirestoreServiceWorker implements FirestoreService {
       ...(fields.uploadedByKeyId?.stringValue ? { uploadedByKeyId: fields.uploadedByKeyId.stringValue } : {}),
       ...(fields.uploadedByKeyProject?.stringValue ? { uploadedByKeyProject: fields.uploadedByKeyProject.stringValue } : {}),
       ...(fields.ciTimings ? { ciTimings: this.fromFirestoreValue(fields.ciTimings) as any } : {}),
+      ...(fields.source ? { source: this.fromFirestoreValue(fields.source) as any } : {}),
+      ...(fields.validationErrors ? { validationErrors: this.fromFirestoreValue(fields.validationErrors) as any } : {}),
     };
   }
 

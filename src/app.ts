@@ -13,6 +13,8 @@ import type { FirestoreService } from './services/firestore/firestore.service.js
 import type {
   BuildCoverage,
   BuildProcessingStatus,
+  BuildSource,
+  BuildValidationIssue,
   CreateBuildData,
   CreateUploadData,
 } from './services/firestore/firestore.types.js';
@@ -21,6 +23,10 @@ import { apiKeyAuth, type AuthVariables } from './middleware/auth.js';
 import { extractGitContext, normalizeCoverageInput } from './coverage/coverage.js';
 import { parseMultipartFormData } from './utils/multipart.js';
 import { ciEventFields, mergeCiTimings, parseCiTimings, type CiTimings, type CiTimingsParse } from './ci-timings/ci-timings.js';
+import { parseSourceKey } from './bundle/source-key.js';
+import { readBoundedZip, DEFAULT_BOUNDED_ZIP_LIMITS, type BoundedZipIssue } from './bundle/bounded-zip.js';
+import { readStreamWithLimit } from './bundle/read-stream.js';
+import { validateBundle, type ValidationIssue as ScfValidationIssue } from './vendor/scf/dist/index.js';
 
 // Define the application's environment, including injectable variables.
 export type AppEnv = {
@@ -499,25 +505,14 @@ app.openapi(uploadRoute, async (c) => {
           ...ciEventFields(ciTimings),
         });
 
-        // Enqueue build for async processing (LLM inspection, embeddings, vector DB)
-        const processingQueue = c.get('processingQueue');
-        if (processingQueue && buildId) {
-          try {
-            await processingQueue.send({
-              projectId: project,
-              versionId: version,
-              buildId,
-              zipKey: key,
-              timestamp: Date.now(),
-              // Carries the trace across the queue; see src/trace-context.ts.
-              trace: currentTraceContext(),
-            });
-            console.log(`[INFO] Build queued for processing: buildId=${buildId}`);
-          } catch (queueError) {
-            // Log error but don't fail the upload
-            console.error('Queue error (upload succeeded):', queueError);
-          }
-        }
+        // This route is unused by the deployer (`scry-node` uses the presigned-url + /metadata
+        // flow; grep across every repo on this box found only this repo's own e2e tests calling it
+        // directly — capture-sources ledger F2). It used to also enqueue `key` (this multipart/raw
+        // body, stored as `storybook.zip`) as the processing zipKey, which would have build
+        // processing read that raw upload as a static site and index it as unmatched raw images —
+        // the same class of bug the metadata route exists to avoid. Fixed by no longer enqueuing:
+        // the route still stores the file and creates the build (both exercised by the e2e suite),
+        // it just no longer tells the queue there is metadata-shaped content to process.
       } catch (firestoreError) {
         // Log error but don't fail the upload
         console.error('Firestore error (upload succeeded):', firestoreError);
@@ -1095,6 +1090,345 @@ app.openapi(retrievalRoute, async (c) => {
     key,
     available: true
   }, 200);
+});
+
+// ============= CAPTURE SOURCES: SCF BUNDLE ROUTES =============
+//
+// contract §9: a bundle can be uploaded (any source — a web Storybook, React Native, a Playwright
+// crawl, …) without a prior storybook.zip. Two calls, mirroring the upload-images shape below:
+// a presigned PUT that creates the build with its `source`, then a `/complete` that validates the
+// uploaded ZIP with the vendored `@scrymore/scf` validator (src/vendor/scf/) and only then enqueues
+// it. Auth is the same project-scoped API key middleware as every other upload route (`/presigned-
+// url/:project/*`, `/upload/:project/*`; G3) — nothing new to wire up here.
+
+const ValidationIssueSchema = z.object({
+  code: z.string(),
+  id: z.string().optional(),
+  path: z.string().optional(),
+  message: z.string(),
+});
+
+/**
+ * The whole bundle ZIP, as HEAD-checked before download. The spec (spec/scf-1.0.md) bounds each
+ * image (20 MB, 16384px) but sets no bundle-wide cap; this is a server-side default protecting the
+ * upload service itself, independent of the vendored validator's own per-image/per-file limits.
+ */
+const MAX_BUNDLE_ZIP_BYTES = 300 * 1024 * 1024; // 300 MiB
+
+const BundleSourceQuerySchema = z.object({
+  source: z
+    .string()
+    .min(1)
+    .max(100)
+    .openapi({
+      example: 'storybook-rn:ios',
+      description:
+        'sourceKeyOf(manifest) = "<kind>:<platform|web>" (contract §2/§9): a registered source.kind ' +
+        '(or an x-<name> vendor kind) and a registered source.platform, joined by ":". Computed by the ' +
+        'adapter/CLI before the bundle exists, so it is validated here without reading any bundle content.',
+    }),
+});
+
+const presignedBundleUrlRoute = createRoute({
+  method: 'post',
+  path: '/presigned-url/:project/:version/bundle.zip',
+  request: {
+    params: ProjectVersionParamsSchema,
+    query: BundleSourceQuerySchema,
+  },
+  responses: {
+    200: {
+      description: 'Presigned PUT for an SCF bundle; the build is created with its source recorded',
+      content: { 'application/json': { schema: PresignedUrlResponseSchema } },
+    },
+    400: {
+      description: 'Missing or invalid ?source=<sourceKey>',
+      content: { 'application/json': { schema: ErrorResponseSchema } },
+    },
+    401: {
+      description: 'Unauthorized - Invalid or missing API key',
+      content: { 'application/json': { schema: AuthErrorResponseSchema } },
+    },
+    403: {
+      description: "Forbidden - API key does not belong to the requested project",
+      content: { 'application/json': { schema: AuthErrorResponseSchema } },
+    },
+    500: {
+      description: 'Internal server error',
+      content: { 'application/json': { schema: ErrorResponseSchema } },
+    },
+  },
+});
+
+app.openapi(presignedBundleUrlRoute, async (c) => {
+  try {
+    const storage = c.var.storage;
+    const firestore = c.var.firestore;
+    const { project, version } = c.req.valid('param');
+    const { source: rawSource } = c.req.valid('query');
+
+    const parsedSource = parseSourceKey(rawSource);
+    if (!parsedSource) {
+      return c.json(
+        {
+          error: `Invalid source: ${JSON.stringify(rawSource)}. Expected "<kind>:<platform>" with a registered kind (or x-<name>) and a registered platform.`,
+        },
+        400
+      );
+    }
+
+    if (!firestore) {
+      return c.json({ error: 'Firestore not configured' }, 500);
+    }
+
+    console.log(
+      `[INFO] Presigned bundle URL request: project=${project}, version=${version}, source=${rawSource}`
+    );
+
+    const source: BuildSource = { kind: parsedSource.kind, platform: parsedSource.platform };
+
+    // The build is created first (unlike the generic presigned-url route above, which historically
+    // computes its flat key before a build exists): that gives us buildNumber up front, so the
+    // stored key can follow the same `builds/{n}/…` layout the metadata route already uses, instead
+    // of a flat `{project}/{version}/bundle.zip`. zipUrl is left blank, same as the standalone image
+    // upload route (imageUploadInitRoute) — nothing reads it for a bundle build, which never gets a
+    // "View" button (no static site to view).
+    const build = await firestore.createBuild(project, {
+      versionId: version,
+      zipUrl: '',
+      source,
+      ...uploadedBy(c.var.authenticatedApiKey),
+    });
+
+    const key = `${project}/${version}/builds/${build.buildNumber}/bundle.zip`;
+    const data = await storage.getPresignedUploadUrl(key, 'application/zip');
+
+    console.log(
+      `[INFO] Bundle build created: id=${build.id}, number=${build.buildNumber}, key=${key}, source=${rawSource}`
+    );
+
+    return c.json(
+      {
+        url: data.url,
+        fields: { key: data.key },
+        buildId: build.id,
+        buildNumber: build.buildNumber,
+      },
+      200
+    );
+  } catch (error) {
+    console.error('Presigned bundle URL error:', error);
+    return c.json(
+      { error: `Presigned bundle URL failed: ${error instanceof Error ? error.message : 'Unknown error'}` },
+      500
+    );
+  }
+});
+
+const BundleCompleteBodySchema = z.object({
+  buildId: z
+    .string()
+    .min(1)
+    .max(128)
+    .openapi({ description: 'The Firestore build id the presigned-url/bundle.zip call returned.' }),
+  zipKey: z
+    .string()
+    .min(1)
+    .max(512)
+    .openapi({ description: 'The key the client PUT the bundle ZIP to (the presigned URL fields.key).' }),
+});
+
+const BundleCompleteResponseSchema = z.object({
+  success: z.boolean(),
+  message: z.string(),
+  queued: z.boolean(),
+  buildId: z.string(),
+  buildNumber: z.number(),
+  warnings: z.array(ValidationIssueSchema).optional(),
+});
+
+const BundleRejectedResponseSchema = z.object({
+  success: z.boolean(),
+  error: z.string(),
+  errors: z.array(ValidationIssueSchema),
+});
+
+const bundleCompleteRoute = createRoute({
+  method: 'post',
+  path: '/upload/:project/:version/bundle/complete',
+  request: {
+    params: ProjectVersionParamsSchema,
+    body: { content: { 'application/json': { schema: BundleCompleteBodySchema } } },
+  },
+  responses: {
+    200: {
+      description: 'Bundle accepted (G7) and queued for processing',
+      content: { 'application/json': { schema: BundleCompleteResponseSchema } },
+    },
+    400: {
+      description: 'Bundle object not found, or buildId/zipKey do not match this project/version',
+      content: { 'application/json': { schema: ErrorResponseSchema } },
+    },
+    401: {
+      description: 'Unauthorized - Invalid or missing API key',
+      content: { 'application/json': { schema: AuthErrorResponseSchema } },
+    },
+    403: {
+      description: "Forbidden - API key does not belong to the requested project",
+      content: { 'application/json': { schema: AuthErrorResponseSchema } },
+    },
+    404: {
+      description: 'Build not found for this project',
+      content: { 'application/json': { schema: ErrorResponseSchema } },
+    },
+    422: {
+      description:
+        'Bundle rejected by the vendored SCF validator, same messages as the CLI (G7). The uploaded ' +
+        'object is deleted and the build is marked failed with these messages.',
+      content: { 'application/json': { schema: BundleRejectedResponseSchema } },
+    },
+    500: {
+      description: 'Internal server error',
+      content: { 'application/json': { schema: ErrorResponseSchema } },
+    },
+  },
+});
+
+app.openapi(bundleCompleteRoute, async (c) => {
+  try {
+    const { project, version } = c.req.valid('param');
+    const { buildId, zipKey } = c.req.valid('json');
+    const storage = c.var.storage;
+    const firestore = c.var.firestore;
+    const queue = c.var.processingQueue;
+
+    if (!firestore) {
+      return c.json({ error: 'Firestore not configured' }, 500);
+    }
+
+    // zipKey is caller-supplied (the client's own record of the presigned URL's key). The API key
+    // already scopes the caller to :project; this additionally stops them asking the validator to
+    // read and enqueue an object outside their own build's namespace.
+    const expectedPrefix = `${project}/${version}/builds/`;
+    if (!zipKey.startsWith(expectedPrefix) || !zipKey.endsWith('/bundle.zip')) {
+      return c.json({ error: `zipKey must be under ${expectedPrefix} and end in /bundle.zip` }, 400);
+    }
+
+    const build = await firestore.getBuild(project, buildId);
+    if (!build) {
+      return c.json({ error: 'Build not found' }, 404);
+    }
+    if (build.versionId !== version) {
+      return c.json({ error: 'Build does not belong to this project/version' }, 400);
+    }
+
+    // Reject the bundle: delete the uploaded object, mark the build failed with the same messages
+    // the caller gets back (so the Builds tab can show why), then respond 422 (contract §9).
+    // Best-effort on both writes — a rejection response must still reach the caller even if the
+    // cleanup half-fails; the object then just outlives its failed build, same as any other
+    // best-effort write in this file (e.g. the metadata route's provenance backfill).
+    const reject = async (issues: BuildValidationIssue[]) => {
+      await storage.delete(zipKey).catch((e) => {
+        console.warn('[BUNDLE] Could not delete rejected object', {
+          zipKey,
+          error: e instanceof Error ? e.message : String(e),
+        });
+      });
+      await firestore
+        .updateBuild(project, buildId, { processingStatus: 'failed', validationErrors: issues })
+        .catch((e) => {
+          console.warn('[BUNDLE] Could not mark build failed', {
+            buildId,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        });
+      return c.json({ success: false, error: 'Bundle rejected', errors: issues }, 422);
+    };
+
+    // HEAD/size check (contract §1) before reading anything.
+    const meta = await storage.head(zipKey);
+    if (!meta || meta.size === 0) {
+      return c.json({ error: 'Bundle object not found. Upload it to the presigned URL first.' }, 400);
+    }
+    if (meta.size > MAX_BUNDLE_ZIP_BYTES) {
+      return reject([
+        {
+          code: 'BUNDLE_TOO_LARGE',
+          message: `Bundle is ${meta.size} bytes, over the ${MAX_BUNDLE_ZIP_BYTES} byte limit.`,
+        },
+      ]);
+    }
+
+    const stream = await storage.getObjectStream(zipKey);
+    if (!stream) {
+      return c.json({ error: 'Bundle object not found. Upload it to the presigned URL first.' }, 400);
+    }
+
+    // Stream-read with a hard byte cap (ledger F11 "total size") — a backstop independent of the
+    // HEAD size above, in case the two disagree.
+    const read = await readStreamWithLimit(stream, MAX_BUNDLE_ZIP_BYTES);
+    if (!read.ok) {
+      return reject([
+        {
+          code: 'BUNDLE_TOO_LARGE',
+          message: `Bundle exceeds the ${MAX_BUNDLE_ZIP_BYTES} byte limit while reading.`,
+        },
+      ]);
+    }
+
+    // Entries, total uncompressed size, path traversal, symlinks (ledger F11) — all checked before
+    // any member is handed to the shared validator.
+    const zipResult = readBoundedZip(read.buffer);
+    if (!zipResult.ok) {
+      return reject(zipResult.issues);
+    }
+
+    // The shared, vendored validator (contract §2/G7): schema, member allow-list by content sniff,
+    // duplicate/shared-image checks, link safety, sourceText opt-in — same code the CLI runs.
+    const validation = await validateBundle(zipResult.files);
+    if (!validation.ok) {
+      return reject(validation.errors);
+    }
+
+    let queued = false;
+    if (queue) {
+      await queue.send({
+        projectId: project,
+        versionId: version,
+        buildId,
+        zipKey,
+        format: 'scf',
+        timestamp: Date.now(),
+        trace: currentTraceContext(),
+      });
+      queued = true;
+    }
+
+    const queuedStatus: BuildProcessingStatus = 'queued';
+    if (firestore.updateProcessingStatus) {
+      await firestore.updateProcessingStatus(project, buildId, queuedStatus);
+    } else {
+      await firestore.updateBuild(project, buildId, { processingStatus: queuedStatus });
+    }
+
+    return c.json(
+      {
+        success: true,
+        message: queued ? 'Bundle validated and processing queued' : 'Bundle validated (no processing queue configured)',
+        queued,
+        buildId,
+        buildNumber: build.buildNumber,
+        ...(validation.warnings.length > 0 ? { warnings: validation.warnings } : {}),
+      },
+      200
+    );
+  } catch (error) {
+    console.error('Bundle complete error:', error);
+    return c.json(
+      { error: `Bundle complete failed: ${error instanceof Error ? error.message : 'Unknown error'}` },
+      500
+    );
+  }
 });
 
 // Presigned URL route

@@ -18,6 +18,9 @@ function setup() {
   const storage: StorageService = {
     upload: vi.fn(async (key: string) => ({ url: `https://r2.example/${key}`, key })) as any,
     getPresignedUploadUrl: vi.fn(async (key: string) => ({ url: `https://signed.example/${key}?s=1`, key })) as any,
+    head: vi.fn() as any,
+    getObjectStream: vi.fn() as any,
+    delete: vi.fn() as any,
     deleteByPrefix: vi.fn() as any,
   };
   const build = {
@@ -73,6 +76,9 @@ const ROUTES: Array<{ name: string; method: string; path: string; init: { header
   { name: 'POST /presigned-url/:project/:version/:filename', method: 'POST', path: '/presigned-url/victim/v1/storybook.zip', init: JSON_BODY({ contentType: 'application/zip' }) },
   { name: 'POST /upload-images/:project', method: 'POST', path: '/upload-images/victim', init: JSON_BODY({ imageCount: 1 }) },
   { name: 'POST /upload-images/:project/complete', method: 'POST', path: '/upload-images/victim/complete', init: JSON_BODY({ uploadId: 'u1', zipKey: 'victim/uploads/1/images.zip' }) },
+  // capture-sources PR 2: bundle upload (guarantee-3)
+  { name: 'POST /presigned-url/:project/:version/bundle.zip', method: 'POST', path: '/presigned-url/victim/v1/bundle.zip?source=storybook-rn:ios', init: { headers: {} } },
+  { name: 'POST /upload/:project/:version/bundle/complete', method: 'POST', path: '/upload/victim/v1/bundle/complete', init: JSON_BODY({ buildId: 'b1', zipKey: 'victim/v1/builds/1/bundle.zip' }) },
 ];
 
 describe('regression-upload-project-key-scope', () => {

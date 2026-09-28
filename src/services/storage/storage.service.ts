@@ -19,6 +19,14 @@ export interface UploadResult {
 }
 
 /**
+ * Metadata returned by a HEAD check, without downloading the object body.
+ */
+export interface StorageObjectMeta {
+  size: number;
+  contentType?: string;
+}
+
+/**
  * Defines the contract for all storage operations within the application.
  * Any class implementing this interface can be used as the storage backend.
  */
@@ -40,7 +48,24 @@ export interface StorageService {
    */
   getPresignedUploadUrl(key: string, contentType: string): Promise<{ url: string; key: string }>;
 
-  // Other methods like delete, get, list can be added here as needed.
+  /**
+   * HEADs an object: its size and content type, without downloading the body.
+   * Used to size-check an upload (capture-sources bundle route) before reading it.
+   * @returns The object's metadata, or null if it does not exist.
+   */
+  head(key: string): Promise<StorageObjectMeta | null>;
+
+  /**
+   * Streams an object's body.
+   * @returns The object's body as a web ReadableStream, or null if it does not exist.
+   */
+  getObjectStream(key: string): Promise<ReadableStream | null>;
+
+  /**
+   * Deletes a single object. A no-op if it does not already exist.
+   * @param key The object's key.
+   */
+  delete(key: string): Promise<void>;
 
   /**
    * Deletes all objects with keys matching the given prefix.

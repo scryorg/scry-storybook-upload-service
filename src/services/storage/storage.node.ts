@@ -1,10 +1,24 @@
 // In src/services/storage/storage.node.ts
 
-import { S3Client, PutObjectCommand, GetObjectCommand, ListObjectsV2Command, DeleteObjectsCommand } from '@aws-sdk/client-s3';
+import {
+  S3Client,
+  PutObjectCommand,
+  GetObjectCommand,
+  HeadObjectCommand,
+  DeleteObjectCommand,
+  ListObjectsV2Command,
+  DeleteObjectsCommand,
+} from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { Upload } from '@aws-sdk/lib-storage';
-import { StorageService, UploadResult } from './storage.service.js';
+import { StorageService, StorageObjectMeta, UploadResult } from './storage.service.js';
 import { Readable } from 'stream';
+
+/** True for the S3/R2 "not found" errors both HeadObject and GetObject can throw. */
+function isNotFoundError(error: unknown): boolean {
+  const e = error as { name?: string; $metadata?: { httpStatusCode?: number } } | null;
+  return e?.name === 'NotFound' || e?.name === 'NoSuchKey' || e?.$metadata?.httpStatusCode === 404;
+}
 
 // Define the shape of the configuration object.
 type R2Config = {
@@ -73,6 +87,44 @@ export class R2S3StorageService implements StorageService {
     const signedUrl = await getSignedUrl(this.s3, command, { expiresIn: 3600 }); // URL valid for 1 hour
 
     return { url: signedUrl, key: key };
+  }
+
+  /**
+   * HEADs an object via the S3-compatible API: size and content type, no body transfer.
+   * Used by the bundle upload route (capture-sources) to size-check before reading.
+   */
+  async head(key: string): Promise<StorageObjectMeta | null> {
+    try {
+      const result = await this.s3.send(new HeadObjectCommand({ Bucket: this.bucketName, Key: key }));
+      return { size: result.ContentLength ?? 0, contentType: result.ContentType };
+    } catch (error) {
+      if (isNotFoundError(error)) return null;
+      throw error;
+    }
+  }
+
+  /**
+   * Streams an object's body via the S3-compatible API, normalized to a web ReadableStream
+   * (the SDK's response body is a Node Readable in this runtime).
+   */
+  async getObjectStream(key: string): Promise<ReadableStream | null> {
+    try {
+      const result = await this.s3.send(new GetObjectCommand({ Bucket: this.bucketName, Key: key }));
+      const body = result.Body as (Readable & { transformToWebStream?: () => ReadableStream }) | undefined;
+      if (!body) return null;
+      if (typeof body.transformToWebStream === 'function') return body.transformToWebStream();
+      return Readable.toWeb(body) as unknown as ReadableStream;
+    } catch (error) {
+      if (isNotFoundError(error)) return null;
+      throw error;
+    }
+  }
+
+  /**
+   * Deletes a single object. A no-op if it does not exist.
+   */
+  async delete(key: string): Promise<void> {
+    await this.s3.send(new DeleteObjectCommand({ Bucket: this.bucketName, Key: key }));
   }
 
   /**

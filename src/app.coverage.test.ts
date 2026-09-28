@@ -27,6 +27,9 @@ describe('coverage endpoints', () => {
     const storage: StorageService = {
       upload: uploadMock as any,
       getPresignedUploadUrl: vi.fn() as any,
+      head: vi.fn() as any,
+      getObjectStream: vi.fn() as any,
+      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
 
@@ -113,6 +116,9 @@ describe('coverage endpoints', () => {
     const storage: StorageService = {
       upload: uploadMock as any,
       getPresignedUploadUrl: vi.fn() as any,
+      head: vi.fn() as any,
+      getObjectStream: vi.fn() as any,
+      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
 
@@ -188,6 +194,9 @@ describe('coverage endpoints', () => {
     const storage: StorageService = {
       upload: uploadMock as any,
       getPresignedUploadUrl: vi.fn() as any,
+      head: vi.fn() as any,
+      getObjectStream: vi.fn() as any,
+      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
 
@@ -255,6 +264,9 @@ describe('coverage endpoints', () => {
     const storage: StorageService = {
       upload: uploadMock as any,
       getPresignedUploadUrl: vi.fn() as any,
+      head: vi.fn() as any,
+      getObjectStream: vi.fn() as any,
+      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
 

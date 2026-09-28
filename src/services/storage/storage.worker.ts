@@ -1,6 +1,6 @@
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import { StorageService, UploadResult } from './storage.service.js';
+import { StorageService, StorageObjectMeta, UploadResult } from './storage.service.js';
 
 // Define the shape of the configuration object, similar to the Node.js version.
 type R2Config = {
@@ -69,6 +69,33 @@ export class R2S3StorageService implements StorageService {
     const signedUrl = await getSignedUrl(this.s3, command, { expiresIn: 3600 }); // URL valid for 1 hour
 
     return { url: signedUrl, key: key };
+  }
+
+  /**
+   * HEADs an object via the native R2 binding: size and content type, no body transfer.
+   * Used by the bundle upload route (capture-sources) to size-check before reading.
+   */
+  async head(key: string): Promise<StorageObjectMeta | null> {
+    const object = await this.bucket.head(key);
+    if (!object) return null;
+    return { size: object.size, contentType: object.httpMetadata?.contentType };
+  }
+
+  /**
+   * Streams an object's body via the native R2 binding.
+   */
+  async getObjectStream(key: string): Promise<ReadableStream | null> {
+    const object = await this.bucket.get(key);
+    if (!object) return null;
+    return object.body;
+  }
+
+  /**
+   * Deletes a single object via the native R2 binding. A no-op if it does not exist
+   * (R2's delete is idempotent).
+   */
+  async delete(key: string): Promise<void> {
+    await this.bucket.delete(key);
   }
 
   /**

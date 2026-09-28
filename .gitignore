@@ -124,3 +124,7 @@ storybook-static
 # Temporary folders
 tmp/
 temp/
+
+# capture-sources: the vendored @scrymore/scf validator (contract §2) is committed on purpose —
+# it isn't published to npm yet, so this *is* the source, not a build artifact to regenerate.
+!src/vendor/scf/dist
