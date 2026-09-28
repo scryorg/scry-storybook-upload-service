@@ -237,6 +237,16 @@ describe('ApiKeyServiceWorker', () => {
       expect(patchCall[0]).not.toContain(',');
       expect(patchCall[1].method).toBe('PATCH');
     });
+
+    it('regression-empty-updatemask: patchDocument() with no fields throws instead of sending a mask-less PATCH (F9)', async () => {
+      // No current caller (revokeApiKey, updateLastUsed) ever passes an empty `fields` object, but
+      // patchDocument() is a shared private helper -- an empty updateMask.fieldPaths query is a
+      // Firestore full-document replace, not a no-op, so it must fail closed regardless of caller.
+      await expect(
+        (service as any).patchDocument('projects/my-project/apiKeys/key-123', {}, 'mock-access-token')
+      ).rejects.toThrow(/empty update mask/i);
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
   });
 
   describe('deleteApiKey', () => {

@@ -145,6 +145,14 @@ export async function retryFetch(doFetch: () => Promise<Response>, opts: RetryFe
       delayMs,
       error: error instanceof Error ? error.message : error ? String(error) : undefined,
     });
+    // F11: drain/cancel the body of the response we're about to discard and retry. An unread body
+    // left dangling on Cloudflare Workers can count toward the runtime's 6-simultaneous-connection
+    // limit and get the whole response cancelled mid-retry -- undermining the retry during exactly
+    // the throttling burst it exists to survive. Never throws: a body that is already used/locked or
+    // has no `cancel` (e.g. a test double) is fine to ignore.
+    if (response) {
+      await response.body?.cancel().catch(() => {});
+    }
     await sleep(delayMs);
   }
 }
