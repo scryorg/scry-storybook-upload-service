@@ -35,13 +35,25 @@
  * directory's; and the real decompressed content's CRC-32 is compared against the central
  * directory's declared CRC-32.
  *
- * Only a bounded amount of each entry's real content is ever kept: the full bytes for a non-image
- * member (`scf.json`, `structure/*.json`, `source/*`, sidecar JSON), capped at
- * `maxNonImageEntryBytes`; for an image, only its first `imageHeadBytes` (default 64 KiB — enough for
- * magic-byte family detection and a header-only dimension read, see `@scrymore/scf`'s
- * `image-dimensions.ts`) plus its real total size, as a `{head, size}` pair (see `@scrymore/scf`'s
- * `BundleFileBytes` — the vendored validator refuses this partial shape for anything but an image,
- * ledger F50). Bytes beyond the head are counted (for the caps above) but never retained.
+ * Only a bounded amount of each entry's real content is ever kept — and, critically (ledger F60),
+ * only a bounded amount is ever held AT ONCE, not summed forever across the whole bundle:
+ *   - `scf.json`: kept in full, capped at `maxScfJsonBytes` (16 MiB) — the manifest is genuinely
+ *     needed whole by `validateBundle` afterwards.
+ *   - `structure/*.json` and `source/*`: the instant one of these is fully inflated (still capped per
+ *     entry at `maxNonImageEntryBytes`, same as before), its content is run through `@scrymore/scf`'s
+ *     own `checkStructureMember`/`checkSourceTextMember` — the exact content checks `validateBundle`
+ *     would otherwise apply — and the bytes are then DISCARDED, replaced in `files` with a
+ *     `{checked: true, size}` stand-in (`BundleFileChecked`). This is the fix for F60's actual repro:
+ *     a 225-story Storybook's structure trees alone can run 100s of MB in aggregate, and the route
+ *     used to keep every one of them in memory until the whole-bundle `validateBundle` call.
+ *   - Every other non-image member (sidecar JSON, e.g. `images/x.json` in sidecar-capture mode): kept
+ *     in full, each still capped individually at `maxNonImageEntryBytes`, but ALSO summed against a
+ *     much tighter aggregate `maxSidecarsTotalBytes` (16 MiB) — these are index-only per-image
+ *     metadata and have no legitimate reason to add up to much.
+ *   - Images: unchanged from F31/F32/F50 — only `imageHeadBytes` (default 64 KiB — enough for
+ *     magic-byte family detection and a header-only dimension read, see `@scrymore/scf`'s
+ *     `image-dimensions.ts`) plus its real total size, as a `{head, size}` pair. Bytes beyond the head
+ *     are counted (for the caps above) but never retained.
  *
  * Two classes of problem are reported this way: (1) structural issues found without needing to abort
  * the whole read (unsafe paths, symlinks) are collected into `issues` and the read continues, so a
@@ -53,6 +65,7 @@ import { ByteCursor } from './byte-cursor.js';
 import { CRC32_SEED, crc32Final, crc32Update } from './crc32.js';
 import { readCentralDirectory, type CentralDirectoryEntry, type CentralDirectoryIssue } from './central-directory.js';
 import type { StorageObjectRange } from '../services/storage/storage.service.js';
+import { checkSourceTextMember, checkStructureMember } from '../vendor/scf/dist/index.js';
 import type { BundleFiles } from '../vendor/scf/dist/index.js';
 
 export interface BoundedZipLimits {
@@ -77,11 +90,22 @@ export interface BoundedZipLimits {
    *  `MAX_IMAGE_BYTES`, so a bomb disguised as an image can never inflate past what a legitimate
    *  image could ever validly be). */
   maxImageEntryBytes: number;
-  /** REAL decompressed bytes cap for every other member (`scf.json`, `structure/*.json`,
-   *  `source/*`, sidecar JSON) — these are kept in full, so this is also the true memory cost of
-   *  holding one. Comfortably above the vendored validator's own hard per-field caps (structure
-   *  10 MB, sourceText 1 MB) so this is a backstop, not a tighter re-implementation of those. */
+  /** REAL decompressed bytes cap for a single `structure/*.json`/`source/*` member (checked then
+   *  discarded, ledger F60 — this is the peak transient memory cost of checking ONE such member, never
+   *  a running total) or a single sidecar JSON member (kept in full). Comfortably above the vendored
+   *  validator's own hard per-field caps (structure 10 MB, sourceText 1 MB) so this is a backstop, not
+   *  a tighter re-implementation of those. */
   maxNonImageEntryBytes: number;
+  /** REAL decompressed bytes cap for `scf.json` specifically (kept in full — the manifest is needed
+   *  whole by `validateBundle`) — ledger F60. Deliberately larger than `maxNonImageEntryBytes` since a
+   *  bundle with hundreds of captures can have a legitimately larger manifest than any one sidecar. */
+  maxScfJsonBytes: number;
+  /** Sum of every sidecar JSON member's REAL decompressed bytes (kept in full, unlike
+   *  `structure/*.json`/`source/*`, which are discarded after checking) — ledger F60. Much tighter
+   *  than `maxTotalUncompressedBytes` because these are index-only per-image metadata with no
+   *  legitimate reason to add up to much, and — unlike structure/source — this route has no
+   *  check-then-discard mechanism for them to fall back on. */
+  maxSidecarsTotalBytes: number;
   /** Total raw bytes read from the underlying stream (the ZIP object itself, still compressed) —
    *  independent of any ZIP metadata, this is the caller's own bound on how much of the R2 object
    *  it will ever pull down for one request. */
@@ -97,7 +121,9 @@ export interface BoundedZipIssue {
   message: string;
 }
 
-export type BoundedZipResult = { ok: true; files: BundleFiles } | { ok: false; issues: BoundedZipIssue[] };
+export type BoundedZipResult =
+  | { ok: true; files: BundleFiles; warnings: BoundedZipIssue[] }
+  | { ok: false; issues: BoundedZipIssue[] };
 
 export const DEFAULT_BOUNDED_ZIP_LIMITS: BoundedZipLimits = {
   maxEntries: 20_000,
@@ -107,6 +133,8 @@ export const DEFAULT_BOUNDED_ZIP_LIMITS: BoundedZipLimits = {
   maxCompressionRatio: 200,
   maxImageEntryBytes: 20 * 1024 * 1024, // matches @scrymore/scf's MAX_IMAGE_BYTES
   maxNonImageEntryBytes: 12 * 1024 * 1024,
+  maxScfJsonBytes: 16 * 1024 * 1024,
+  maxSidecarsTotalBytes: 16 * 1024 * 1024,
   maxRawBytes: 1024 * 1024 * 1024, // 1 GiB
   imageHeadBytes: 64 * 1024,
 };
@@ -148,9 +176,36 @@ function isUnsafeZipMemberName(name: string): boolean {
   return name.split('/').some((seg) => seg === '.' || seg === '..');
 }
 
-function isImageLikeName(name: string): boolean {
+function extOf(name: string): string {
   const m = /\.([a-zA-Z0-9]+)$/.exec(name);
-  return m !== null && IMAGE_LIKE_EXTENSIONS.has(m[1].toLowerCase());
+  return m ? m[1].toLowerCase() : '';
+}
+
+function isImageLikeName(name: string): boolean {
+  return IMAGE_LIKE_EXTENSIONS.has(extOf(name));
+}
+
+/** Mirrors `@scrymore/scf`'s own `isCheckableStructureOrSourcePath` (validate.ts) exactly — the two
+ *  prefixes its `{checked: true, size}` shape is accepted for (ledger F60). Kept in sync by hand since
+ *  that helper isn't itself exported from the package (only `checkStructureMember`/
+ *  `checkSourceTextMember`, which this module calls directly). */
+function isCheckedMemberPath(name: string): boolean {
+  return (name.startsWith('structure/') && extOf(name) === 'json') || name.startsWith('source/');
+}
+
+/**
+ * Which of the four memory-handling strategies (ledger F60, see this module's own doc comment) a
+ * member's raw ZIP path falls into. `scf.json` and the checked-member prefixes take priority over the
+ * generic "image" check purely for clarity of intent — in practice none of the SCF-reserved prefixes
+ * overlap with an image extension, so the order rarely matters.
+ */
+type MemberCategory = 'image' | 'scfJson' | 'checkedMember' | 'sidecar';
+
+function categorizeMember(name: string): MemberCategory {
+  if (name === 'scf.json') return 'scfJson';
+  if (isCheckedMemberPath(name)) return 'checkedMember';
+  if (isImageLikeName(name)) return 'image';
+  return 'sidecar';
 }
 
 function concatUint8(chunks: Uint8Array[]): Uint8Array {
@@ -182,7 +237,7 @@ async function skipRawBytes(cursor: ByteCursor, n: number): Promise<void> {
 
 interface EntryScanState {
   path: string;
-  isImage: boolean;
+  category: MemberCategory;
   declaredUncompressedSize: number;
   perEntryCap: number;
   realBytes: number;
@@ -192,12 +247,20 @@ interface EntryScanState {
   crcState: number;
 }
 
+/** Real decompressed bytes summed across the whole ZIP so far — `realBytes` against
+ *  `maxTotalUncompressedBytes` (every member) and `sidecarBytes` against `maxSidecarsTotalBytes`
+ *  (sidecar-category members only, ledger F60) are independent running totals. */
+interface TotalScanState {
+  realBytes: number;
+  sidecarBytes: number;
+}
+
 /** Called with every chunk of an entry's REAL decompressed output, in order, as it is produced.
  *  Throws a `BundleZipLimitError` the instant any bound is exceeded — the caller (both the STORED
  *  and DEFLATE consumers below) lets that propagate straight out, aborting the whole read. */
 function accumulateChunk(
   entryState: EntryScanState,
-  totalState: { realBytes: number },
+  totalState: TotalScanState,
   limits: BoundedZipLimits,
   chunk: Uint8Array,
   compressedConsumedSoFar: number
@@ -206,7 +269,7 @@ function accumulateChunk(
   totalState.realBytes += chunk.byteLength;
   entryState.crcState = crc32Update(entryState.crcState, chunk);
 
-  if (entryState.isImage) {
+  if (entryState.category === 'image') {
     if (entryState.headFilled < limits.imageHeadBytes) {
       const room = limits.imageHeadBytes - entryState.headFilled;
       const slice = chunk.byteLength <= room ? chunk : chunk.subarray(0, room);
@@ -215,6 +278,10 @@ function accumulateChunk(
     }
     // Bytes beyond imageHeadBytes are counted above (for the caps below) but never retained.
   } else {
+    // scf.json, a checked-then-discarded structure/source member (still needs its full bytes
+    // transiently to run checkStructureMember/checkSourceTextMember, ledger F60), or a sidecar: all
+    // three accumulate in full for now — what happens to `fullChunks` once the entry finishes is
+    // `processEntry`'s decision, not this function's.
     entryState.fullChunks.push(chunk);
   }
 
@@ -227,7 +294,7 @@ function accumulateChunk(
   }
   if (entryState.realBytes > entryState.perEntryCap) {
     throw new BundleZipLimitError(
-      entryState.isImage ? 'IMAGE_TOO_LARGE' : 'BUNDLE_MEMBER_TOO_LARGE',
+      entryState.category === 'image' ? 'IMAGE_TOO_LARGE' : 'BUNDLE_MEMBER_TOO_LARGE',
       `ZIP entry's real decompressed size exceeds the ${entryState.perEntryCap} byte per-entry limit: ${entryState.path}`,
       entryState.path
     );
@@ -238,6 +305,19 @@ function accumulateChunk(
       `ZIP's total real decompressed size exceeds the ${limits.maxTotalUncompressedBytes} byte limit.`,
       entryState.path
     );
+  }
+  if (entryState.category === 'sidecar') {
+    // Ledger F60: sidecars have no check-then-discard mechanism to fall back on (unlike structure/
+    // source), so they get their own, much tighter aggregate instead — index-only per-image metadata
+    // has no legitimate reason to add up to much.
+    totalState.sidecarBytes += chunk.byteLength;
+    if (totalState.sidecarBytes > limits.maxSidecarsTotalBytes) {
+      throw new BundleZipLimitError(
+        'BUNDLE_SIDECARS_TOO_LARGE',
+        `ZIP's sidecar JSON members total more than the ${limits.maxSidecarsTotalBytes} byte limit.`,
+        entryState.path
+      );
+    }
   }
   if (
     compressedConsumedSoFar >= MIN_BYTES_FOR_RATIO_CHECK &&
@@ -413,8 +493,9 @@ async function processEntry(
   entry: CentralDirectoryEntry,
   limits: BoundedZipLimits,
   issues: BoundedZipIssue[],
+  warnings: BoundedZipIssue[],
   files: BundleFiles,
-  totalState: { realBytes: number }
+  totalState: TotalScanState
 ): Promise<void> {
   if (cursor.position !== entry.localHeaderOffset) {
     throw new Error(
@@ -452,8 +533,10 @@ async function processEntry(
     await skipEntryData(cursor, entry);
     return;
   }
-  if (entry.isUnixSymlink) {
-    // Already reported by `readCentralDirectory` (BUNDLE_SYMLINK_REJECTED); just walk past its data.
+  if (entry.isUnixNonRegularFile) {
+    // Already reported by `readCentralDirectory` (BUNDLE_SYMLINK_REJECTED or BUNDLE_NON_REGULAR_FILE,
+    // ledger F61 — computed from the Unix mode bits alone, never gated on the "version made by" host
+    // byte); just walk past its data.
     await skipEntryData(cursor, entry);
     return;
   }
@@ -474,12 +557,14 @@ async function processEntry(
     return;
   }
 
-  const isImage = isImageLikeName(entry.name);
+  const category = categorizeMember(entry.name);
+  const perEntryCap =
+    category === 'image' ? limits.maxImageEntryBytes : category === 'scfJson' ? limits.maxScfJsonBytes : limits.maxNonImageEntryBytes;
   const entryState: EntryScanState = {
     path: entry.name,
-    isImage,
+    category,
     declaredUncompressedSize: entry.uncompressedSize,
-    perEntryCap: isImage ? limits.maxImageEntryBytes : limits.maxNonImageEntryBytes,
+    perEntryCap,
     realBytes: 0,
     headChunks: [],
     headFilled: 0,
@@ -521,10 +606,32 @@ async function processEntry(
     );
   }
 
-  files.set(
-    entry.name,
-    isImage ? { head: concatUint8(entryState.headChunks), size: entryState.realBytes } : concatUint8(entryState.fullChunks)
-  );
+  if (entryState.category === 'image') {
+    files.set(entry.name, { head: concatUint8(entryState.headChunks), size: entryState.realBytes });
+    return;
+  }
+
+  if (entryState.category === 'checkedMember') {
+    // Ledger F60: run the exact content checks validateBundle would otherwise apply (moved into
+    // @scrymore/scf as checkStructureMember/checkSourceTextMember precisely for this), record whatever
+    // they find as ordinary read issues (the same "collected, read continues" bucket as an unsafe path
+    // or a symlink above), and then let `fullBytes` — and every chunk that built it — be freed: only a
+    // few bytes (`{checked: true, size}`) are ever retained for this member from this point on, not its
+    // content. `optedIn: true` in the sourceText case mirrors validateBundle's own call — the aggregate
+    // SOURCE_TEXT_NOT_OPT_IN check (once the whole manifest is known) is always the source of truth,
+    // never this per-member fast path; see checkSourceTextMember's own doc comment.
+    const fullBytes = concatUint8(entryState.fullChunks);
+    const result = entry.name.startsWith('structure/')
+      ? checkStructureMember(entry.name, fullBytes)
+      : checkSourceTextMember(entry.name, fullBytes, true);
+    for (const e of result.errors) issues.push(issue(e.code, e.message, e.path));
+    for (const w of result.warnings) warnings.push(issue(w.code, w.message, w.path));
+    files.set(entry.name, { checked: true, size: entryState.realBytes });
+    return;
+  }
+
+  // scf.json or a sidecar JSON member: kept in full, per this module's own doc comment.
+  files.set(entry.name, concatUint8(entryState.fullChunks));
 }
 
 /**
@@ -543,8 +650,13 @@ export async function readBoundedZipEntries(
   const cursor = new ByteCursor(stream);
   try {
     const issues: BoundedZipIssue[] = [...centralDirectoryIssues];
+    // Ledger F60: warnings surfaced by checkStructureMember/checkSourceTextMember on a checked-then-
+    // discarded member (e.g. STRUCTURE_TREE_LARGE) — never cause rejection, but are worth carrying
+    // through to the final response the same way validateBundle's own `warnings` would have, had the
+    // member's full bytes still been around for it to see.
+    const warnings: BoundedZipIssue[] = [];
     const files: BundleFiles = new Map();
-    const totalState = { realBytes: 0 };
+    const totalState: TotalScanState = { realBytes: 0, sidecarBytes: 0 };
 
     // ascending local-header-offset order: this reader only ever moves forward, so a corrupt or
     // adversarial central directory that lists entries out of physical order (or aliases two
@@ -556,7 +668,7 @@ export async function readBoundedZipEntries(
       if (cursor.position > limits.maxRawBytes) {
         throw new BundleZipLimitError('BUNDLE_TOO_LARGE', `ZIP object exceeds the ${limits.maxRawBytes} raw byte limit.`);
       }
-      await processEntry(cursor, entry, limits, issues, files, totalState);
+      await processEntry(cursor, entry, limits, issues, warnings, files, totalState);
     }
 
     if (cursor.position !== centralDirectoryOffset) {
@@ -566,7 +678,7 @@ export async function readBoundedZipEntries(
     }
 
     if (issues.length > 0) return { ok: false, issues };
-    return { ok: true, files };
+    return { ok: true, files, warnings };
   } catch (e) {
     if (e instanceof BundleZipLimitError) {
       return { ok: false, issues: [issue(e.issueCode, e.message, e.path)] };
@@ -606,7 +718,7 @@ export async function readBoundedZip(
     // Nothing to stream — a zero-entry archive never needs to open the (potentially large) object
     // stream at all.
     if (centralDirectory.issues.length > 0) return { ok: false, issues: centralDirectory.issues };
-    return { ok: true, files: new Map() };
+    return { ok: true, files: new Map(), warnings: [] };
   }
 
   const stream = await storage.getObjectStream(key);

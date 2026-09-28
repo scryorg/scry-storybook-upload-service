@@ -33,7 +33,15 @@ export interface CentralDirectoryEntry {
    *  cross-check the streaming reader's own position as it walks forward, never to seek. */
   localHeaderOffset: number;
   isDirectory: boolean;
+  /** True specifically when the Unix mode bits say symlink (`S_IFLNK`) — kept as its own field (rather
+   *  than folded into `isUnixNonRegularFile`) purely so a rejection can say "symlink" instead of the
+   *  more generic message. Every symlink is also `isUnixNonRegularFile`. */
   isUnixSymlink: boolean;
+  /** True for any FILE entry (one not already named as a directory, i.e. `name` doesn't end in `/`)
+   *  whose external attributes carry a Unix file-type other than "regular file" — a symlink, but also
+   *  a character/block device, FIFO or socket. Computed from the mode bits alone, regardless of the
+   *  "version made by" host byte (ledger F61) — see that field's removal below. */
+  isUnixNonRegularFile: boolean;
 }
 
 export interface CentralDirectoryLimits {
@@ -74,11 +82,14 @@ const ZIP64_EOCD_LOCATOR_SIGNATURE = 0x07064b50;
 const ZIP64_EOCD_LOCATOR_SIZE = 20;
 const CENTRAL_DIR_SIGNATURE = 0x02014b50;
 const CENTRAL_DIR_RECORD_FIXED_SIZE = 46;
-/** "version made by" host byte for a UNIX-created entry (the only host that carries a Unix mode,
- *  and therefore a symlink bit, in its external file attributes). */
-const UNIX_HOST = 3;
+/** `st_mode & S_IFMT` — the file-type bits of a Unix mode word. */
+const S_IFMT = 0xf000;
 /** Unix file-type bits (`st_mode & S_IFMT`) for a symbolic link. */
 const S_IFLNK = 0xa000;
+/** Unix file-type bits for an ordinary file — the only type this reader ever accepts for a FILE entry
+ *  (one not already named as a directory). Zero (no type bits set at all, e.g. a DOS-created entry
+ *  that never populated Unix external attributes in the first place) is also treated as regular. */
+const S_IFREG = 0x8000;
 /** A 32-bit field holding this exact value signals "the real value needs a Zip64 extra field" —
  *  this reader treats that as unsupported rather than going to find the extra field (ledger F49). */
 const ZIP64_SENTINEL_32 = 0xffffffff;
@@ -193,12 +204,18 @@ export async function readCentralDirectory(
 
   const entries: CentralDirectoryEntry[] = [];
   const issues: CentralDirectoryIssue[] = [];
+  // Ledger F62: two central-directory records sharing a name -- exactly, or merely after Unicode NFC
+  // normalisation and case-folding (the same collision many real filesystems apply on extraction, e.g.
+  // macOS's default case-insensitive volumes, or two visually-identical names composed differently) --
+  // is a raw zip-path-level smuggling primitive: nothing downstream ever notices, since a `Map`'s
+  // `.set(entry.name, ...)` silently keeps whichever entry is physically last and discards the other
+  // with no signal at all. Tracked by a folded key so both forms of collision are caught with one check.
+  const seenNames = new Map<string, string>(); // foldedName -> first entry's real (unfolded) name
   let idx = 0;
   for (let n = 0; n < totalEntries; n++) {
     if (idx + CENTRAL_DIR_RECORD_FIXED_SIZE > cd.byteLength || cd.readUInt32LE(idx) !== CENTRAL_DIR_SIGNATURE) {
       return { ok: false, issues: [issue('BUNDLE_ZIP_INVALID', 'Corrupt central directory: expected another record.')] };
     }
-    const versionMadeByHost = cd.readUInt8(idx + 5);
     const flags = cd.readUInt16LE(idx + 8);
     const compressionMethod = cd.readUInt16LE(idx + 10);
     const crc32 = cd.readUInt32LE(idx + 16);
@@ -216,6 +233,24 @@ export async function readCentralDirectory(
     }
     const name = cd.toString('utf8', idx + CENTRAL_DIR_RECORD_FIXED_SIZE, idx + CENTRAL_DIR_RECORD_FIXED_SIZE + nameLen);
 
+    const foldedName = name.normalize('NFC').toLowerCase();
+    const firstName = seenNames.get(foldedName);
+    if (firstName !== undefined) {
+      return {
+        ok: false,
+        issues: [
+          issue(
+            'BUNDLE_DUPLICATE_NAME',
+            firstName === name
+              ? `ZIP has two entries with the exact same name: ${name}`
+              : `ZIP has two entries whose names collide after Unicode normalisation/case-folding: ${JSON.stringify(firstName)} and ${JSON.stringify(name)}`,
+            name
+          ),
+        ],
+      };
+    }
+    seenNames.set(foldedName, name);
+
     if (compressedSize === ZIP64_SENTINEL_32 || uncompressedSize === ZIP64_SENTINEL_32 || localHeaderOffset === ZIP64_SENTINEL_32) {
       return {
         ok: false,
@@ -229,9 +264,26 @@ export async function readCentralDirectory(
       };
     }
 
-    const isUnixSymlink = versionMadeByHost === UNIX_HOST && ((externalAttrs >>> 16) & 0xf000) === S_IFLNK;
-    if (isUnixSymlink) {
-      issues.push(issue('BUNDLE_SYMLINK_REJECTED', `ZIP entry is a symlink, which a bundle must not contain: ${name}`, name));
+    // Ledger F61: this used to also require `versionMadeByHost === UNIX_HOST`, which a crafted central
+    // directory record can trivially lie about while still carrying genuine Unix mode bits in external
+    // attributes — the mode bits themselves are the only thing checked now, regardless of the declared
+    // host. `isDirectory` (by NAME, computed just below) is checked first so a legitimately Unix-mode-
+    // stamped directory entry (S_IFDIR, very common from real Unix zip tools) is never rejected here;
+    // this is only about FILE entries whose Unix mode disagrees with them being an ordinary file.
+    const isDirectory = name.endsWith('/');
+    const unixFileType = (externalAttrs >>> 16) & S_IFMT;
+    const isUnixSymlink = unixFileType === S_IFLNK;
+    const isUnixNonRegularFile = !isDirectory && unixFileType !== 0 && unixFileType !== S_IFREG;
+    if (isUnixNonRegularFile) {
+      issues.push(
+        isUnixSymlink
+          ? issue('BUNDLE_SYMLINK_REJECTED', `ZIP entry is a symlink, which a bundle must not contain: ${name}`, name)
+          : issue(
+              'BUNDLE_NON_REGULAR_FILE',
+              `ZIP entry's Unix mode (external attributes) says it is not a regular file (type 0o${unixFileType.toString(8)}): ${name}`,
+              name
+            )
+      );
     }
 
     entries.push({
@@ -242,8 +294,9 @@ export async function readCentralDirectory(
       crc32,
       flags,
       localHeaderOffset,
-      isDirectory: name.endsWith('/'),
+      isDirectory,
       isUnixSymlink,
+      isUnixNonRegularFile,
     });
 
     idx = recordEnd;

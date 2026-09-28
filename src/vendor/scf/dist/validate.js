@@ -1,7 +1,7 @@
 import { fromSbcov } from './from-sbcov.js';
 import { readImageDimensions } from './image-dimensions.js';
 import { sidecarCapturesFromImages } from './sidecars-internal.js';
-import { bundleFileFull, bundleFileHead, bundleFileSize } from './types.js';
+import { bundleFileFull, bundleFileHead, bundleFileSize, isCheckedBundleFile } from './types.js';
 const SUPPORTED_SCF_VERSIONS = new Set(['1.0']);
 const ALLOWED_IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'webp']);
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
@@ -14,6 +14,16 @@ const decoder = new TextDecoder();
 function extOf(path) {
     const m = /\.([a-zA-Z0-9]+)$/.exec(path);
     return m ? m[1].toLowerCase() : '';
+}
+/**
+ * The only two member prefixes a `{checked: true, size}` entry (ledger F60) is ever accepted for —
+ * a streaming caller may only skip retaining full bytes for these, since `checkStructureMember`/
+ * `checkSourceTextMember` are the only two extracted per-member checks this package exposes for
+ * that purpose. Anything else (scf.json, sidecar JSON, an image) must still be supplied in full or
+ * as the images-only `{head, size}` shape (F50).
+ */
+function isCheckableStructureOrSourcePath(path) {
+    return (path.startsWith('structure/') && extOf(path) === 'json') || path.startsWith('source/');
 }
 const EXT_FAMILY = { png: 'png', jpg: 'jpeg', jpeg: 'jpeg', webp: 'webp' };
 /** Sniffs the magic bytes so a `.png` with the wrong content (or vice versa) is still caught. */
@@ -161,6 +171,67 @@ function looksLikeScfTree(parsed) {
     return typeof tree.root.type === 'string';
 }
 /**
+ * The content checks `validateBundle` applies to a `structure.file` member — a hard 10 MB size cap,
+ * a 2 MB soft (warning) threshold, and a shape check (parses as JSON and looks like a scf-tree/1
+ * document). Extracted (ledger F60) so a caller that streams a large bundle member-by-member rather
+ * than buffering the whole thing (e.g. a Worker-safe bundle-upload route, or `scry-build-processing-
+ * service`'s own streaming read) can run exactly these checks the moment a `structure/*.json` member
+ * is fully inflated, record the result, and then discard the bytes — passing `{checked: true, size}`
+ * for that member to `validateBundle` afterwards instead of its full content (see `BundleFileChecked`).
+ * `path` is only used in issue messages/paths, never re-derived from it; the caller decides which
+ * member this is. Returns no `id` — the caller (`validateBundle`, or a streaming caller once it has
+ * matched this path back to a capture) attaches that itself.
+ */
+export function checkStructureMember(path, bytes) {
+    const errors = [];
+    const warnings = [];
+    if (bytes.byteLength > MAX_STRUCTURE_HARD_BYTES) {
+        errors.push(issue('STRUCTURE_TREE_TOO_LARGE', `structure file is over 10 MB: ${path}`, { path }));
+        return { errors, warnings };
+    }
+    if (bytes.byteLength > MAX_STRUCTURE_BYTES) {
+        warnings.push(issue('STRUCTURE_TREE_LARGE', `structure file is over 2 MB: ${path}`, { path }));
+    }
+    let parsedTree;
+    try {
+        parsedTree = JSON.parse(decoder.decode(bytes));
+    }
+    catch {
+        parsedTree = undefined;
+    }
+    if (!looksLikeScfTree(parsedTree)) {
+        errors.push(issue('STRUCTURE_FORMAT_INVALID', `structure.file does not parse as a scf-tree/1 document: ${path}`, { path }));
+    }
+    return { errors, warnings };
+}
+/**
+ * The content checks `validateBundle` applies to a `sourceText.file` member — a 1 MB size cap and a
+ * plausible-UTF-8-text check (`looksLikeBinary`/`isValidUtf8`, ledger F24). Extracted (ledger F60)
+ * for the same streaming reason as `checkStructureMember` above — see its doc comment.
+ *
+ * `optedIn` is a fast-path only: when a caller already knows, at check time, that the manifest does
+ * NOT set `optIn.sourceText: true` (e.g. it read `scf.json` earlier in the same stream), passing
+ * `false` raises `SOURCE_TEXT_NOT_OPT_IN` immediately for this member instead of spending time on the
+ * size/binary/UTF-8 scan. It is never required for correctness: `validateBundle`'s own aggregate
+ * `SOURCE_TEXT_NOT_OPT_IN` check (across every capture, once the whole manifest is known) is always
+ * the source of truth and runs regardless, which is why `validateBundle` itself always calls this
+ * with `optedIn: true` — it would otherwise duplicate its own aggregate error.
+ */
+export function checkSourceTextMember(path, bytes, optedIn) {
+    const errors = [];
+    const warnings = [];
+    if (bytes.byteLength > MAX_SOURCE_TEXT_BYTES) {
+        errors.push(issue('SOURCE_TEXT_TOO_LARGE', `sourceText.file is over 1 MB: ${path}`, { path }));
+    }
+    else if (looksLikeBinary(bytes) || !isValidUtf8(bytes)) {
+        errors.push(issue('SOURCE_TEXT_NOT_TEXT', `sourceText.file is not valid UTF-8 text: ${path}`, { path }));
+    }
+    if (optedIn === false) {
+        errors.push(issue('SOURCE_TEXT_NOT_OPT_IN', `sourceText.file present but the manifest does not set optIn.sourceText: true: ${path}`, { path }));
+    }
+    return { errors, warnings };
+}
+/**
  * Validates an SCF bundle (or a legacy sbcov bundle, converted first) against spec/scf-1.0.md.
  * `input` is either an in-memory bundle (a Map of bundle-relative POSIX path -> bytes — the shape
  * a Worker or the upload service already has after reading a ZIP) or a directory path (Node only).
@@ -176,10 +247,22 @@ export async function validateBundle(input) {
         }
         return { ok: false, errors, warnings, manifest: null };
     }
-    // Ledger F50: the {head, size} shape is for images only. Any other member given partially is refused
-    // outright, so JSON, structure trees and source text are always validated from their full bytes.
+    // Ledger F50: the {head, size} shape is for images only. Ledger F60: a NEW, distinct shape,
+    // {checked: true, size}, is additionally accepted for structure/*.json and source/* members only —
+    // it means a streaming caller already ran checkStructureMember/checkSourceTextMember against this
+    // member's full inflated bytes, recorded whatever issues that produced, and discarded the bytes to
+    // stay within a bounded memory budget. Any other member given either partial shape (including a
+    // {checked, size} entry outside those two prefixes, or a {head, size} entry that isn't an image) is
+    // refused outright, so scf.json, sidecars and anything not explicitly exempted are always validated
+    // from their full bytes.
     const partialNonImages = [...files.entries()]
-        .filter(([p, entry]) => !(entry instanceof Uint8Array) && !ALLOWED_IMAGE_EXT.has(extOf(p)))
+        .filter(([p, entry]) => {
+        if (entry instanceof Uint8Array)
+            return false;
+        if (isCheckedBundleFile(entry))
+            return !isCheckableStructureOrSourcePath(p);
+        return !ALLOWED_IMAGE_EXT.has(extOf(p));
+    })
         .map(([p]) => p);
     if (partialNonImages.length > 0) {
         for (const p of partialNonImages) {
@@ -318,26 +401,25 @@ export async function validateBundle(input) {
             }
             else {
                 referencedPaths.add(structPath);
-                const structBytes = bundleFileFull(files.get(structPath));
-                if (!structBytes) {
-                    errors.push(issue('STRUCTURE_FILE_MISSING', `structure.file not found in bundle: ${structPath}`, { id, path: structPath }));
-                }
-                else if (structBytes.byteLength > MAX_STRUCTURE_HARD_BYTES) {
-                    errors.push(issue('STRUCTURE_TREE_TOO_LARGE', `structure file is over 10 MB: ${structPath}`, { id, path: structPath }));
+                const entry = files.get(structPath);
+                if (isCheckedBundleFile(entry)) {
+                    // Ledger F60: this member was already content-checked (checkStructureMember) and its bytes
+                    // discarded by a streaming caller before validateBundle ever saw them. The cross-checks
+                    // above (referenced-by-a-capture) and existence (an entry is present at all) are all that's
+                    // left to do here — there is nothing left to re-check content-wise, and no bytes to do it
+                    // with even if there were.
                 }
                 else {
-                    if (structBytes.byteLength > MAX_STRUCTURE_BYTES) {
-                        warnings.push(issue('STRUCTURE_TREE_LARGE', `structure file is over 2 MB: ${structPath}`, { id, path: structPath }));
+                    const structBytes = bundleFileFull(entry);
+                    if (!structBytes) {
+                        errors.push(issue('STRUCTURE_FILE_MISSING', `structure.file not found in bundle: ${structPath}`, { id, path: structPath }));
                     }
-                    let parsedTree;
-                    try {
-                        parsedTree = JSON.parse(decoder.decode(structBytes));
-                    }
-                    catch {
-                        parsedTree = undefined;
-                    }
-                    if (!looksLikeScfTree(parsedTree)) {
-                        errors.push(issue('STRUCTURE_FORMAT_INVALID', `structure.file does not parse as a scf-tree/1 document: ${structPath}`, { id, path: structPath }));
+                    else {
+                        const result = checkStructureMember(structPath, structBytes);
+                        for (const e of result.errors)
+                            errors.push({ ...e, id });
+                        for (const w of result.warnings)
+                            warnings.push({ ...w, id });
                     }
                 }
             }
@@ -358,21 +440,29 @@ export async function validateBundle(input) {
             }
             else {
                 referencedPaths.add(sourcePath);
-                const sourceBytes = bundleFileFull(files.get(sourcePath));
-                if (!sourceBytes) {
-                    errors.push(issue('SOURCE_TEXT_FILE_MISSING', `sourceText.file not found in bundle: ${sourcePath}`, {
-                        id,
-                        path: sourcePath,
-                    }));
+                const entry = files.get(sourcePath);
+                if (isCheckedBundleFile(entry)) {
+                    // Ledger F60: already content-checked (checkSourceTextMember) upstream; see the structure.file
+                    // branch above for the full reasoning — same shape, same trust boundary.
                 }
-                else if (sourceBytes.byteLength > MAX_SOURCE_TEXT_BYTES) {
-                    errors.push(issue('SOURCE_TEXT_TOO_LARGE', `sourceText.file is over 1 MB: ${sourcePath}`, { id, path: sourcePath }));
-                }
-                else if (looksLikeBinary(sourceBytes) || !isValidUtf8(sourceBytes)) {
-                    errors.push(issue('SOURCE_TEXT_NOT_TEXT', `sourceText.file is not valid UTF-8 text: ${sourcePath}`, {
-                        id,
-                        path: sourcePath,
-                    }));
+                else {
+                    const sourceBytes = bundleFileFull(entry);
+                    if (!sourceBytes) {
+                        errors.push(issue('SOURCE_TEXT_FILE_MISSING', `sourceText.file not found in bundle: ${sourcePath}`, {
+                            id,
+                            path: sourcePath,
+                        }));
+                    }
+                    else {
+                        // optedIn: true — the aggregate SOURCE_TEXT_NOT_OPT_IN check below (sourceTextCaptureIds vs.
+                        // manifest.optIn.sourceText) is this function's sole authority on opt-in; see
+                        // checkSourceTextMember's own doc comment for why validateBundle always passes true here.
+                        const result = checkSourceTextMember(sourcePath, sourceBytes, true);
+                        for (const e of result.errors)
+                            errors.push({ ...e, id });
+                        for (const w of result.warnings)
+                            warnings.push({ ...w, id });
+                    }
                 }
             }
         }

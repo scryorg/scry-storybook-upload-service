@@ -110,7 +110,9 @@ describe('readCentralDirectory', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.issues).toEqual([expect.objectContaining({ code: 'BUNDLE_SYMLINK_REJECTED', path: 'images/a.png' })]);
-    expect(result.entries.find((e) => e.name === 'images/a.png')?.isUnixSymlink).toBe(true);
+    const entry = result.entries.find((e) => e.name === 'images/a.png');
+    expect(entry?.isUnixSymlink).toBe(true);
+    expect(entry?.isUnixNonRegularFile).toBe(true);
   });
 
   it('marks a name ending in "/" as a directory entry', async () => {
@@ -118,6 +120,108 @@ describe('readCentralDirectory', () => {
     const result = await readCentralDirectory(rangeReaderOf(zip), zip.length, LIMITS);
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.entries[0].isDirectory).toBe(true);
+  });
+
+  describe('ledger F61: symlink rejection is not bypassable by lying about the "version made by" host byte', () => {
+    it('still detects a symlink when the Unix mode bits are set but the declared host is NOT Unix', async () => {
+      const zip = buildZip([
+        { name: 'scf.json', data: Buffer.from('{}') },
+        // The exact repro: genuine S_IFLNK mode bits, but a host byte (0 = FAT/DOS) that a naive
+        // `versionMadeByHost === UNIX_HOST` gate would have trusted to mean "not really Unix, so
+        // don't even look at the mode bits".
+        { name: 'source/evil.src.txt', data: Buffer.from('/etc/passwd'), unixMode: 0o120777, versionMadeByHost: 0 },
+      ]);
+      const result = await readCentralDirectory(rangeReaderOf(zip), zip.length, LIMITS);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.issues).toEqual([expect.objectContaining({ code: 'BUNDLE_SYMLINK_REJECTED', path: 'source/evil.src.txt' })]);
+      const entry = result.entries.find((e) => e.name === 'source/evil.src.txt');
+      expect(entry?.isUnixSymlink).toBe(true);
+      expect(entry?.isUnixNonRegularFile).toBe(true);
+    });
+
+    it('also rejects a non-symlink non-regular type (e.g. a FIFO) regardless of the host byte', async () => {
+      const S_IFIFO = 0o10644; // FIFO (0o1xxxx) with 0644 perms
+      const zip = buildZip([{ name: 'a.txt', data: Buffer.from('x'), unixMode: S_IFIFO, versionMadeByHost: 0 }]);
+      const result = await readCentralDirectory(rangeReaderOf(zip), zip.length, LIMITS);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.issues).toEqual([expect.objectContaining({ code: 'BUNDLE_NON_REGULAR_FILE', path: 'a.txt' })]);
+      const entry = result.entries.find((e) => e.name === 'a.txt');
+      expect(entry?.isUnixSymlink).toBe(false);
+      expect(entry?.isUnixNonRegularFile).toBe(true);
+    });
+
+    it('never flags an ordinary regular file, Unix host or not', async () => {
+      const zip = buildZip([
+        { name: 'a.txt', data: Buffer.from('x'), versionMadeByHost: 3 },
+        { name: 'b.txt', data: Buffer.from('x'), versionMadeByHost: 0 }, // DOS host, no Unix mode info at all
+      ]);
+      const result = await readCentralDirectory(rangeReaderOf(zip), zip.length, LIMITS);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.issues).toEqual([]);
+      expect(result.entries.every((e) => !e.isUnixNonRegularFile && !e.isUnixSymlink)).toBe(true);
+    });
+
+    it('never flags a real directory entry (S_IFDIR is common and legitimate on a "/"-named entry)', async () => {
+      const S_IFDIR_0755 = 0o40755;
+      const zip = buildZip([{ name: 'images/', data: Buffer.alloc(0), unixMode: S_IFDIR_0755 }]);
+      const result = await readCentralDirectory(rangeReaderOf(zip), zip.length, LIMITS);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.issues).toEqual([]);
+      expect(result.entries[0].isUnixNonRegularFile).toBe(false);
+    });
+  });
+
+  describe('ledger F62: duplicate central-directory entry names are rejected outright, not silently collapsed', () => {
+    it('rejects two entries with the exact same name', async () => {
+      const zip = buildZip([
+        { name: 'scf.json', data: Buffer.from('{"a":1}') },
+        { name: 'scf.json', data: Buffer.from('{"a":2}') },
+      ]);
+      const result = await readCentralDirectory(rangeReaderOf(zip), zip.length, LIMITS);
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.issues).toEqual([expect.objectContaining({ code: 'BUNDLE_DUPLICATE_NAME', path: 'scf.json' })]);
+    });
+
+    it('rejects two names that collide only after case-folding', async () => {
+      const zip = buildZip([
+        { name: 'images/A.png', data: Buffer.from([0x89, 0x50, 0x4e, 0x47]) },
+        { name: 'images/a.png', data: Buffer.from([0x89, 0x50, 0x4e, 0x47]) },
+      ]);
+      const result = await readCentralDirectory(rangeReaderOf(zip), zip.length, LIMITS);
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.issues[0].code).toBe('BUNDLE_DUPLICATE_NAME');
+    });
+
+    it('rejects two names that collide only after Unicode NFC normalisation (combining vs. precomposed)', async () => {
+      const precomposed = 'images/café.png'; // é as a single code point
+      const decomposed = 'images/café.png'; // e + combining acute accent — same NFC form
+      expect(precomposed.normalize('NFC')).toBe(decomposed.normalize('NFC'));
+      const zip = buildZip([
+        { name: precomposed, data: Buffer.from([0x89, 0x50, 0x4e, 0x47]) },
+        { name: decomposed, data: Buffer.from([0x89, 0x50, 0x4e, 0x47]) },
+      ]);
+      const result = await readCentralDirectory(rangeReaderOf(zip), zip.length, LIMITS);
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.issues[0].code).toBe('BUNDLE_DUPLICATE_NAME');
+    });
+
+    it('does not flag two genuinely distinct names', async () => {
+      const zip = buildZip([
+        { name: 'images/a.png', data: Buffer.from([0x89, 0x50, 0x4e, 0x47]) },
+        { name: 'images/b.png', data: Buffer.from([0x89, 0x50, 0x4e, 0x47]) },
+      ]);
+      const result = await readCentralDirectory(rangeReaderOf(zip), zip.length, LIMITS);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.issues).toEqual([]);
+    });
   });
 
   describe('ledger F49: Zip64 and multi-disk archives are rejected outright, not partially supported', () => {

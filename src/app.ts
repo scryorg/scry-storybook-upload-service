@@ -1381,11 +1381,19 @@ app.openapi(bundleCompleteRoute, async (c) => {
     }
 
     // The shared, vendored validator (contract §2/G7): schema, member allow-list by content sniff,
-    // duplicate/shared-image checks, link safety, sourceText opt-in — same code the CLI runs.
+    // duplicate/shared-image checks, link safety, sourceText opt-in — same code the CLI runs. Any
+    // structure/*.json or source/* member was already content-checked and discarded while streaming
+    // (ledger F60, {checked: true, size}); validateBundle only re-runs its cross-checks for those.
     const validation = await validateBundle(zipResult.files);
     if (!validation.ok) {
       return reject(validation.errors);
     }
+    // Ledger F60: warnings from a checked-then-discarded member (e.g. STRUCTURE_TREE_LARGE) never
+    // reached validateBundle (it never saw that member's bytes) — merge them back in here so the
+    // caller sees the same warnings it would have gotten had the whole bundle been validated in one
+    // pass, per contract §9/G7 (a bundle the validator would accept-with-warnings is never silently
+    // accepted-with-fewer-warnings just because this route streamed it).
+    const warnings = [...zipResult.warnings, ...validation.warnings];
 
     let queued = false;
     if (queue) {
@@ -1415,7 +1423,7 @@ app.openapi(bundleCompleteRoute, async (c) => {
         queued,
         buildId,
         buildNumber: build.buildNumber,
-        ...(validation.warnings.length > 0 ? { warnings: validation.warnings } : {}),
+        ...(warnings.length > 0 ? { warnings } : {}),
       },
       200
     );

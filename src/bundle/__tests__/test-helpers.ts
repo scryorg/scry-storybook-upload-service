@@ -45,6 +45,11 @@ export interface ZipEntryInput {
   /** Unix `st_mode` bits for the central directory's external attributes (default: a regular file,
    *  0o100644). Set to `0o120777` (S_IFLNK | 0777) to fabricate a symlink entry. */
   unixMode?: number;
+  /** The central directory's "version made by" host byte (default 3 = UNIX — the only host real Unix
+   *  tools ever declare when they also set Unix mode bits). Override to something else (e.g. 0 = FAT/
+   *  DOS) while still setting `unixMode` to a non-regular type, to craft ledger F61's exact repro: a
+   *  record whose Unix mode bits say "symlink" but whose declared host says "not Unix". */
+  versionMadeByHost?: number;
   /** The CENTRAL DIRECTORY's declared uncompressed size (authoritative under the current reader —
    *  ledger F49). Defaults to `rawContent.length` (honest); pass this explicitly to craft a
    *  lying/mismatched entry. */
@@ -136,7 +141,7 @@ export function buildZip(entries: ZipEntryInput[]): Buffer {
     const localEntry = Buffer.concat(parts);
     localParts.push(localEntry);
 
-    const versionMadeBy = (3 << 8) | 20; // high byte 3 = UNIX host, low byte 20 = spec version 2.0
+    const versionMadeBy = ((entry.versionMadeByHost ?? 3) << 8) | 20; // high byte = host, low byte 20 = spec version 2.0
     // `<<` operates on signed 32-bit ints in JS, and a regular-file/symlink mode shifted into the
     // top 16 bits sets the sign bit — `>>> 0` coerces back to the unsigned value writeUInt32LE needs.
     const externalAttrs = ((entry.unixMode ?? S_IFREG) << 16) >>> 0;
