@@ -13,6 +13,7 @@ import {
   generateKeyId,
   isValidApiKeyFormat,
 } from './apikey.utils.js';
+import { retryFetch } from '../../utils/firestore-retry.js';
 
 interface ApiKeyWorkerConfig {
   projectId: string;
@@ -281,22 +282,26 @@ export class ApiKeyServiceWorker implements ApiKeyService {
    * Helper methods for Firestore REST API operations
    */
 
+  // Idempotent write: every field here is a fixed value the caller already
+  // computed (never a Firestore increment transform), so resending the same
+  // PATCH on a transient failure is safe. Retried on 429/503/500/network (F85).
   private async setDocument(path: string, fields: any, token: string): Promise<void> {
     const url = `${this.baseUrl}/${path}`;
-    const response = await fetch(url, {
+    const response = await retryFetch(() => fetch(url, {
       method: 'PATCH',
       headers: {
         'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ fields }),
-    });
+    }), { op: 'setDocument' });
 
     if (!response.ok) {
       throw new Error(`Failed to set document: ${response.statusText}`);
     }
   }
 
+  // Idempotent write, same reasoning as setDocument above. Retried on 429/503/500/network (F85).
   private async patchDocument(path: string, fields: any, token: string): Promise<void> {
     const url = `${this.baseUrl}/${path}`;
     // One `updateMask.fieldPaths` param per field; a comma-joined value is one invalid path (F73/F84).
@@ -305,30 +310,33 @@ export class ApiKeyServiceWorker implements ApiKeyService {
       params.append('updateMask.fieldPaths', /^[A-Za-z_][A-Za-z0-9_]*$/.test(key) ? key : `\`${key.replace(/`/g, '\\`')}\``);
     }
 
-    const response = await fetch(`${url}?${params.toString()}`, {
+    const response = await retryFetch(() => fetch(`${url}?${params.toString()}`, {
       method: 'PATCH',
       headers: {
         'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ fields }),
-    });
+    }), { op: 'patchDocument' });
 
     if (!response.ok) {
       throw new Error(`Failed to patch document: ${response.statusText}`);
     }
   }
 
+  // Idempotent read: retried on 429/503/500/network (F85/F86 — this is the
+  // validateApiKey query that 500'd the whole presign route for 7+ minutes
+  // straight on stage without retrying).
   private async queryDocuments(parent: string, structuredQuery: any, token: string): Promise<any[]> {
     const url = `${this.baseUrl}/${parent}:runQuery`;
-    const response = await fetch(url, {
+    const response = await retryFetch(() => fetch(url, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ structuredQuery }),
-    });
+    }), { op: 'runQuery' });
 
     if (!response.ok) {
       throw new Error(`Failed to query documents: ${response.statusText}`);

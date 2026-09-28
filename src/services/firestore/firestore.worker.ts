@@ -9,6 +9,7 @@ import type {
   Upload,
   CreateUploadData,
 } from './firestore.types.js';
+import { retryFetch } from '../../utils/firestore-retry.js';
 
 interface FirestoreConfig {
   projectId: string;
@@ -680,13 +681,14 @@ export class FirestoreServiceWorker implements FirestoreService {
     return value;
   }
 
+  // Idempotent read: retried on 429/503/500/network (F85/F86).
   private async getDocument(path: string, token: string): Promise<any> {
     const url = `${this.baseUrl}/${path}`;
-    const response = await fetch(url, {
+    const response = await retryFetch(() => fetch(url, {
       headers: {
         'Authorization': `Bearer ${token}`,
       }
-    });
+    }), { op: 'getDocument' });
 
     if (response.status === 404) {
       return null;
@@ -699,16 +701,20 @@ export class FirestoreServiceWorker implements FirestoreService {
     return response.json();
   }
 
+  // Idempotent write: every field here is a fixed value the caller already
+  // computed (never a Firestore increment transform — the build/upload
+  // counters are read-then-written as an absolute number), so resending the
+  // same PATCH on a transient failure is safe. Retried on 429/503/500/network (F85).
   private async setDocument(path: string, fields: any, token: string): Promise<void> {
     const url = `${this.baseUrl}/${path}`;
-    const response = await fetch(url, {
+    const response = await retryFetch(() => fetch(url, {
       method: 'PATCH',
       headers: {
         'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ fields })
-    });
+    }), { op: 'setDocument' });
 
     if (!response.ok) {
       throw new Error(`Failed to set document: ${response.statusText}`);
@@ -734,14 +740,17 @@ export class FirestoreServiceWorker implements FirestoreService {
       params.append('updateMask.fieldPaths', quoteFieldPath(key));
     }
 
-    const response = await fetch(`${url}?${params.toString()}`, {
+    // Idempotent write: every field here is a fixed value the caller already
+    // computed (never a Firestore increment transform), so resending the same
+    // PATCH on a transient failure is safe. Retried on 429/503/500/network (F85).
+    const response = await retryFetch(() => fetch(`${url}?${params.toString()}`, {
       method: 'PATCH',
       headers: {
         'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ fields })
-    });
+    }), { op: 'patchDocument' });
 
     if (!response.ok) {
       // Surface the failure so a rejected multi-field update (e.g. marking a build failed with
@@ -770,7 +779,8 @@ export class FirestoreServiceWorker implements FirestoreService {
     });
     // Use the parent path in the URL for subcollection queries
     const url = `${this.baseUrl}/${parent}:runQuery`;
-    const response = await fetch(url, {
+    // Idempotent read: retried on 429/503/500/network (F85/F86).
+    const response = await retryFetch(() => fetch(url, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${token}`,
@@ -779,7 +789,7 @@ export class FirestoreServiceWorker implements FirestoreService {
       body: JSON.stringify({
         structuredQuery
       })
-    });
+    }), { op: 'runQuery' });
 
     if (!response.ok) {
       throw new Error(`Failed to query documents: ${response.statusText}`);
