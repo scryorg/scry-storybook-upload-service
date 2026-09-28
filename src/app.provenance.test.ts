@@ -45,7 +45,10 @@ function createServer(options: { storage: MockStorageService; firestore: Firesto
  * (invalid) field path and rejected with 400 "Invalid property path" — exactly the response
  * observed on stage before #34/#35 and reproduced against the real unmodified code in rca.md.
  */
-function createFirestoreRestSimulator(seedDocs: Record<string, any> = {}) {
+function createFirestoreRestSimulator(
+  seedDocs: Record<string, any> = {},
+  options: { failPatchWhen?: (fieldPaths: string[], docPath: string) => boolean } = {}
+) {
   const docs: Record<string, any> = { ...seedDocs };
 
   const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
@@ -92,6 +95,16 @@ function createFirestoreRestSimulator(seedDocs: Record<string, any> = {}) {
           status: 400,
           statusText: 'Bad Request',
           text: async () => `{"error":{"message":"Invalid property path \\"${fieldPaths[0]}\\""}}`,
+        } as any;
+      }
+      if (options.failPatchWhen?.(fieldPaths, docPath ?? '')) {
+        // A transient failure unrelated to the comma-join bug (e.g. a quota blip): proves
+        // provenanceError (D2) is set by ANY failed write, not only the one this hotfix fixes.
+        return {
+          ok: false,
+          status: 503,
+          statusText: 'Service Unavailable',
+          text: async () => '{"error":{"message":"simulated transient failure"}}',
         } as any;
       }
       const body = JSON.parse(String(init?.body ?? '{}'));
@@ -206,5 +219,104 @@ describe('regression-upload-provenance-updatemask (ISSUES.md #61)', () => {
     const build = await firestore.getBuild('acme', 'build-2');
     expect(build?.commitSha).toBe('b2c3d4e5f60718293a4b5c6d7e8f9012345678a1');
     expect(build?.branch).toBe('feat/something');
+  });
+});
+
+/**
+ * D2 (founder-approved follow-up to this hotfix, ISSUES.md #61): the RCA's core lesson is that a
+ * 100%-silent best-effort write is indistinguishable from a working one. When the provenance write
+ * fails for ANY reason (not just the comma-join bug this hotfix fixes), the build document now also
+ * gets a `provenanceError` marker via a separate single-field write, and the marker is cleared the
+ * next time a provenance write for that build succeeds. The upload API's response is unaffected
+ * either way.
+ */
+describe('provenanceError marker (upload-provenance-updatemask D2)', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('a failed provenance write leaves the upload response unchanged and sets provenanceError on the build document', async () => {
+    const { fetchMock } = createFirestoreRestSimulator(
+      { 'projects/acme/builds/build-3': seededBuild({ buildNumber: { integerValue: '3' } }) },
+      { failPatchWhen: (fieldPaths) => fieldPaths.includes('commitSha') && fieldPaths.includes('branch') }
+    );
+    const firestore = createRealFirestore(fetchMock);
+    const server = createServer({ storage: new MockStorageService(), firestore });
+
+    const res = await server.request('/upload/acme/main/coverage', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(
+        validCoveragePayload({ commitSha: 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678', branch: 'main' })
+      ),
+    });
+
+    // The response the CI job sees is unaffected by the provenance write failing.
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.success).toBe(true);
+
+    const build = await firestore.getBuild('acme', 'build-3');
+    // The write that actually failed never lands...
+    expect(build?.commitSha).toBeUndefined();
+    expect(build?.branch).toBeUndefined();
+    // ...but the failure is now visible on the one document a human would already be looking at.
+    expect(build?.provenanceError).toMatchObject({ route: 'coverage' });
+    expect(build?.provenanceError?.message).toContain('503');
+    expect(build?.provenanceError?.message.length).toBeLessThanOrEqual(300);
+    expect(typeof build?.provenanceError?.at).toBe('string');
+    expect(() => new Date(build!.provenanceError!.at).toISOString()).not.toThrow();
+  });
+
+  it('a successful provenance write clears a previously-recorded provenanceError', async () => {
+    const { fetchMock } = createFirestoreRestSimulator({
+      'projects/acme/builds/build-4': seededBuild({
+        buildNumber: { integerValue: '4' },
+        provenanceError: {
+          mapValue: {
+            fields: {
+              at: { stringValue: '2026-09-27T00:00:00.000Z' },
+              message: { stringValue: 'stale failure from an earlier deploy' },
+              route: { stringValue: 'coverage' },
+            },
+          },
+        },
+      }),
+    });
+    const firestore = createRealFirestore(fetchMock);
+    const server = createServer({ storage: new MockStorageService(), firestore });
+
+    const res = await server.request('/upload/acme/main/coverage', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(
+        validCoveragePayload({ commitSha: 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678', branch: 'main' })
+      ),
+    });
+
+    expect(res.status).toBe(201);
+
+    const build = await firestore.getBuild('acme', 'build-4');
+    expect(build?.commitSha).toBe('a1b2c3d4e5f60718293a4b5c6d7e8f9012345678');
+    // Cleared, not stored as null: the field is gone entirely.
+    expect(build?.provenanceError).toBeUndefined();
+  });
+
+  it('never sets provenanceError when there is nothing to record (no git context)', async () => {
+    const { fetchMock } = createFirestoreRestSimulator({
+      'projects/acme/builds/build-5': seededBuild({ buildNumber: { integerValue: '5' } }),
+    });
+    const firestore = createRealFirestore(fetchMock);
+    const server = createServer({ storage: new MockStorageService(), firestore });
+
+    const res = await server.request('/upload/acme/main/coverage', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(validCoveragePayload({})),
+    });
+
+    expect(res.status).toBe(201);
+    const build = await firestore.getBuild('acme', 'build-5');
+    expect(build?.provenanceError).toBeUndefined();
   });
 });

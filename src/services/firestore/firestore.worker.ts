@@ -379,7 +379,17 @@ export class FirestoreServiceWorker implements FirestoreService {
     if (updates.branch) fields.branch = { stringValue: updates.branch };
     if (updates.ciTimings) fields.ciTimings = this.toFirestoreValue(updates.ciTimings);
 
-    await this.patchDocument(buildPath, fields, token);
+    const maskFieldPaths = Object.keys(fields);
+    if (updates.provenanceError !== undefined) {
+      maskFieldPaths.push('provenanceError');
+      // `null` means "clear it": leave it out of `fields` but keep it in the mask, so Firestore's
+      // documented PATCH semantics remove the field instead of storing a literal null (D2).
+      if (updates.provenanceError !== null) {
+        fields.provenanceError = this.toFirestoreValue(updates.provenanceError);
+      }
+    }
+
+    await this.patchDocument(buildPath, fields, token, maskFieldPaths);
   }
 
   /**
@@ -711,7 +721,14 @@ export class FirestoreServiceWorker implements FirestoreService {
     }
   }
 
-  private async patchDocument(path: string, fields: any, token: string): Promise<void> {
+  /**
+   * `maskFieldPaths` defaults to `Object.keys(fields)` (every existing caller). Pass it explicitly
+   * to clear a field: Firestore's documented PATCH semantics are that a field named in the mask but
+   * absent from the body is removed from the document, so `patchDocument(path, {}, token,
+   * ['provenanceError'])` deletes `provenanceError` rather than writing it as `null`
+   * (upload-provenance-updatemask D2).
+   */
+  private async patchDocument(path: string, fields: any, token: string, maskFieldPaths?: string[]): Promise<void> {
     const url = `${this.baseUrl}/${path}`;
 
     // Firestore's REST API takes one `updateMask.fieldPaths` query param PER field, not a single
@@ -726,7 +743,7 @@ export class FirestoreServiceWorker implements FirestoreService {
       needsBackticks(fieldPath) ? `\`${fieldPath.replace(/`/g, '\\`')}\`` : fieldPath;
 
     const params = new URLSearchParams();
-    for (const key of Object.keys(fields)) {
+    for (const key of maskFieldPaths ?? Object.keys(fields)) {
       params.append('updateMask.fieldPaths', quoteFieldPath(key));
     }
 
@@ -749,7 +766,7 @@ export class FirestoreServiceWorker implements FirestoreService {
         path,
         status: response.status,
         statusText: response.statusText,
-        fieldPaths: Object.keys(fields),
+        fieldPaths: maskFieldPaths ?? Object.keys(fields),
         body: errorBody.slice(0, 2000),
       });
       throw new Error(`Failed to patch document: ${response.status} ${response.statusText}`);
