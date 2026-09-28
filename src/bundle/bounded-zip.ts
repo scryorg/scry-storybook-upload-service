@@ -50,10 +50,19 @@
  *     in full, each still capped individually at `maxNonImageEntryBytes`, but ALSO summed against a
  *     much tighter aggregate `maxSidecarsTotalBytes` (16 MiB) — these are index-only per-image
  *     metadata and have no legitimate reason to add up to much.
- *   - Images: unchanged from F31/F32/F50 — only `imageHeadBytes` (default 64 KiB — enough for
- *     magic-byte family detection and a header-only dimension read, see `@scrymore/scf`'s
- *     `image-dimensions.ts`) plus its real total size, as a `{head, size}` pair. Bytes beyond the head
- *     are counted (for the caps above) but never retained.
+ *   - Images: ledger F69 (a THIRD recurrence of F32/F60's own root cause — F32 covered the whole
+ *     bundle, F60 covered structure/source, this is the image category F60 explicitly left exposed):
+ *     the previous `{head, size}` fix (F31/F32/F50) still retained an image's ENTIRE content whenever
+ *     its real size was at or under `imageHeadBytes` (64 KiB) — no aggregate cap of its own meant an
+ *     8,000-entry bundle of honest, individually-tiny images could add up to ~500 MB of live retained
+ *     memory. Fixed: only up to `imageHeadBytes` of an image's real bytes is ever buffered, and only
+ *     TRANSIENTLY, during that one entry's own decompression (`entryState.headChunks`, discarded the
+ *     instant this entry finishes, never summed across entries) — the instant the entry finishes, that
+ *     transient prefix is fed to `@scrymore/scf`'s own `measureImage()` (magic-byte family detection +
+ *     a header-only dimension read, combined) and then thrown away entirely, replaced in `files` with
+ *     a `{measured: true, family, width, height, size}` stand-in (`BundleFileMeasured`) — a handful of
+ *     small fields, never bytes. `validateBundle` applies the exact same format/size/dimension rules
+ *     to that record as it would a full image.
  *
  * Two classes of problem are reported this way: (1) structural issues found without needing to abort
  * the whole read (unsafe paths, symlinks) are collected into `issues` and the read continues, so a
@@ -65,7 +74,7 @@ import { ByteCursor } from './byte-cursor.js';
 import { CRC32_SEED, crc32Final, crc32Update } from './crc32.js';
 import { readCentralDirectory, type CentralDirectoryEntry, type CentralDirectoryIssue } from './central-directory.js';
 import type { StorageObjectRange } from '../services/storage/storage.service.js';
-import { checkSourceTextMember, checkStructureMember } from '../vendor/scf/dist/index.js';
+import { checkSourceTextMember, checkStructureMember, measureImage } from '../vendor/scf/dist/index.js';
 import type { BundleFiles } from '../vendor/scf/dist/index.js';
 
 export interface BoundedZipLimits {
@@ -110,8 +119,11 @@ export interface BoundedZipLimits {
    *  independent of any ZIP metadata, this is the caller's own bound on how much of the R2 object
    *  it will ever pull down for one request. */
   maxRawBytes: number;
-  /** How many of an image entry's real decompressed bytes to actually retain, as its `head` —
-   *  enough for magic-byte family detection and a header-only PNG/JPEG/WebP dimension read. */
+  /** How many of an image entry's real decompressed bytes to buffer TRANSIENTLY, during that one
+   *  entry's own decompression, before feeding them to `measureImage()` and discarding them — enough
+   *  for magic-byte family detection and a header-only PNG/JPEG/WebP dimension read (ledger F69). This
+   *  bounds a per-entry, in-flight buffer, never anything retained in `files` afterwards — the
+   *  persisted `{measured, ...}` record is a handful of fields, not bytes. */
   imageHeadBytes: number;
 }
 
@@ -607,7 +619,23 @@ async function processEntry(
   }
 
   if (entryState.category === 'image') {
-    files.set(entry.name, { head: concatUint8(entryState.headChunks), size: entryState.realBytes });
+    // Ledger F69: `headChunks` is only ever the TRANSIENT prefix accumulated during this one entry's
+    // own decompression (never summed across entries, and this local `prefixBytes` value itself
+    // becomes garbage the moment this block returns) — `measureImage` turns it into a small,
+    // fixed-size record, and only that record (never the bytes) is retained in `files` from here on.
+    // A `null` result (family unidentifiable, or identifiable but dimensions unreadable from this
+    // bounded prefix — see `measureImage`'s own doc comment for why those collapse together) is
+    // still recorded as `family: null`, letting `validateBundle` reject it the same way it would an
+    // unreadable/wrong-format full image.
+    const prefixBytes = concatUint8(entryState.headChunks);
+    const measured = measureImage(prefixBytes);
+    files.set(entry.name, {
+      measured: true,
+      family: measured?.family ?? null,
+      width: measured?.width ?? 0,
+      height: measured?.height ?? 0,
+      size: entryState.realBytes,
+    });
     return;
   }
 

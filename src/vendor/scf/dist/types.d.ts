@@ -168,23 +168,47 @@ export type BundleFileChecked = {
     checked: true;
     size: number;
 };
-export type BundleFileBytes = Uint8Array | BundleFileHeadAndSize | BundleFileChecked;
+/**
+ * A stand-in for an image entry that a streaming caller has already run through `measureImage`
+ * (`image-dimensions.ts`) against a bounded prefix of its real decompressed bytes, and then
+ * discarded the bytes entirely (ledger F69: even the `{head, size}` shape below still retains up to
+ * `imageHeadBytes` — the WHOLE image, for anything at or under that size — which an 8,000-image
+ * bundle of honest, individually-tiny images could turn into ~500 MB of live memory). `family` is
+ * `null` when `measureImage` couldn't identify or measure the image at all from the prefix the
+ * caller was willing to buffer (collapsed on purpose — see `measureImage`'s own doc comment); `size`
+ * is always the image's real total byte length, exactly as in `BundleFileHeadAndSize`. Accepted by
+ * `validateBundle` ONLY for image-extension paths, same restriction as `{head, size}` (F50) — any
+ * other member given this shape is refused with `MEMBER_BYTES_REQUIRED`.
+ */
+export type BundleFileMeasured = {
+    measured: true;
+    family: 'png' | 'jpeg' | 'webp' | null;
+    width: number;
+    height: number;
+    size: number;
+};
+export type BundleFileBytes = Uint8Array | BundleFileHeadAndSize | BundleFileChecked | BundleFileMeasured;
 /** A bundle as an in-memory map of bundle-relative POSIX path -> file bytes (see `BundleFileBytes`). */
 export type BundleFiles = Map<string, BundleFileBytes>;
-/** True for a `{checked: true, size}` entry (ledger F60) — never for a plain `Uint8Array` or a
- *  `{head, size}` image entry. */
+/** True for a `{checked: true, size}` entry (ledger F60) — never for a plain `Uint8Array`, a
+ *  `{head, size}` image entry, or a `{measured, ...}` image entry. */
 export declare function isCheckedBundleFile(entry: BundleFileBytes | undefined): entry is BundleFileChecked;
+/** True for a `{measured: true, family, width, height, size}` entry (ledger F69) — never for a
+ *  plain `Uint8Array`, a `{head, size}` image entry, or a `{checked, size}` entry. */
+export declare function isMeasuredBundleFile(entry: BundleFileBytes | undefined): entry is BundleFileMeasured;
 /** Normalizes a `BundleFiles` entry to bytes usable for magic-byte/header inspection: the full
  *  bytes for a plain entry, or just the head for a `{head, size}` image entry. `undefined` for a
- *  `{checked, size}` entry (its bytes were never retained) — never the image's real full content
- *  when given a partial entry; use `bundleFileSize` for the true byte length. */
+ *  `{checked, size}` or `{measured, ...}` entry (no bytes were ever retained for either) — never the
+ *  image's real full content when given a partial entry; use `bundleFileSize` for the true byte
+ *  length. */
 export declare function bundleFileHead(entry: BundleFileBytes | undefined): Uint8Array | undefined;
-/** The entry's full bytes, or `undefined` for a `{head, size}` or `{checked, size}` entry. Every
- *  non-image member (JSON, structure trees, source text) is read through this, so a partial entry
- *  can never be validated from its head alone (security review F50). */
+/** The entry's full bytes, or `undefined` for a `{head, size}`, `{checked, size}` or `{measured,
+ *  ...}` entry. Every non-image member (JSON, structure trees, source text) is read through this, so
+ *  a partial entry can never be validated from its head alone (security review F50). */
 export declare function bundleFileFull(entry: BundleFileBytes | undefined): Uint8Array | undefined;
 /** The entry's real total byte size: `byteLength` for a full entry, or the caller-reported `size`
- *  for a `{head, size}` or `{checked, size}` entry (its true size, never a head/partial length). */
+ *  for a `{head, size}`, `{checked, size}` or `{measured, ...}` entry (its true size, never a
+ *  head/partial length). */
 export declare function bundleFileSize(entry: BundleFileBytes | undefined): number | undefined;
 /** scf-tree/1, see ../../../spec/scf-1.0.md. */
 export interface ScfTreeNode {

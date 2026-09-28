@@ -1,7 +1,7 @@
 import { fromSbcov } from './from-sbcov.js';
-import { readImageDimensions } from './image-dimensions.js';
+import { detectImageFamily, readImageDimensions } from './image-dimensions.js';
 import { sidecarCapturesFromImages } from './sidecars-internal.js';
-import { bundleFileFull, bundleFileHead, bundleFileSize, isCheckedBundleFile } from './types.js';
+import { bundleFileFull, bundleFileHead, bundleFileSize, isCheckedBundleFile, isMeasuredBundleFile } from './types.js';
 const SUPPORTED_SCF_VERSIONS = new Set(['1.0']);
 const ALLOWED_IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'webp']);
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
@@ -10,6 +10,18 @@ const MAX_STRUCTURE_BYTES = 2 * 1024 * 1024; // soft (warning) threshold, spec's
 const MAX_STRUCTURE_HARD_BYTES = 10 * 1024 * 1024; // hard (error) threshold
 const MAX_SOURCE_TEXT_BYTES = 1 * 1024 * 1024;
 const MAX_LINK_URL_LENGTH = 2048;
+/** Spec MUSTs (bundle-wide, not per-entry): a bundle-wide entry-count cap that bounds validation
+ *  cost regardless of how many members a bundle has, independent of any per-image/per-entry memory
+ *  bound (ledger F69's own root cause, one root cause up: `readBoundedZip`'s own `maxEntries` already
+ *  enforces this number before inflating a single byte; `validateBundle` enforces it too since it's
+ *  the shared gate for any caller — CLI, a plain directory, a future non-ZIP source — not just a
+ *  streaming ZIP reader). See spec/scf-1.0.md's "Bundle layout" section. */
+const MAX_BUNDLE_MEMBERS = 20_000;
+/** Spec MUST: a bundle-wide cap on `captures.length` (or the sidecar-derived equivalent), independent
+ *  of the member-count cap above — a bundle could stay under `MAX_BUNDLE_MEMBERS` while still
+ *  declaring an enormous `captures` array that shares images/duplicates ids, or (in sidecar mode)
+ *  every capture is itself is a member so the two caps are related but not redundant. */
+const MAX_BUNDLE_CAPTURES = 10_000;
 const decoder = new TextDecoder();
 function extOf(path) {
     const m = /\.([a-zA-Z0-9]+)$/.exec(path);
@@ -25,28 +37,8 @@ function extOf(path) {
 function isCheckableStructureOrSourcePath(path) {
     return (path.startsWith('structure/') && extOf(path) === 'json') || path.startsWith('source/');
 }
+// ImageFamily/detectImageFamily live in image-dimensions.ts (shared with measureImage, ledger F69).
 const EXT_FAMILY = { png: 'png', jpg: 'jpeg', jpeg: 'jpeg', webp: 'webp' };
-/** Sniffs the magic bytes so a `.png` with the wrong content (or vice versa) is still caught. */
-function detectImageFamily(bytes) {
-    if (bytes.length >= 4 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) {
-        return 'png';
-    }
-    if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
-        return 'jpeg';
-    }
-    if (bytes.length >= 12 &&
-        bytes[0] === 0x52 &&
-        bytes[1] === 0x49 &&
-        bytes[2] === 0x46 &&
-        bytes[3] === 0x46 &&
-        bytes[8] === 0x57 &&
-        bytes[9] === 0x45 &&
-        bytes[10] === 0x42 &&
-        bytes[11] === 0x50) {
-        return 'webp';
-    }
-    return null;
-}
 function issue(code, message, extra) {
     return { code, message, ...extra };
 }
@@ -240,6 +232,17 @@ export async function validateBundle(input) {
     const files = typeof input === 'string' ? await readDir(input) : input;
     const errors = [];
     const warnings = [];
+    // Spec MUST, bundle-wide entry-count cap (ledger F69): checked first, before anything else about
+    // this bundle is even looked at, so a bundle with an absurd member count is rejected in O(1) (a
+    // single Map.size read) rather than after however much per-member work the checks below would
+    // otherwise do. This is deliberately independent of any streaming reader's own `maxEntries` (e.g.
+    // scry-storybook-upload-service's `readBoundedZip`, which enforces the same number before inflating
+    // a single byte) — validateBundle is the shared gate (contract's guarantee G7) for every caller,
+    // including a plain directory or an in-memory map nobody streamed through a ZIP at all.
+    if (files.size > MAX_BUNDLE_MEMBERS) {
+        errors.push(issue('BUNDLE_TOO_MANY_MEMBERS', `Bundle has ${files.size} members, over the ${MAX_BUNDLE_MEMBERS} limit.`));
+        return { ok: false, errors, warnings, manifest: null };
+    }
     const unsafeMembers = [...files.keys()].filter((p) => !isSafeRelPath(p));
     if (unsafeMembers.length > 0) {
         for (const p of unsafeMembers) {
@@ -325,6 +328,14 @@ export async function validateBundle(input) {
         errors.push(issue('CAPTURES_MISSING', 'captures is missing, and not "sidecars" either.'));
         captures = [];
     }
+    // Spec MUST, bundle-wide capture-count cap (ledger F69) — independent of MAX_BUNDLE_MEMBERS above:
+    // a bundle could stay under the member cap while still declaring (or, in sidecar mode, deriving) an
+    // enormous captures list. Checked before the per-capture loop below so a bundle over this limit
+    // doesn't also pay for however much per-capture validation work the loop would otherwise do.
+    if (captures.length > MAX_BUNDLE_CAPTURES) {
+        errors.push(issue('BUNDLE_TOO_MANY_CAPTURES', `Bundle has ${captures.length} captures, over the ${MAX_BUNDLE_CAPTURES} limit.`));
+        return { ok: false, errors, warnings, manifest };
+    }
     const seenIds = new Map();
     const seenImages = new Map();
     const referencedPaths = new Set(['scf.json']);
@@ -352,31 +363,52 @@ export async function validateBundle(input) {
             else {
                 const ext = extOf(image);
                 const imageEntry = files.get(image);
-                // `head` is the whole file for a plain entry, or just its first bytes for a `{head, size}`
-                // partial image entry (ledger F31/F32) — either is enough for magic-byte + header-only
-                // dimension checks. `size` is always the image's real total byte length.
-                const head = bundleFileHead(imageEntry);
                 const size = bundleFileSize(imageEntry) ?? 0;
-                const family = head ? detectImageFamily(head) : null;
-                if (!ALLOWED_IMAGE_EXT.has(ext) || !family || EXT_FAMILY[ext] !== family) {
-                    errors.push(issue('IMAGE_FORMAT_INVALID', `Image is not PNG/JPEG/WebP: ${image}`, { id, path: image }));
-                }
-                if (size > MAX_IMAGE_BYTES) {
-                    errors.push(issue('IMAGE_TOO_LARGE', `Image is over 20 MB: ${image}`, { id, path: image }));
-                }
-                if (head && family) {
-                    // Header-only read (no decode): a tiny file can still declare an enormous canvas, which
-                    // is a resource-exhaustion risk for whatever decodes it later (ledger F25). An unreadable
-                    // header (truncated file, or a WebP shape this parser doesn't cover) fails closed.
-                    const dims = readImageDimensions(head, family);
-                    if (!dims) {
-                        errors.push(issue('IMAGE_HEADER_UNREADABLE', `Could not read image dimensions from the header: ${image}`, {
-                            id,
-                            path: image,
-                        }));
+                if (isMeasuredBundleFile(imageEntry)) {
+                    // Ledger F69: a streaming caller already ran `measureImage` against a bounded prefix of
+                    // this image's real bytes and discarded them — there is nothing left here to re-sniff or
+                    // re-read a header from, only the small `{family, width, height, size}` record it kept.
+                    // `family: null` is `measureImage`'s own collapsed "couldn't identify or measure it at
+                    // all" result (see its doc comment) — treated the same as a format mismatch, since neither
+                    // this validator nor the caller that discarded the bytes has any way left to tell "wrong
+                    // format" apart from "header unreadable" once the prefix is gone.
+                    const { family, width, height } = imageEntry;
+                    if (!ALLOWED_IMAGE_EXT.has(ext) || !family || EXT_FAMILY[ext] !== family) {
+                        errors.push(issue('IMAGE_FORMAT_INVALID', `Image is not PNG/JPEG/WebP: ${image}`, { id, path: image }));
                     }
-                    else if (dims.width > MAX_IMAGE_DIMENSION || dims.height > MAX_IMAGE_DIMENSION) {
-                        errors.push(issue('IMAGE_DIMENSION_TOO_LARGE', `Image is ${dims.width}x${dims.height}px, over the ${MAX_IMAGE_DIMENSION}px limit: ${image}`, { id, path: image }));
+                    if (size > MAX_IMAGE_BYTES) {
+                        errors.push(issue('IMAGE_TOO_LARGE', `Image is over 20 MB: ${image}`, { id, path: image }));
+                    }
+                    if (family && (width > MAX_IMAGE_DIMENSION || height > MAX_IMAGE_DIMENSION)) {
+                        errors.push(issue('IMAGE_DIMENSION_TOO_LARGE', `Image is ${width}x${height}px, over the ${MAX_IMAGE_DIMENSION}px limit: ${image}`, { id, path: image }));
+                    }
+                }
+                else {
+                    // `head` is the whole file for a plain entry, or just its first bytes for a `{head, size}`
+                    // partial image entry (ledger F31/F32) — either is enough for magic-byte + header-only
+                    // dimension checks. `size` is always the image's real total byte length.
+                    const head = bundleFileHead(imageEntry);
+                    const family = head ? detectImageFamily(head) : null;
+                    if (!ALLOWED_IMAGE_EXT.has(ext) || !family || EXT_FAMILY[ext] !== family) {
+                        errors.push(issue('IMAGE_FORMAT_INVALID', `Image is not PNG/JPEG/WebP: ${image}`, { id, path: image }));
+                    }
+                    if (size > MAX_IMAGE_BYTES) {
+                        errors.push(issue('IMAGE_TOO_LARGE', `Image is over 20 MB: ${image}`, { id, path: image }));
+                    }
+                    if (head && family) {
+                        // Header-only read (no decode): a tiny file can still declare an enormous canvas, which
+                        // is a resource-exhaustion risk for whatever decodes it later (ledger F25). An unreadable
+                        // header (truncated file, or a WebP shape this parser doesn't cover) fails closed.
+                        const dims = readImageDimensions(head, family);
+                        if (!dims) {
+                            errors.push(issue('IMAGE_HEADER_UNREADABLE', `Could not read image dimensions from the header: ${image}`, {
+                                id,
+                                path: image,
+                            }));
+                        }
+                        else if (dims.width > MAX_IMAGE_DIMENSION || dims.height > MAX_IMAGE_DIMENSION) {
+                            errors.push(issue('IMAGE_DIMENSION_TOO_LARGE', `Image is ${dims.width}x${dims.height}px, over the ${MAX_IMAGE_DIMENSION}px limit: ${image}`, { id, path: image }));
+                        }
                     }
                 }
             }

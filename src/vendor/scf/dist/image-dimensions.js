@@ -92,4 +92,75 @@ export function readImageDimensions(bytes, family) {
         return jpegDimensions(bytes);
     return webpDimensions(bytes);
 }
+/** Sniffs the magic bytes to tell which of the three SCF-allowed image formats `bytes` is, so a
+ *  `.png` with the wrong content (or vice versa) is still caught. Moved here (from `validate.ts`)
+ *  so `measureImage` below can use it without a circular import; re-exported from `validate.ts` for
+ *  callers that only need family detection (e.g. a `{head, size}` image entry's magic-byte check). */
+export function detectImageFamily(bytes) {
+    if (bytes.length >= 4 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) {
+        return 'png';
+    }
+    if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+        return 'jpeg';
+    }
+    if (bytes.length >= 12 &&
+        bytes[0] === 0x52 &&
+        bytes[1] === 0x49 &&
+        bytes[2] === 0x46 &&
+        bytes[3] === 0x46 &&
+        bytes[8] === 0x57 &&
+        bytes[9] === 0x45 &&
+        bytes[10] === 0x42 &&
+        bytes[11] === 0x50) {
+        return 'webp';
+    }
+    return null;
+}
+/**
+ * The recommended cap on how large a `prefixBytes` a streaming caller should ever accumulate before
+ * giving up on `measureImage` and treating the image as unmeasurable (ledger F69). PNG's IHDR is
+ * always in the first 24 bytes and WebP's header in the first ~30, so this bound is really about
+ * JPEG: a real photo's SOF0/SOF2 marker is essentially always within a few KiB, but a JPEG can
+ * legally carry a large APPn/EXIF segment (an embedded thumbnail, ICC profile, XMP block) before its
+ * first SOF marker. 64 KiB comfortably covers realistic EXIF payloads while keeping the *transient*
+ * per-image buffer a streaming caller holds — never the persisted record — small and bounded.
+ */
+export const MEASURE_IMAGE_MAX_PREFIX_BYTES = 64 * 1024;
+/**
+ * Combines magic-byte family detection with a header-only dimension read into the one call a
+ * memory-bounded streaming reader needs (ledger F69: F32/F60's fixes still left the IMAGE member
+ * category exposed to the same "keep it all in memory" problem — an 8,000-entry bundle of honest,
+ * individually-tiny images could still retain ~500 MB via the old `{head, size}` shape, since a
+ * `{head, size}` entry whose real size is under the head cap retains the WHOLE image). A caller
+ * streaming a large bundle should feed this whatever *prefix* of an image's real decompressed bytes
+ * it has accumulated so far (never the whole file) — this function is a pure, stateless read of
+ * whatever prefix you hand it, so calling it again as more bytes arrive (up to
+ * `MEASURE_IMAGE_MAX_PREFIX_BYTES`, or once the entry finishes if it's smaller than that) is always
+ * safe and cheap; there is no separate "streaming" API to construct or tear down.
+ *
+ * Once this returns a non-null result (or the caller has accumulated `MEASURE_IMAGE_MAX_PREFIX_BYTES`
+ * and it's still null), the caller should discard the prefix buffer entirely and retain only the
+ * small `{family, width, height}` record plus the image's real total size — never the bytes
+ * themselves. That's the whole point: peak memory per image, beyond that small fixed record, is
+ * bounded by this function's own bounded input, not by how many images (or how large any one of
+ * them) the bundle contains.
+ *
+ * Returns null when the family can't be identified from the bytes present, OR when the family is
+ * known but the dimensions can't be read from this prefix (truncated/corrupt content, a WebP variant
+ * this parser doesn't cover, or — for JPEG — a real SOF marker that never showed up within the
+ * prefix a caller was willing to buffer). Both failure modes collapse to the same `null` on purpose:
+ * a caller holding only a bounded prefix has no bytes left over to tell "not a valid image" apart
+ * from "couldn't read far enough into a valid one" once that prefix is discarded, and a `{measured}`
+ * record built from a `null` result is rejected the same way either way (see `validate.ts`'s
+ * `IMAGE_FORMAT_INVALID` handling for a `{measured}` entry).
+ */
+export function measureImage(prefixBytes) {
+    const family = detectImageFamily(prefixBytes);
+    if (!family)
+        return null;
+    const dims = readImageDimensions(prefixBytes, family);
+    if (!dims)
+        return null;
+    return { family, width: dims.width, height: dims.height };
+}
 //# sourceMappingURL=image-dimensions.js.map

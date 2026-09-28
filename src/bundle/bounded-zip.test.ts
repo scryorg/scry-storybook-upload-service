@@ -8,6 +8,13 @@ import { buildZip, deflateEntry, streamOf, chunkedStreamOf, readFullZip, readFul
 import { archiverZipFromBuffers, archiverZipFromDirectory, archiverZipMixedInputs } from './__tests__/archiver-helpers.js';
 
 const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]); // just the magic bytes
+// A real, valid 1x1 PNG (a full IHDR chunk, not just the magic bytes) — for tests that check
+// measureImage's actual output (ledger F69), where `png` above (magic bytes only, no IHDR) would
+// always measure as unmeasurable (family: null).
+const REAL_PNG = Buffer.from([
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00,
+  0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x00, 0x00, 0x00, 0x00, 0x3a, 0x7e, 0x9b,
+]);
 
 /** Merges partial overrides onto the defaults — every test below only needs to name the one or two
  *  limits it's actually exercising. */
@@ -23,8 +30,88 @@ const PERMISSIVE = withLimits({
   maxCompressionRatio: 1_000_000,
 });
 
+/**
+ * Ledger F70: the two "ledger F60 repro" tests below used to sample `process.memoryUsage().rss` via
+ * `setInterval(fn, 5)` racing against the read, then assert the sampled peak stayed under a
+ * threshold. Independently re-measuring this (cs-rev-33c) found the sampler ticks ZERO times for a
+ * read this shape (a long chain of microtasks that never yields to the timer/macrotask phase
+ * `setInterval` lives in) — the assertion was passing regardless of the read's true behavior. A
+ * direct, unsampled before/after delta of raw `rss` alone proved unreliable too (native-allocator/
+ * arena noise unrelated to this call's own live objects). The one signal that held up under
+ * independent cross-checking was `external` (precise for live `Buffer`/`ArrayBuffer` allocations,
+ * which is exactly what a retained ZIP member would be) together with `heapUsed`, both taken directly
+ * before and immediately after the call — no sampling, no timers. This helper does exactly that, with
+ * a forced GC on both sides (best-effort; a no-op where `--expose-gc` isn't set) so neither side is
+ * counting not-yet-collected garbage from a previous test or from the read's own intermediate chunks.
+ */
+async function measureMemory<T>(fn: () => Promise<T>): Promise<{
+  result: T;
+  externalDeltaMb: number;
+  heapUsedDeltaMb: number;
+  rssDeltaMb: number;
+}> {
+  const gc = (global as { gc?: () => void }).gc;
+  if (gc) {
+    gc();
+    gc();
+  }
+  const before = process.memoryUsage();
+  const result = await fn();
+  if (gc) {
+    gc();
+    gc();
+  }
+  const after = process.memoryUsage();
+  return {
+    result,
+    externalDeltaMb: (after.external - before.external) / (1024 * 1024),
+    heapUsedDeltaMb: (after.heapUsed - before.heapUsed) / (1024 * 1024),
+    rssDeltaMb: (after.rss - before.rss) / (1024 * 1024),
+  };
+}
+
 describe('readBoundedZip (central-directory-driven)', () => {
-  it('reads a well-formed ZIP into a bundle-relative path -> bytes map (image as {head, size}, JSON in full)', async () => {
+  it('reads a well-formed ZIP into a bundle-relative path -> bytes map (image as {measured, ...}, JSON in full, ledger F69)', async () => {
+    const zip = buildZip([
+      { name: 'scf.json', data: Buffer.from('{}') },
+      { name: 'images/a.png', data: REAL_PNG },
+    ]);
+    const result = await readFullZip(zip, DEFAULT_BOUNDED_ZIP_LIMITS);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.files.size).toBe(2);
+    expect(result.files.get('scf.json')).toEqual(new Uint8Array(Buffer.from('{}')));
+    expect(result.files.get('images/a.png')).toEqual({
+      measured: true,
+      family: 'png',
+      width: 1,
+      height: 1,
+      size: REAL_PNG.length,
+    });
+  });
+
+  it('reads the same ZIP correctly when the underlying stream delivers it in small chunks', async () => {
+    const zip = buildZip([
+      { name: 'scf.json', data: Buffer.from('{"a":1}') },
+      { name: 'images/a.png', data: REAL_PNG },
+    ]);
+    const result = await readFullZipFromStream(zip, chunkedStreamOf(zip, 7), DEFAULT_BOUNDED_ZIP_LIMITS); // deliberately awkward chunk size
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.files.get('scf.json')).toEqual(new Uint8Array(Buffer.from('{"a":1}')));
+    expect(result.files.get('images/a.png')).toEqual({
+      measured: true,
+      family: 'png',
+      width: 1,
+      height: 1,
+      size: REAL_PNG.length,
+    });
+  });
+
+  it('measures an image whose real content is too short to be identified or measured as {measured: true, family: null} (ledger F69)', async () => {
+    // `png` here is only the 4-byte PNG magic, no IHDR — measureImage can sniff the family from the
+    // magic bytes but can't read dimensions from a header that short, and (per its own doc comment)
+    // collapses that into the same `null` a totally-unrecognisable prefix would give.
     const zip = buildZip([
       { name: 'scf.json', data: Buffer.from('{}') },
       { name: 'images/a.png', data: png },
@@ -32,21 +119,7 @@ describe('readBoundedZip (central-directory-driven)', () => {
     const result = await readFullZip(zip, DEFAULT_BOUNDED_ZIP_LIMITS);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.files.size).toBe(2);
-    expect(result.files.get('scf.json')).toEqual(new Uint8Array(Buffer.from('{}')));
-    expect(result.files.get('images/a.png')).toEqual({ head: new Uint8Array(png), size: png.length });
-  });
-
-  it('reads the same ZIP correctly when the underlying stream delivers it in small chunks', async () => {
-    const zip = buildZip([
-      { name: 'scf.json', data: Buffer.from('{"a":1}') },
-      { name: 'images/a.png', data: png },
-    ]);
-    const result = await readFullZipFromStream(zip, chunkedStreamOf(zip, 7), DEFAULT_BOUNDED_ZIP_LIMITS); // deliberately awkward chunk size
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.files.get('scf.json')).toEqual(new Uint8Array(Buffer.from('{"a":1}')));
-    expect(result.files.get('images/a.png')).toEqual({ head: new Uint8Array(png), size: png.length });
+    expect(result.files.get('images/a.png')).toEqual({ measured: true, family: null, width: 0, height: 0, size: png.length });
   });
 
   it('rejects a buffer with no end-of-central-directory record', async () => {
@@ -117,15 +190,19 @@ describe('readBoundedZip (central-directory-driven)', () => {
     const zip = buildZip([
       { name: 'scf.json', data: Buffer.from('{"mixed":true}') }, // STORED
       { name: 'images/stored.png', data: png }, // STORED
-      deflateEntry('images/deflated.png', Buffer.concat([png, Buffer.alloc(1000, 0x41)])), // DEFLATE
+      deflateEntry('images/deflated.png', Buffer.concat([REAL_PNG, Buffer.alloc(1000, 0x41)])), // DEFLATE
     ]);
     const result = await readFullZip(zip, PERMISSIVE);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.files.size).toBe(3);
-    const deflated = result.files.get('images/deflated.png') as { head: Uint8Array; size: number };
-    expect(deflated.size).toBe(png.length + 1000);
-    expect([...deflated.head.subarray(0, png.length)]).toEqual([...png]);
+    const deflated = result.files.get('images/deflated.png') as { measured: true; family: string | null; width: number; height: number; size: number };
+    expect(deflated.size).toBe(REAL_PNG.length + 1000);
+    // Real dimensions are correctly measured from the prefix even though 1000 trailing bytes (well
+    // within imageHeadBytes) followed the real PNG content — measureImage only needed the IHDR.
+    expect(deflated.family).toBe('png');
+    expect(deflated.width).toBe(1);
+    expect(deflated.height).toBe(1);
   });
 
   describe('ledger F31: real byte counters, never a declared size', () => {
@@ -198,7 +275,7 @@ describe('readBoundedZip (central-directory-driven)', () => {
       const result = await readFullZip(zip, PERMISSIVE);
       expect(result.ok).toBe(true);
       if (!result.ok) return;
-      const got = result.files.get('images/a.png') as { head: Uint8Array; size: number };
+      const got = result.files.get('images/a.png') as { measured: true; size: number };
       expect(got.size).toBe(content.length);
     });
 
@@ -327,7 +404,7 @@ describe('readBoundedZip (central-directory-driven)', () => {
       if (!result.ok) return;
       expect(result.files.size).toBe(300);
       for (let i = 0; i < 300; i++) {
-        const got = result.files.get(`images/${i}.png`) as { head: Uint8Array; size: number };
+        const got = result.files.get(`images/${i}.png`) as { measured: true; size: number };
         expect(got.size, `images/${i}.png`).toBe(png.length + `entry-${i}`.length);
       }
     });
@@ -362,9 +439,13 @@ describe('readBoundedZip (central-directory-driven)', () => {
         if (!result.ok) return;
         expect(result.files.size).toBe(imageCount);
         for (const [filePath, entry] of result.files) {
-          const withSize = entry as { head: Uint8Array; size: number };
-          expect(withSize.size, filePath).toBe(perImageBytes);
-          expect(withSize.head.byteLength, filePath).toBeLessThanOrEqual(DEFAULT_BOUNDED_ZIP_LIMITS.imageHeadBytes);
+          // Ledger F69: no `.head` bytes are retained at all any more, only the small `{measured,
+          // ...}` record — this loop's real job (proving the route never held all ~150 MB of real
+          // image content simultaneously) is now covered by the heap-growth assertion below, cross-
+          // checked by the fact that every entry's persisted record is this tiny either way.
+          const measured = entry as { measured: true; size: number };
+          expect(measured.measured, filePath).toBe(true);
+          expect(measured.size, filePath).toBe(perImageBytes);
         }
 
         const peakGrowthMb = (peakHeap - baselineHeap) / (1024 * 1024);
@@ -478,38 +559,32 @@ describe('readBoundedZip (central-directory-driven)', () => {
         }));
         const zip = buildZip([{ name: 'scf.json', data: Buffer.from('{}') }, ...entries]);
 
-        if (global.gc) global.gc();
-        const baselineRss = process.memoryUsage().rss;
-        let peakRss = baselineRss;
-        const sampler = setInterval(() => {
-          peakRss = Math.max(peakRss, process.memoryUsage().rss);
-        }, 5);
-
-        let result;
-        try {
+        // Ledger F70: direct external/heapUsed delta (measureMemory, above), not a setInterval rss
+        // sampler — see that helper's own doc comment for why.
+        const { result, externalDeltaMb, heapUsedDeltaMb, rssDeltaMb } = await measureMemory(() =>
           // chunkedStreamOf (not streamOf): slices views into the already-resident `zip` buffer rather
           // than copying it whole into "one big chunk", matching how a real R2/S3 stream actually
           // delivers bytes and avoiding a same-size-copy artifact that would confound this measurement.
-          result = await readFullZipFromStream(zip, chunkedStreamOf(zip, 256 * 1024), DEFAULT_BOUNDED_ZIP_LIMITS);
-        } finally {
-          clearInterval(sampler);
-        }
+          readFullZipFromStream(zip, chunkedStreamOf(zip, 256 * 1024), DEFAULT_BOUNDED_ZIP_LIMITS)
+        );
 
         expect(result.ok).toBe(false);
         if (result.ok) return;
         expect(result.issues.map((i) => i.code)).toEqual(['BUNDLE_SIDECARS_TOO_LARGE']);
 
-        const peakGrowthMb = (peakRss - baselineRss) / (1024 * 1024);
         // eslint-disable-next-line no-console
         console.log(
-          `[F60 95x11MB repro] peak RSS growth ${peakGrowthMb.toFixed(1)} MB rejecting a bundle whose 95 members ` +
-            `total ${((entryCount * perEntryBytes) / 1024 / 1024).toFixed(0)} MB — the security review's own repro ` +
-            'measured >1 GB of RSS growth against the pre-fix code for the same shape.'
+          `[F60 95x11MB repro] external growth ${externalDeltaMb.toFixed(1)} MB, heapUsed growth ` +
+            `${heapUsedDeltaMb.toFixed(1)} MB (rss growth ${rssDeltaMb.toFixed(1)} MB, logged only — see ` +
+            'measureMemory\'s doc comment for why rss alone is not asserted on) rejecting a bundle whose 95 ' +
+            `members total ${((entryCount * perEntryBytes) / 1024 / 1024).toFixed(0)} MB — the security review's ` +
+            'own repro measured >1 GB of RSS growth against the pre-fix code for the same shape.'
         );
-        // The brief's own target is <=48 MB; asserted a little above that here purely to absorb RSS
-        // sampling/allocator noise on a shared box, while still being nowhere near the ~1 GB this
-        // guards against — see the logged number above for the real measurement.
-        expect(peakGrowthMb).toBeLessThan(64);
+        // The brief's own target is <=48 MB; asserted a little above that here purely to absorb
+        // allocator noise on a shared box, while still being nowhere near the ~1 GB this guards
+        // against — see the logged numbers above for the real measurement.
+        expect(externalDeltaMb).toBeLessThan(64);
+        expect(heapUsedDeltaMb).toBeLessThan(64);
       },
       60_000
     );
@@ -534,19 +609,10 @@ describe('readBoundedZip (central-directory-driven)', () => {
         ];
         const zip = buildZip(entries);
 
-        if (global.gc) global.gc();
-        const baselineRss = process.memoryUsage().rss;
-        let peakRss = baselineRss;
-        const sampler = setInterval(() => {
-          peakRss = Math.max(peakRss, process.memoryUsage().rss);
-        }, 5);
-
-        let result;
-        try {
-          result = await readFullZipFromStream(zip, chunkedStreamOf(zip, 256 * 1024), DEFAULT_BOUNDED_ZIP_LIMITS);
-        } finally {
-          clearInterval(sampler);
-        }
+        // Ledger F70: direct external/heapUsed delta, not a setInterval rss sampler.
+        const { result, externalDeltaMb, heapUsedDeltaMb, rssDeltaMb } = await measureMemory(() =>
+          readFullZipFromStream(zip, chunkedStreamOf(zip, 256 * 1024), DEFAULT_BOUNDED_ZIP_LIMITS)
+        );
 
         expect(result.ok).toBe(true);
         if (!result.ok) return;
@@ -555,15 +621,67 @@ describe('readBoundedZip (central-directory-driven)', () => {
           expect(result.files.get(`structure/${i}.json`)).toMatchObject({ checked: true });
         }
 
-        const peakGrowthMb = (peakRss - baselineRss) / (1024 * 1024);
         // eslint-disable-next-line no-console
         console.log(
-          `[F60 225x2MB+images repro] peak RSS growth ${peakGrowthMb.toFixed(1)} MB for a bundle whose structure ` +
-            `trees alone total ${((treeCount * treeBytes) / 1024 / 1024).toFixed(0)} MB`
+          `[F60 225x2MB+images repro] external growth ${externalDeltaMb.toFixed(1)} MB, heapUsed growth ` +
+            `${heapUsedDeltaMb.toFixed(1)} MB (rss growth ${rssDeltaMb.toFixed(1)} MB, logged only) for a bundle ` +
+            `whose structure trees alone total ${((treeCount * treeBytes) / 1024 / 1024).toFixed(0)} MB`
         );
-        expect(peakGrowthMb).toBeLessThan(64);
+        expect(externalDeltaMb).toBeLessThan(64);
+        expect(heapUsedDeltaMb).toBeLessThan(64);
       },
       60_000
+    );
+  });
+
+  describe('ledger F69: images are measured (measureImage), not retained — the third recurrence of F32/F60\'s root cause', () => {
+    it(
+      'ledger F69 repro: 8,000 honest, individually-tiny images (64 KiB each, ~500 MB total) never accumulate — the ' +
+        'exact security-review shape that the old {head, size} shape (F31/F32/F50) still failed on',
+      async () => {
+        const perImageBytes = 64 * 1024; // matches imageHeadBytes exactly — the old {head, size} shape's worst case
+        const imageCount = 8000;
+        // Real PNG header + random filler, so measureImage genuinely measures a real family/dimensions
+        // from each — matching the review's own "no ratio trick, no declared-size lie, ordinary content"
+        // framing, not a synthetic shape crafted just to look small.
+        const entries = Array.from({ length: imageCount }, (_, i) => ({
+          name: `images/${i}.png`,
+          data: Buffer.concat([REAL_PNG, randomBytes(perImageBytes - REAL_PNG.length)]),
+        }));
+        const zip = buildZip(entries);
+        expect(zip.length).toBeGreaterThan(imageCount * perImageBytes); // not a trick — the bytes are really there
+
+        const { result, externalDeltaMb, heapUsedDeltaMb, rssDeltaMb } = await measureMemory(() =>
+          readFullZipFromStream(zip, chunkedStreamOf(zip, 256 * 1024), PERMISSIVE)
+        );
+
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.files.size).toBe(imageCount);
+        for (let i = 0; i < imageCount; i++) {
+          expect(result.files.get(`images/${i}.png`)).toEqual({
+            measured: true,
+            family: 'png',
+            width: 1,
+            height: 1,
+            size: perImageBytes,
+          });
+        }
+
+        // eslint-disable-next-line no-console
+        console.log(
+          `[F69 8000x64KiB-images repro] external growth ${externalDeltaMb.toFixed(1)} MB, heapUsed growth ` +
+            `${heapUsedDeltaMb.toFixed(1)} MB (rss growth ${rssDeltaMb.toFixed(1)} MB, logged only) for a bundle ` +
+            `of ${imageCount} images totalling ${((imageCount * perImageBytes) / 1024 / 1024).toFixed(0)} MB — the ` +
+            'security review measured 500.3 MB of external growth against the pre-fix {head, size} shape for this ' +
+            'exact repro (cs-rev-33c). Manually confirmed during development that reverting the measureImage ' +
+            'integration in bounded-zip.ts (restoring the old `{ head: concatUint8(headChunks), size }` write) ' +
+            'makes this same assertion fail with ~500 MB of growth — see the capture-sources progress log.'
+        );
+        expect(externalDeltaMb).toBeLessThan(64);
+        expect(heapUsedDeltaMb).toBeLessThan(64);
+      },
+      120_000
     );
   });
 });
