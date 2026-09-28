@@ -299,9 +299,13 @@ export class ApiKeyServiceWorker implements ApiKeyService {
 
   private async patchDocument(path: string, fields: any, token: string): Promise<void> {
     const url = `${this.baseUrl}/${path}`;
-    const updateMask = Object.keys(fields).join(',');
-    
-    const response = await fetch(`${url}?updateMask.fieldPaths=${updateMask}`, {
+    // One `updateMask.fieldPaths` param per field; a comma-joined value is one invalid path (F73/F84).
+    const params = new URLSearchParams();
+    for (const key of Object.keys(fields)) {
+      params.append('updateMask.fieldPaths', /^[A-Za-z_][A-Za-z0-9_]*$/.test(key) ? key : `\`${key.replace(/`/g, '\\`')}\``);
+    }
+
+    const response = await fetch(`${url}?${params.toString()}`, {
       method: 'PATCH',
       headers: {
         'Authorization': `Bearer ${token}`,

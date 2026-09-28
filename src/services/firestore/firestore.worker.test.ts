@@ -302,7 +302,12 @@ describe('FirestoreServiceWorker', () => {
       const method = (init?.method || 'GET').toUpperCase();
       expect(method).toBe('PATCH');
       expect(url).toContain('/documents/projects/my-project/builds/build-123');
-      expect(url).toContain('updateMask.fieldPaths=status,zipUrl,archivedAt,archivedBy,coverage');
+      // Firestore REST requires one updateMask.fieldPaths param PER field (F73): a single
+      // comma-joined value is parsed as one field path containing a literal comma and rejected.
+      const params = new URL(url).searchParams.getAll('updateMask.fieldPaths');
+      expect(params).toEqual(['status', 'zipUrl', 'archivedAt', 'archivedBy', 'coverage']);
+      expect(url).not.toContain('updateMask.fieldPaths=status%2CzipUrl');
+      expect(url).not.toContain('updateMask.fieldPaths=status,zipUrl');
 
       const body = JSON.parse(String(init?.body));
       expect(body.fields.status.stringValue).toBe('archived');
@@ -344,10 +349,78 @@ describe('FirestoreServiceWorker', () => {
     });
   });
 
+  it('updateBuild() sends the exact repeated-param query string for a rejected-bundle update (ledger F73)', async () => {
+    // Reproduces the AT-9 stage scenario: a bundle rejected for FORBIDDEN_MEMBER content marks the
+    // build failed with both processingStatus and validationErrors in one call. Before the fix,
+    // patchDocument() sent a single `updateMask.fieldPaths=processingStatus,validationErrors` param;
+    // Firestore's REST API parses that as one field path containing a literal comma and 400s with
+    // "Invalid property path", which the caller's best-effort .catch() swallowed as a warning — so
+    // the build stayed "active" with no validationErrors forever.
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      const parsed = new URL(url);
+      expect(parsed.pathname).toBe(
+        '/v1/projects/firebase-proj/databases/(default)/documents/projects/my-project/builds/build-9'
+      );
+      expect(parsed.search).toBe(
+        '?updateMask.fieldPaths=processingStatus&updateMask.fieldPaths=validationErrors'
+      );
+      expect((init?.method || 'GET').toUpperCase()).toBe('PATCH');
+
+      const body = JSON.parse(String(init?.body));
+      expect(Object.keys(body.fields)).toEqual(['processingStatus', 'validationErrors']);
+      expect(body.fields.processingStatus.stringValue).toBe('failed');
+      expect(body.fields.validationErrors.arrayValue.values[0].mapValue.fields.code.stringValue).toBe(
+        'FORBIDDEN_MEMBER'
+      );
+
+      return { ok: true, status: 200, json: async () => ({}) } as any;
+    });
+
+    // @ts-expect-error - test override
+    globalThis.fetch = fetchMock;
+
+    const svc = createSvc();
+    await svc.updateBuild('my-project', 'build-9', {
+      processingStatus: 'failed',
+      validationErrors: [
+        { code: 'FORBIDDEN_MEMBER', path: 'images/evil.html', message: 'Member type not allowed' },
+      ],
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('updateBuild() logs a non-2xx patchDocument response (no token/secrets) and still throws', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const fetchMock = vi.fn(async () => ({
+      ok: false,
+      status: 400,
+      statusText: 'Bad Request',
+      text: async () => '{"error":{"message":"Invalid property path \\"a,b\\""}}',
+    })) as any;
+
+    // @ts-expect-error - test override
+    globalThis.fetch = fetchMock;
+
+    const svc = createSvc();
+    await expect(
+      svc.updateBuild('my-project', 'build-9', { processingStatus: 'failed' })
+    ).rejects.toThrow('Failed to patch document: 400 Bad Request');
+
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    const [message, meta] = errorSpy.mock.calls[0];
+    expect(message).toContain('patchDocument failed');
+    const logged = JSON.stringify(meta);
+    expect(logged).toContain('Invalid property path');
+    expect(logged).not.toContain('test-token');
+    expect(logged).not.toContain('Bearer');
+  });
+
   it('archiveBuild() PATCHes archived status and audit fields', async () => {
     const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       expect((init?.method || 'GET').toUpperCase()).toBe('PATCH');
-      expect(url).toContain('updateMask.fieldPaths=status,archivedAt,archivedBy');
+      const params = new URL(url).searchParams.getAll('updateMask.fieldPaths');
+      expect(params).toEqual(['status', 'archivedAt', 'archivedBy']);
       const body = JSON.parse(String(init?.body));
       expect(body.fields.status.stringValue).toBe('archived');
       expect(body.fields.archivedBy.stringValue).toBe('user-1');

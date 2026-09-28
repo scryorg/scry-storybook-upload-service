@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { app, type AppEnv } from './app.js';
 import type { FirestoreService } from './services/firestore/firestore.service.js';
 import type { Build } from './services/firestore/firestore.types.js';
+import { FirestoreServiceWorker } from './services/firestore/firestore.worker.js';
 import { MockStorageService } from './services/storage/storage.mock.js';
 import { buildZip, zipDirectory } from './bundle/__tests__/test-helpers.js';
 
@@ -184,6 +185,116 @@ describe('POST /upload/:project/:version/bundle/complete', () => {
       );
     }
   );
+
+  it('ledger F73: a rejected bundle is really marked failed with validationErrors through the real Firestore REST client, not just the test double', async () => {
+    // The other rejection tests in this file mock FirestoreService.updateBuild() directly, so they
+    // only prove app.ts calls it with the right arguments — they would pass even with F73's bug,
+    // since that bug lives one layer down, inside FirestoreServiceWorker's patchDocument(). This
+    // test wires up the real FirestoreServiceWorker against a tiny in-memory Firestore REST
+    // simulator that reproduces Firestore's actual behavior: a PATCH whose `updateMask.fieldPaths`
+    // query string is a single comma-joined value (the pre-fix bug) 400s with "Invalid property
+    // path", exactly as stage did; one repeated param per field (the fix) succeeds.
+    const docs: Record<string, any> = {
+      'projects/acme/builds/build-100': {
+        projectId: { stringValue: 'acme' },
+        versionId: { stringValue: 'main' },
+        buildNumber: { integerValue: '5' },
+        zipUrl: { stringValue: '' },
+        status: { stringValue: 'active' },
+        createdAt: { timestampValue: new Date().toISOString() },
+        createdBy: { stringValue: 'test' },
+      },
+    };
+
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      const parsed = new URL(url);
+      // baseUrl is .../v1/projects/<firebase-project>/databases/(default)/documents/<path>
+      const docPath = parsed.pathname.split('/documents/')[1];
+      const method = (init?.method || 'GET').toUpperCase();
+
+      if (method === 'GET') {
+        const fields = docs[docPath];
+        return fields
+          ? ({ ok: true, status: 200, json: async () => ({ fields }) } as any)
+          : ({ ok: false, status: 404, statusText: 'Not Found' } as any);
+      }
+
+      if (method === 'PATCH') {
+        const fieldPaths = parsed.searchParams.getAll('updateMask.fieldPaths');
+        if (fieldPaths.some((fp) => fp.includes(','))) {
+          // Real Firestore's response to the pre-fix comma-joined param.
+          return {
+            ok: false,
+            status: 400,
+            statusText: 'Bad Request',
+            text: async () => `{"error":{"message":"Invalid property path \\"${fieldPaths[0]}\\""}}`,
+          } as any;
+        }
+        const body = JSON.parse(String(init?.body));
+        docs[docPath] = { ...(docs[docPath] ?? {}), ...body.fields };
+        return { ok: true, status: 200, json: async () => ({}) } as any;
+      }
+
+      throw new Error(`Unexpected request: ${method} ${url}`);
+    });
+
+    // @ts-expect-error - test override
+    globalThis.fetch = fetchMock;
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    const firestore = new FirestoreServiceWorker({
+      projectId: 'firebase-proj',
+      clientEmail: 'test@example.com',
+      privateKey: '-----BEGIN PRIVATE KEY-----\\nZm9v\\n-----END PRIVATE KEY-----',
+      serviceAccountId: 'upload-service',
+    });
+    (firestore as any).accessToken = 'test-token';
+    (firestore as any).tokenExpiry = Date.now() + 60_000;
+
+    const storage = new MockStorageService();
+    storage.seed(
+      ZIP_KEY,
+      buildZip([
+        {
+          name: 'scf.json',
+          data: Buffer.from(
+            JSON.stringify({
+              scf: '1.0',
+              source: { kind: 'storybook', platform: 'web' },
+              captures: [{ id: 'a', image: 'images/a.png' }],
+            })
+          ),
+        },
+        { name: 'images/a.png', data: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) },
+        { name: 'evil.html', data: Buffer.from('<script>alert(1)</script>') },
+      ])
+    );
+    const send = vi.fn(async () => undefined);
+    const server = createServer({ storage, firestore, queue: { send } });
+
+    const res = await server.request('/upload/acme/main/bundle/complete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ buildId: 'build-100', zipKey: ZIP_KEY }),
+    });
+
+    expect(res.status).toBe(422);
+    const body = await res.json();
+    expect(body.errors.map((e: { code: string }) => e.code)).toContain('FORBIDDEN_MEMBER');
+    expect(send).not.toHaveBeenCalled();
+
+    // The real assertion: the build doc, read back through the same real Firestore client,
+    // actually has processingStatus:'failed' + validationErrors — not left "active" forever (F73).
+    const build = await firestore.getBuild('acme', 'build-100');
+    expect(build?.processingStatus).toBe('failed');
+    expect(build?.validationErrors).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: 'FORBIDDEN_MEMBER' })])
+    );
+
+    // And the failure-to-update path (console.warn('[BUNDLE] Could not mark build failed', ...))
+    // was never exercised, because the patch actually succeeded this time.
+    expect(warnSpy).not.toHaveBeenCalledWith('[BUNDLE] Could not mark build failed', expect.anything());
+  });
 
   it('guarantee-6: a bundle whose "image" is actually not an image (renamed binary / zip-in-zip) is rejected by content sniff, not extension', async () => {
     const scf = {
