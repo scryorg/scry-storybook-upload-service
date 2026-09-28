@@ -302,7 +302,12 @@ describe('FirestoreServiceWorker', () => {
       const method = (init?.method || 'GET').toUpperCase();
       expect(method).toBe('PATCH');
       expect(url).toContain('/documents/projects/my-project/builds/build-123');
-      expect(url).toContain('updateMask.fieldPaths=status,zipUrl,archivedAt,archivedBy,coverage');
+      // Firestore REST requires one updateMask.fieldPaths param PER field (F73): a single
+      // comma-joined value is parsed as one field path containing a literal comma and rejected.
+      const params = new URL(url).searchParams.getAll('updateMask.fieldPaths');
+      expect(params).toEqual(['status', 'zipUrl', 'archivedAt', 'archivedBy', 'coverage']);
+      expect(url).not.toContain('updateMask.fieldPaths=status%2CzipUrl');
+      expect(url).not.toContain('updateMask.fieldPaths=status,zipUrl');
 
       const body = JSON.parse(String(init?.body));
       expect(body.fields.status.stringValue).toBe('archived');
@@ -344,10 +349,74 @@ describe('FirestoreServiceWorker', () => {
     });
   });
 
+  it('updateBuild() sends the exact repeated-param query string for a provenance write (upload-provenance-updatemask, ISSUES.md #61)', async () => {
+    // Reproduces the real production call sites (app.ts coverage + metadata routes, both added by
+    // PR #25) that set commitSha+branch together. Before the fix, patchDocument() sent a single
+    // `updateMask.fieldPaths=commitSha,branch` param; Firestore's REST API parses that as one field
+    // path containing a literal comma and 400s with "Invalid property path", which both call sites'
+    // best-effort .catch() swallowed as a warning — so the build document never gained either field
+    // (108/108 production builds since 2026-09-11, per impact.md).
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      const parsed = new URL(url);
+      expect(parsed.pathname).toBe(
+        '/v1/projects/firebase-proj/databases/(default)/documents/projects/my-project/builds/build-9'
+      );
+      expect(parsed.search).toBe(
+        '?updateMask.fieldPaths=commitSha&updateMask.fieldPaths=branch'
+      );
+      expect((init?.method || 'GET').toUpperCase()).toBe('PATCH');
+
+      const body = JSON.parse(String(init?.body));
+      expect(Object.keys(body.fields)).toEqual(['commitSha', 'branch']);
+      expect(body.fields.commitSha.stringValue).toBe('a1b2c3d4e5f60718293a4b5c6d7e8f9012345678');
+      expect(body.fields.branch.stringValue).toBe('main');
+
+      return { ok: true, status: 200, json: async () => ({}) } as any;
+    });
+
+    // @ts-expect-error - test override
+    globalThis.fetch = fetchMock;
+
+    const svc = createSvc();
+    await svc.updateBuild('my-project', 'build-9', {
+      commitSha: 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678',
+      branch: 'main',
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('updateBuild() logs a non-2xx patchDocument response (no token/secrets) and still throws', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const fetchMock = vi.fn(async () => ({
+      ok: false,
+      status: 400,
+      statusText: 'Bad Request',
+      text: async () => '{"error":{"message":"Invalid property path \\"a,b\\""}}',
+    })) as any;
+
+    // @ts-expect-error - test override
+    globalThis.fetch = fetchMock;
+
+    const svc = createSvc();
+    await expect(
+      svc.updateBuild('my-project', 'build-9', { processingStatus: 'failed' })
+    ).rejects.toThrow('Failed to patch document: 400 Bad Request');
+
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    const [message, meta] = errorSpy.mock.calls[0];
+    expect(message).toContain('patchDocument failed');
+    const logged = JSON.stringify(meta);
+    expect(logged).toContain('Invalid property path');
+    expect(logged).not.toContain('test-token');
+    expect(logged).not.toContain('Bearer');
+  });
+
   it('archiveBuild() PATCHes archived status and audit fields', async () => {
     const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       expect((init?.method || 'GET').toUpperCase()).toBe('PATCH');
-      expect(url).toContain('updateMask.fieldPaths=status,archivedAt,archivedBy');
+      const params = new URL(url).searchParams.getAll('updateMask.fieldPaths');
+      expect(params).toEqual(['status', 'archivedAt', 'archivedBy']);
       const body = JSON.parse(String(init?.body));
       expect(body.fields.status.stringValue).toBe('archived');
       expect(body.fields.archivedBy.stringValue).toBe('user-1');

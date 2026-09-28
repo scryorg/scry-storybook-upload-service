@@ -232,6 +232,9 @@ describe('ApiKeyServiceWorker', () => {
       expect(mockFetch).toHaveBeenCalledTimes(1);
       const patchCall = mockFetch.mock.calls[0];
       expect(patchCall[0]).toContain('apiKeys/key-123');
+      // F84: one updateMask.fieldPaths per field, never comma-joined
+      expect(patchCall[0]).toContain('updateMask.fieldPaths=status&updateMask.fieldPaths=revokedAt&updateMask.fieldPaths=revokedBy');
+      expect(patchCall[0]).not.toContain(',');
       expect(patchCall[1].method).toBe('PATCH');
     });
   });

@@ -713,9 +713,24 @@ export class FirestoreServiceWorker implements FirestoreService {
 
   private async patchDocument(path: string, fields: any, token: string): Promise<void> {
     const url = `${this.baseUrl}/${path}`;
-    const updateMask = Object.keys(fields).join(',');
-    
-    const response = await fetch(`${url}?updateMask.fieldPaths=${updateMask}`, {
+
+    // Firestore's REST API takes one `updateMask.fieldPaths` query param PER field, not a single
+    // comma-joined value (that is parsed as one field path containing a literal comma, which
+    // Firestore rejects with "Invalid property path"). A bare field name (our case: top-level
+    // build-doc fields like `status`, `zipUrl`, `commitSha`) never needs quoting, but a path
+    // segment containing anything other than [A-Za-z0-9_] — or one starting with a digit — must be
+    // wrapped in backticks per Firestore's field-path syntax, so this stays correct if a future
+    // field name ever needs it.
+    const needsBackticks = (segment: string) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(segment);
+    const quoteFieldPath = (fieldPath: string) =>
+      needsBackticks(fieldPath) ? `\`${fieldPath.replace(/`/g, '\\`')}\`` : fieldPath;
+
+    const params = new URLSearchParams();
+    for (const key of Object.keys(fields)) {
+      params.append('updateMask.fieldPaths', quoteFieldPath(key));
+    }
+
+    const response = await fetch(`${url}?${params.toString()}`, {
       method: 'PATCH',
       headers: {
         'Authorization': `Bearer ${token}`,
@@ -725,7 +740,19 @@ export class FirestoreServiceWorker implements FirestoreService {
     });
 
     if (!response.ok) {
-      throw new Error(`Failed to patch document: ${response.statusText}`);
+      // Surface the failure so a rejected multi-field update (e.g. recording commitSha+branch
+      // provenance) shows up in logs instead of only reaching the caller's best-effort .catch() as
+      // a swallowed warning (ledger F73 / upload-provenance-updatemask). Never logs the token or the
+      // request body, which may carry coverage content but never secrets.
+      const errorBody = await response.text().catch(() => '');
+      console.error('[FIRESTORE] patchDocument failed', {
+        path,
+        status: response.status,
+        statusText: response.statusText,
+        fieldPaths: Object.keys(fields),
+        body: errorBody.slice(0, 2000),
+      });
+      throw new Error(`Failed to patch document: ${response.status} ${response.statusText}`);
     }
   }
 
