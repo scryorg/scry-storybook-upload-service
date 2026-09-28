@@ -1,6 +1,7 @@
 import { fromSbcov } from './from-sbcov.js';
 import { readImageDimensions } from './image-dimensions.js';
 import { sidecarCapturesFromImages } from './sidecars-internal.js';
+import { bundleFileHead, bundleFileSize } from './types.js';
 const SUPPORTED_SCF_VERSIONS = new Set(['1.0']);
 const ALLOWED_IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'webp']);
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
@@ -76,7 +77,7 @@ async function readDir(dir) {
     return files;
 }
 function parseJson(files, path) {
-    return JSON.parse(decoder.decode(files.get(path)));
+    return JSON.parse(decoder.decode(bundleFileHead(files.get(path))));
 }
 /**
  * `links.live` is auto-embedded as an iframe wherever Storybook is embedded today (contract §8);
@@ -253,19 +254,24 @@ export async function validateBundle(input) {
             }
             else {
                 const ext = extOf(image);
-                const bytes = files.get(image);
-                const family = bytes ? detectImageFamily(bytes) : null;
+                const imageEntry = files.get(image);
+                // `head` is the whole file for a plain entry, or just its first bytes for a `{head, size}`
+                // partial image entry (ledger F31/F32) — either is enough for magic-byte + header-only
+                // dimension checks. `size` is always the image's real total byte length.
+                const head = bundleFileHead(imageEntry);
+                const size = bundleFileSize(imageEntry) ?? 0;
+                const family = head ? detectImageFamily(head) : null;
                 if (!ALLOWED_IMAGE_EXT.has(ext) || !family || EXT_FAMILY[ext] !== family) {
                     errors.push(issue('IMAGE_FORMAT_INVALID', `Image is not PNG/JPEG/WebP: ${image}`, { id, path: image }));
                 }
-                if ((bytes?.byteLength ?? 0) > MAX_IMAGE_BYTES) {
+                if (size > MAX_IMAGE_BYTES) {
                     errors.push(issue('IMAGE_TOO_LARGE', `Image is over 20 MB: ${image}`, { id, path: image }));
                 }
-                if (bytes && family) {
+                if (head && family) {
                     // Header-only read (no decode): a tiny file can still declare an enormous canvas, which
                     // is a resource-exhaustion risk for whatever decodes it later (ledger F25). An unreadable
                     // header (truncated file, or a WebP shape this parser doesn't cover) fails closed.
-                    const dims = readImageDimensions(bytes, family);
+                    const dims = readImageDimensions(head, family);
                     if (!dims) {
                         errors.push(issue('IMAGE_HEADER_UNREADABLE', `Could not read image dimensions from the header: ${image}`, {
                             id,
@@ -298,7 +304,7 @@ export async function validateBundle(input) {
             }
             else {
                 referencedPaths.add(structPath);
-                const structBytes = files.get(structPath);
+                const structBytes = bundleFileHead(files.get(structPath));
                 if (!structBytes) {
                     errors.push(issue('STRUCTURE_FILE_MISSING', `structure.file not found in bundle: ${structPath}`, { id, path: structPath }));
                 }
@@ -338,7 +344,7 @@ export async function validateBundle(input) {
             }
             else {
                 referencedPaths.add(sourcePath);
-                const sourceBytes = files.get(sourcePath);
+                const sourceBytes = bundleFileHead(files.get(sourcePath));
                 if (!sourceBytes) {
                     errors.push(issue('SOURCE_TEXT_FILE_MISSING', `sourceText.file not found in bundle: ${sourcePath}`, {
                         id,

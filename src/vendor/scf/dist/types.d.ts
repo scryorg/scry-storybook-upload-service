@@ -140,8 +140,29 @@ export interface ScfManifest {
     warnings?: ValidationIssue[];
     [key: string]: unknown;
 }
-/** A bundle as an in-memory map of bundle-relative POSIX path -> file bytes. */
-export type BundleFiles = Map<string, Uint8Array>;
+/**
+ * Full bytes, or — for an image entry only — a memory-bounded stand-in: the first bytes of the
+ * file (enough for magic-byte family detection and a header-only dimension read, see
+ * `image-dimensions.ts`) plus its real total size. A caller that streams a large bundle instead of
+ * buffering it whole (ledger F31/F32: a Worker-safe bundle-upload route must never hold a full
+ * decompressed image, let alone a whole decompressed bundle, in memory) can supply this instead of
+ * the full decoded image. Every other bundle member (`scf.json`, `structure.file`/`sourceText.file`,
+ * sidecar JSON) MUST still be supplied in full — `validateBundle` only treats the partial shape as
+ * an image, via the `image` field of a capture.
+ */
+export type BundleFileBytes = Uint8Array | {
+    head: Uint8Array;
+    size: number;
+};
+/** A bundle as an in-memory map of bundle-relative POSIX path -> file bytes (see `BundleFileBytes`). */
+export type BundleFiles = Map<string, BundleFileBytes>;
+/** Normalizes a `BundleFiles` entry to bytes usable for magic-byte/header inspection: the full
+ *  bytes for a plain entry, or just the head for a `{head, size}` image entry. Never the image's
+ *  real full content when given a partial entry — use `bundleFileSize` for the true byte length. */
+export declare function bundleFileHead(entry: BundleFileBytes | undefined): Uint8Array | undefined;
+/** The entry's real total byte size: `byteLength` for a full entry, or the caller-reported `size`
+ *  for a `{head, size}` image entry (its true size, not the head's length). */
+export declare function bundleFileSize(entry: BundleFileBytes | undefined): number | undefined;
 /** scf-tree/1, see ../../../spec/scf-1.0.md. */
 export interface ScfTreeNode {
     type: string;

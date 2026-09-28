@@ -24,8 +24,7 @@ import { extractGitContext, normalizeCoverageInput } from './coverage/coverage.j
 import { parseMultipartFormData } from './utils/multipart.js';
 import { ciEventFields, mergeCiTimings, parseCiTimings, type CiTimings, type CiTimingsParse } from './ci-timings/ci-timings.js';
 import { parseSourceKey } from './bundle/source-key.js';
-import { readBoundedZip, DEFAULT_BOUNDED_ZIP_LIMITS, type BoundedZipIssue } from './bundle/bounded-zip.js';
-import { readStreamWithLimit } from './bundle/read-stream.js';
+import { readBoundedZipStream, DEFAULT_BOUNDED_ZIP_LIMITS, type BoundedZipIssue } from './bundle/bounded-zip.js';
 import { validateBundle, type ValidationIssue as ScfValidationIssue } from './vendor/scf/dist/index.js';
 
 // Define the application's environment, including injectable variables.
@@ -1112,8 +1111,17 @@ const ValidationIssueSchema = z.object({
  * The whole bundle ZIP, as HEAD-checked before download. The spec (spec/scf-1.0.md) bounds each
  * image (20 MB, 16384px) but sets no bundle-wide cap; this is a server-side default protecting the
  * upload service itself, independent of the vendored validator's own per-image/per-file limits.
+ *
+ * Ledger F32: this used to be 300 MiB and was still fully buffered into one in-memory `Buffer`
+ * before this route did anything else with it — well past what a Cloudflare Worker's ~128 MB
+ * isolate can hold, so any legitimately large bundle reliably crashed the request with an
+ * out-of-memory error rather than reaching a clean 422. The route below now reads the object as a
+ * true stream (`readBoundedZipStream`, ledger F31) and never buffers more than a small bounded
+ * window of it at once, so this cap can be — and is — sized to what a real bundle needs rather than
+ * to what used to fit in memory. Kept equal to `bounded-zip.ts`'s own `maxRawBytes` (the same cap,
+ * enforced a second time here as a cheap pre-download HEAD check) — one number, not two to drift.
  */
-const MAX_BUNDLE_ZIP_BYTES = 300 * 1024 * 1024; // 300 MiB
+const MAX_BUNDLE_ZIP_BYTES = DEFAULT_BOUNDED_ZIP_LIMITS.maxRawBytes;
 
 const BundleSourceQuerySchema = z.object({
   source: z
@@ -1364,21 +1372,12 @@ app.openapi(bundleCompleteRoute, async (c) => {
       return c.json({ error: 'Bundle object not found. Upload it to the presigned URL first.' }, 400);
     }
 
-    // Stream-read with a hard byte cap (ledger F11 "total size") — a backstop independent of the
-    // HEAD size above, in case the two disagree.
-    const read = await readStreamWithLimit(stream, MAX_BUNDLE_ZIP_BYTES);
-    if (!read.ok) {
-      return reject([
-        {
-          code: 'BUNDLE_TOO_LARGE',
-          message: `Bundle exceeds the ${MAX_BUNDLE_ZIP_BYTES} byte limit while reading.`,
-        },
-      ]);
-    }
-
-    // Entries, total uncompressed size, path traversal, symlinks (ledger F11) — all checked before
-    // any member is handed to the shared validator.
-    const zipResult = readBoundedZip(read.buffer);
+    // A genuine streaming pass (ledger F31/F32): entries, REAL (measured, not declared) per-entry
+    // and total decompressed sizes, compression ratio, path traversal, symlinks — all checked, and
+    // enforced against actual decompressor output, before any member is handed to the shared
+    // validator. Never buffers the whole (still-compressed) object, an entry's whole decompressed
+    // output, or the whole bundle's decompressed content — see bundle/bounded-zip.ts.
+    const zipResult = await readBoundedZipStream(stream, DEFAULT_BOUNDED_ZIP_LIMITS);
     if (!zipResult.ok) {
       return reject(zipResult.issues);
     }

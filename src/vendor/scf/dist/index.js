@@ -7,4 +7,5 @@ export { fromSbcov, toStorybookId } from './from-sbcov.js';
 export { fromSidecars } from './from-sidecars.js';
 export { storageKey, companionKey, sourceKeyOf } from './storage-key.js';
 export { sha256Hex } from './sha256.js';
+export { bundleFileHead, bundleFileSize } from './types.js';
 //# sourceMappingURL=index.js.map

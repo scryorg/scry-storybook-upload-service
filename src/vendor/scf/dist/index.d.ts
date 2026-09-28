@@ -7,5 +7,6 @@ export { fromSbcov, toStorybookId } from './from-sbcov.js';
 export { fromSidecars } from './from-sidecars.js';
 export { storageKey, companionKey, sourceKeyOf } from './storage-key.js';
 export { sha256Hex } from './sha256.js';
-export type { BundleFiles, CaptureBlock, CaptureCode, CaptureCrop, CaptureFlow, CaptureKind, CaptureLinks, CaptureMethod, CaptureSourceText, CaptureStructure, CaptureVariant, DeviceRef, ScfCapture, ScfCounts, ScfManifest, ScfRepository, ScfSource, ScfTree, ScfTreeNode, Severity, SkipReason, StructureOrigin, ValidationIssue, ValidationResult, } from './types.js';
+export { bundleFileHead, bundleFileSize } from './types.js';
+export type { BundleFileBytes, BundleFiles, CaptureBlock, CaptureCode, CaptureCrop, CaptureFlow, CaptureKind, CaptureLinks, CaptureMethod, CaptureSourceText, CaptureStructure, CaptureVariant, DeviceRef, ScfCapture, ScfCounts, ScfManifest, ScfRepository, ScfSource, ScfTree, ScfTreeNode, Severity, SkipReason, StructureOrigin, ValidationIssue, ValidationResult, } from './types.js';
 //# sourceMappingURL=index.d.ts.map
