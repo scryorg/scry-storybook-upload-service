@@ -508,5 +508,79 @@ describe('FirestoreServiceWorker', () => {
     expect((build?.coverage as any)?.summary?.totalComponents).toBe(10);
     expect((build?.coverage as any)?.qualityGate?.checks?.[0]?.name).toBe('passRate');
   });
+
+  it('guarantee-3: getBuild() reads commitSha/branch/provenanceError back from the document (upload-provenance-updatemask, ISSUES.md #61)', async () => {
+    // Sibling to the updateMask fix, found in Stage 3: convertDocToBuild() never mapped
+    // commitSha/branch back into the Build object at all, so even once patchDocument() correctly
+    // wrote them, every read (getBuild, getBuildByVersion, getProjectBuilds, getLatestBuild) would
+    // still silently drop them -- independent of the comma-join bug this hotfix fixes. #25 wrote
+    // the write side but never touched this read side.
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        fields: {
+          projectId: { stringValue: 'my-project' },
+          versionId: { stringValue: 'v1' },
+          buildNumber: { integerValue: '1' },
+          zipUrl: { stringValue: 'https://r2/1.zip' },
+          status: { stringValue: 'active' },
+          createdAt: { timestampValue: '2026-01-01T00:00:00.000Z' },
+          createdBy: { stringValue: 'svc' },
+          commitSha: { stringValue: 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678' },
+          branch: { stringValue: 'main' },
+          provenanceError: {
+            mapValue: {
+              fields: {
+                at: { stringValue: '2026-09-28T18:00:00.000Z' },
+                message: { stringValue: 'Failed to patch document: 400 Bad Request' },
+                route: { stringValue: 'coverage' },
+              },
+            },
+          },
+        },
+      }),
+    })) as any;
+
+    // @ts-expect-error - test override
+    globalThis.fetch = fetchMock;
+
+    const svc = createSvc();
+    const build = await svc.getBuild('my-project', 'build-123');
+    expect(build?.commitSha).toBe('a1b2c3d4e5f60718293a4b5c6d7e8f9012345678');
+    expect(build?.branch).toBe('main');
+    expect(build?.provenanceError).toEqual({
+      at: '2026-09-28T18:00:00.000Z',
+      message: 'Failed to patch document: 400 Bad Request',
+      route: 'coverage',
+    });
+  });
+
+  it('getBuild() omits commitSha/branch/provenanceError when the document has none (absent stays absent)', async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        fields: {
+          projectId: { stringValue: 'my-project' },
+          versionId: { stringValue: 'v1' },
+          buildNumber: { integerValue: '1' },
+          zipUrl: { stringValue: 'https://r2/1.zip' },
+          status: { stringValue: 'active' },
+          createdAt: { timestampValue: '2026-01-01T00:00:00.000Z' },
+          createdBy: { stringValue: 'svc' },
+        },
+      }),
+    })) as any;
+
+    // @ts-expect-error - test override
+    globalThis.fetch = fetchMock;
+
+    const svc = createSvc();
+    const build = await svc.getBuild('my-project', 'build-123');
+    expect(build?.commitSha).toBeUndefined();
+    expect(build?.branch).toBeUndefined();
+    expect(build?.provenanceError).toBeUndefined();
+  });
 });
 

@@ -805,9 +805,16 @@ export class FirestoreServiceWorker implements FirestoreService {
       archivedBy: fields.archivedBy?.stringValue,
       coverage: fields.coverage ? (this.fromFirestoreValue(fields.coverage) as any) : undefined,
       processingStatus: fields.processingStatus?.stringValue,
+      // commitSha/branch (P13a) were added to the write side by #25 but never read back here —
+      // every read (getBuild, getBuildByVersion, getProjectBuilds, getLatestBuild) silently dropped
+      // them even once the document had them, independent of the updateMask bug this hotfix fixes
+      // (upload-provenance-updatemask, ISSUES.md #61; sibling found during Stage 3, fixed alongside).
+      ...(fields.commitSha?.stringValue ? { commitSha: fields.commitSha.stringValue } : {}),
+      ...(fields.branch?.stringValue ? { branch: fields.branch.stringValue } : {}),
       ...(fields.uploadedByKeyId?.stringValue ? { uploadedByKeyId: fields.uploadedByKeyId.stringValue } : {}),
       ...(fields.uploadedByKeyProject?.stringValue ? { uploadedByKeyProject: fields.uploadedByKeyProject.stringValue } : {}),
       ...(fields.ciTimings ? { ciTimings: this.fromFirestoreValue(fields.ciTimings) as any } : {}),
+      ...(fields.provenanceError ? { provenanceError: this.fromFirestoreValue(fields.provenanceError) as any } : {}),
     };
   }
 
