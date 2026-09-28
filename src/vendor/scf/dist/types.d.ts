@@ -160,6 +160,10 @@ export type BundleFiles = Map<string, BundleFileBytes>;
  *  bytes for a plain entry, or just the head for a `{head, size}` image entry. Never the image's
  *  real full content when given a partial entry — use `bundleFileSize` for the true byte length. */
 export declare function bundleFileHead(entry: BundleFileBytes | undefined): Uint8Array | undefined;
+/** The entry's full bytes, or `undefined` for a `{head, size}` entry. Every non-image member
+ *  (JSON, structure trees, source text) is read through this, so a partial entry can never be
+ *  validated from its head alone (security review F50). */
+export declare function bundleFileFull(entry: BundleFileBytes | undefined): Uint8Array | undefined;
 /** The entry's real total byte size: `byteLength` for a full entry, or the caller-reported `size`
  *  for a `{head, size}` image entry (its true size, not the head's length). */
 export declare function bundleFileSize(entry: BundleFileBytes | undefined): number | undefined;

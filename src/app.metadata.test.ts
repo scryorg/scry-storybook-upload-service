@@ -56,7 +56,7 @@ describe('app metadata route', () => {
       getPresignedUploadUrl: vi.fn() as any,
       head: vi.fn() as any,
       getObjectStream: vi.fn() as any,
-      delete: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
 
@@ -118,7 +118,7 @@ describe('app metadata route', () => {
       getPresignedUploadUrl: vi.fn() as any,
       head: vi.fn() as any,
       getObjectStream: vi.fn() as any,
-      delete: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
 
@@ -160,7 +160,7 @@ describe('app metadata route', () => {
       getPresignedUploadUrl: vi.fn() as any,
       head: vi.fn() as any,
       getObjectStream: vi.fn() as any,
-      delete: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
 
@@ -197,7 +197,7 @@ describe('app metadata route', () => {
       getPresignedUploadUrl: vi.fn() as any,
       head: vi.fn() as any,
       getObjectStream: vi.fn() as any,
-      delete: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
 
@@ -234,7 +234,7 @@ describe('app metadata route', () => {
       getPresignedUploadUrl: vi.fn() as any,
       head: vi.fn() as any,
       getObjectStream: vi.fn() as any,
-      delete: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
     const firestore = createFirestoreMock();
@@ -255,7 +255,7 @@ describe('app metadata route', () => {
       getPresignedUploadUrl: vi.fn() as any,
       head: vi.fn() as any,
       getObjectStream: vi.fn() as any,
-      delete: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
     const firestore = createFirestoreMock();
@@ -275,7 +275,7 @@ describe('app metadata route', () => {
       getPresignedUploadUrl: vi.fn() as any,
       head: vi.fn() as any,
       getObjectStream: vi.fn() as any,
-      delete: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
     const firestore = createFirestoreMock();
@@ -298,7 +298,7 @@ describe('app metadata route', () => {
       getPresignedUploadUrl: vi.fn() as any,
       head: vi.fn() as any,
       getObjectStream: vi.fn() as any,
-      delete: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
     const firestore = createFirestoreMock({
@@ -324,7 +324,7 @@ describe('app metadata route', () => {
       getPresignedUploadUrl: vi.fn() as any,
       head: vi.fn() as any,
       getObjectStream: vi.fn() as any,
-      delete: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
     const latestBuild: Build = {
@@ -360,7 +360,7 @@ describe('app metadata route', () => {
       getPresignedUploadUrl: vi.fn() as any,
       head: vi.fn() as any,
       getObjectStream: vi.fn() as any,
-      delete: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
     const firestore = createFirestoreMock();

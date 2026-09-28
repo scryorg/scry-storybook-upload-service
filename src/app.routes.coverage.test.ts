@@ -34,7 +34,7 @@ describe('app routes (coverage)', () => {
       getPresignedUploadUrl: vi.fn() as any,
       head: vi.fn() as any,
       getObjectStream: vi.fn() as any,
-      delete: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
     const server = createTestServer({ storage });
@@ -53,7 +53,7 @@ describe('app routes (coverage)', () => {
       getPresignedUploadUrl: vi.fn() as any,
       head: vi.fn() as any,
       getObjectStream: vi.fn() as any,
-      delete: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
     const server = createTestServer({ storage });
@@ -72,7 +72,7 @@ describe('app routes (coverage)', () => {
       getPresignedUploadUrl: vi.fn() as any,
       head: vi.fn() as any,
       getObjectStream: vi.fn() as any,
-      delete: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: deleteByPrefix as any,
     };
     const disabledServer = createTestServer({ storage });
@@ -97,7 +97,7 @@ describe('app routes (coverage)', () => {
       getPresignedUploadUrl: vi.fn() as any,
       head: vi.fn() as any,
       getObjectStream: vi.fn() as any,
-      delete: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
     const server = createTestServer({ storage });
@@ -121,7 +121,7 @@ describe('app routes (coverage)', () => {
       getPresignedUploadUrl: vi.fn() as any,
       head: vi.fn() as any,
       getObjectStream: vi.fn() as any,
-      delete: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
     const server = createTestServer({ storage });
@@ -143,7 +143,7 @@ describe('app routes (coverage)', () => {
       getPresignedUploadUrl: vi.fn() as any,
       head: vi.fn() as any,
       getObjectStream: vi.fn() as any,
-      delete: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
     const server = createTestServer({ storage });
@@ -171,7 +171,7 @@ describe('app routes (coverage)', () => {
       getPresignedUploadUrl: vi.fn() as any,
       head: vi.fn() as any,
       getObjectStream: vi.fn() as any,
-      delete: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
     const server = createTestServer({ storage });
@@ -197,7 +197,7 @@ describe('app routes (coverage)', () => {
       getPresignedUploadUrl: vi.fn() as any,
       head: vi.fn() as any,
       getObjectStream: vi.fn() as any,
-      delete: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
 
@@ -244,7 +244,7 @@ describe('app routes (coverage)', () => {
       getPresignedUploadUrl: vi.fn() as any,
       head: vi.fn() as any,
       getObjectStream: vi.fn() as any,
-      delete: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
     const createBuild = vi.fn(async () => ({
@@ -292,7 +292,7 @@ describe('app routes (coverage)', () => {
       }) as any,
       head: vi.fn() as any,
       getObjectStream: vi.fn() as any,
-      delete: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
 
@@ -349,7 +349,7 @@ describe('app routes (coverage)', () => {
       getPresignedUploadUrl: vi.fn(async (key: string) => ({ url: `https://signed.example/${key}?sig=1`, key })) as any,
       head: vi.fn() as any,
       getObjectStream: vi.fn() as any,
-      delete: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
 
@@ -387,7 +387,7 @@ describe('app routes (coverage)', () => {
       getPresignedUploadUrl: vi.fn() as any,
       head: vi.fn() as any,
       getObjectStream: vi.fn() as any,
-      delete: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
     const server = createTestServer({ storage });
@@ -406,7 +406,7 @@ describe('app routes (coverage)', () => {
       getPresignedUploadUrl: vi.fn() as any,
       head: vi.fn() as any,
       getObjectStream: vi.fn() as any,
-      delete: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
     const server = createTestServer({ storage });
@@ -425,7 +425,7 @@ describe('app routes (coverage)', () => {
       getPresignedUploadUrl: vi.fn() as any,
       head: vi.fn() as any,
       getObjectStream: vi.fn() as any,
-      delete: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
 
@@ -457,7 +457,7 @@ describe('app routes (coverage)', () => {
       getPresignedUploadUrl: vi.fn() as any,
       head: vi.fn() as any,
       getObjectStream: vi.fn() as any,
-      delete: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
 
@@ -490,7 +490,7 @@ describe('app routes (coverage)', () => {
       getPresignedUploadUrl: vi.fn() as any,
       head: vi.fn() as any,
       getObjectStream: vi.fn() as any,
-      delete: vi.fn() as any,
+      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
       deleteByPrefix: vi.fn() as any,
     };
 

@@ -7,6 +7,12 @@ export function bundleFileHead(entry) {
         return undefined;
     return entry instanceof Uint8Array ? entry : entry.head;
 }
+/** The entry's full bytes, or `undefined` for a `{head, size}` entry. Every non-image member
+ *  (JSON, structure trees, source text) is read through this, so a partial entry can never be
+ *  validated from its head alone (security review F50). */
+export function bundleFileFull(entry) {
+    return entry instanceof Uint8Array ? entry : undefined;
+}
 /** The entry's real total byte size: `byteLength` for a full entry, or the caller-reported `size`
  *  for a `{head, size}` image entry (its true size, not the head's length). */
 export function bundleFileSize(entry) {

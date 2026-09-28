@@ -1,7 +1,7 @@
 import { fromSbcov } from './from-sbcov.js';
 import { readImageDimensions } from './image-dimensions.js';
 import { sidecarCapturesFromImages } from './sidecars-internal.js';
-import { bundleFileHead, bundleFileSize } from './types.js';
+import { bundleFileFull, bundleFileHead, bundleFileSize } from './types.js';
 const SUPPORTED_SCF_VERSIONS = new Set(['1.0']);
 const ALLOWED_IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'webp']);
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
@@ -77,7 +77,10 @@ async function readDir(dir) {
     return files;
 }
 function parseJson(files, path) {
-    return JSON.parse(decoder.decode(bundleFileHead(files.get(path))));
+    const bytes = bundleFileFull(files.get(path));
+    if (bytes === undefined)
+        throw new Error(`${path} must be supplied in full, not as a {head, size} entry`);
+    return JSON.parse(decoder.decode(bytes));
 }
 /**
  * `links.live` is auto-embedded as an iframe wherever Storybook is embedded today (contract §8);
@@ -170,6 +173,17 @@ export async function validateBundle(input) {
     if (unsafeMembers.length > 0) {
         for (const p of unsafeMembers) {
             errors.push(issue('UNSAFE_PATH', `Bundle member has an unsafe path (absolute, backslash, "." or ".."): ${JSON.stringify(p)}`, { path: p }));
+        }
+        return { ok: false, errors, warnings, manifest: null };
+    }
+    // Ledger F50: the {head, size} shape is for images only. Any other member given partially is refused
+    // outright, so JSON, structure trees and source text are always validated from their full bytes.
+    const partialNonImages = [...files.entries()]
+        .filter(([p, entry]) => !(entry instanceof Uint8Array) && !ALLOWED_IMAGE_EXT.has(extOf(p)))
+        .map(([p]) => p);
+    if (partialNonImages.length > 0) {
+        for (const p of partialNonImages) {
+            errors.push(issue('MEMBER_BYTES_REQUIRED', `Only images may be supplied as {head, size}; ${p} must be supplied in full.`, { path: p }));
         }
         return { ok: false, errors, warnings, manifest: null };
     }
@@ -304,7 +318,7 @@ export async function validateBundle(input) {
             }
             else {
                 referencedPaths.add(structPath);
-                const structBytes = bundleFileHead(files.get(structPath));
+                const structBytes = bundleFileFull(files.get(structPath));
                 if (!structBytes) {
                     errors.push(issue('STRUCTURE_FILE_MISSING', `structure.file not found in bundle: ${structPath}`, { id, path: structPath }));
                 }
@@ -344,7 +358,7 @@ export async function validateBundle(input) {
             }
             else {
                 referencedPaths.add(sourcePath);
-                const sourceBytes = bundleFileHead(files.get(sourcePath));
+                const sourceBytes = bundleFileFull(files.get(sourcePath));
                 if (!sourceBytes) {
                     errors.push(issue('SOURCE_TEXT_FILE_MISSING', `sourceText.file not found in bundle: ${sourcePath}`, {
                         id,

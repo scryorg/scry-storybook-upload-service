@@ -27,6 +27,21 @@ export interface StorageObjectMeta {
 }
 
 /**
+ * A byte range to read from an object, relative to its start. Used by the capture-sources bundle
+ * route (ledger F49) to read just a ZIP's tail (its end-of-central-directory record, then its
+ * central directory) before ever opening a full stream over the — potentially huge — rest of it.
+ */
+export interface StorageObjectRange {
+  /** 0-based byte offset from the start of the object. */
+  offset: number;
+  /** Number of bytes to read, starting at `offset`. An implementation clamps this to whatever is
+   *  actually left in the object rather than erroring — a caller that already knows the object's
+   *  real size (every caller here does, from a prior `head()`) never needs to ask for more than
+   *  what's left, but a shorter response is never treated as a failure on its own. */
+  length: number;
+}
+
+/**
  * Defines the contract for all storage operations within the application.
  * Any class implementing this interface can be used as the storage backend.
  */
@@ -60,6 +75,13 @@ export interface StorageService {
    * @returns The object's body as a web ReadableStream, or null if it does not exist.
    */
   getObjectStream(key: string): Promise<ReadableStream | null>;
+
+  /**
+   * Reads a byte range of an object's body, without downloading the whole object (ledger F49).
+   * @returns exactly the bytes in `[range.offset, range.offset + range.length)` (fewer, if the
+   *   object is shorter than that), or `null` if the object does not exist.
+   */
+  getObjectRange(key: string, range: StorageObjectRange): Promise<Uint8Array | null>;
 
   /**
    * Deletes a single object. A no-op if it does not already exist.

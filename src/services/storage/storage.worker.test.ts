@@ -75,6 +75,25 @@ describe('R2S3StorageService (Worker)', () => {
     });
   });
 
+  it('getObjectRange() passes offset/length through to the native R2 binding and returns its bytes', async () => {
+    const storageService = new R2S3StorageService(mockR2Bucket as any, config);
+    const bytes = new Uint8Array([1, 2, 3, 4, 5]);
+    const mockR2Object = { arrayBuffer: vi.fn(async () => bytes.buffer) };
+    (mockR2Bucket as any).get = vi.fn(async () => mockR2Object);
+
+    const result = await storageService.getObjectRange('k.bin', { offset: 10, length: 5 });
+
+    expect((mockR2Bucket as any).get).toHaveBeenCalledWith('k.bin', { range: { offset: 10, length: 5 } });
+    expect(result).toEqual(bytes);
+  });
+
+  it('getObjectRange() returns null when the R2 binding reports the object does not exist', async () => {
+    const storageService = new R2S3StorageService(mockR2Bucket as any, config);
+    (mockR2Bucket as any).get = vi.fn(async () => null);
+
+    expect(await storageService.getObjectRange('missing.bin', { offset: 0, length: 5 })).toBeNull();
+  });
+
   it('deleteByPrefix() lists and deletes objects until cursor is exhausted', async () => {
     const storageService = new R2S3StorageService(mockR2Bucket as any, config);
 

@@ -19,6 +19,14 @@ export class ByteCursor {
    *  the caller's backstop for the overall "how big was the object I was asked to read" cap). */
   totalBytesRead = 0;
 
+  /** Total bytes ever handed back via `take`/`takeUpTo` — i.e. this cursor's logical read position
+   *  in the underlying stream. Unlike `totalBytesRead` (which counts a chunk the instant it's pulled
+   *  off the stream, even if only part of it has been consumed so far), this is exactly "how far
+   *  into the object has the caller gotten", which is what a ZIP's central directory offsets are
+   *  measured against (ledger F49: matching each local file header's real stream position to the
+   *  offset the central directory declared for it, with no seeking). */
+  position = 0;
+
   constructor(stream: ReadableStream<Uint8Array>) {
     this.reader = stream.getReader();
   }
@@ -57,6 +65,7 @@ export class ByteCursor {
       const [only] = this.buffered;
       this.buffered.length = 0;
       this.bufferedLength = 0;
+      this.position += n;
       return only;
     }
     const out = new Uint8Array(n);
@@ -75,6 +84,7 @@ export class ByteCursor {
       }
     }
     this.bufferedLength -= n;
+    this.position += n;
     return out;
   }
 

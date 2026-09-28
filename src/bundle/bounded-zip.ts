@@ -1,47 +1,68 @@
 /**
  * A streaming ZIP reader for the capture-sources bundle route
  * (`/upload/:project/:version/bundle/complete`), built to survive an arbitrary customer-uploaded
- * ZIP inside a Cloudflare Worker's ~128 MB isolate (ledger F11, F31, F32).
+ * ZIP inside a Cloudflare Worker's ~128 MB isolate (ledger F11, F31, F32, F49).
  *
- * This is a genuine single forward pass over the R2 object's byte stream — never a seek, never a
- * whole-buffer read:
+ * Two passes, neither of which ever buffers the whole (possibly huge) object:
  *
- *   - Local file headers (name, compression method, declared sizes) are parsed as they arrive.
- *     Path traversal / absolute / backslash / drive-letter / NUL / "." / ".." names are rejected
- *     the moment the name is read, before a single byte of that entry's data is decompressed.
- *   - Each entry's data is decompressed incrementally (`DecompressionStream('deflate-raw')` for
- *     DEFLATE, a straight copy for STORED), and the **real, measured** decompressed byte count is
- *     checked after every chunk — never the ZIP's own declared `uncompressedSize` — against: the
- *     entry's own declared size (a real decompressor producing more than the entry itself claimed
- *     is a lying/corrupt entry, ledger F31's exact repro), a per-entry cap, a running total-bytes
- *     cap across the whole bundle, and a compression-ratio cap computed from real bytes produced
- *     vs. real compressed bytes consumed so far. The read aborts the moment any of these is
- *     exceeded — the ZIP bomb never finishes decompressing, let alone gets held in memory.
- *   - Only a bounded amount of each entry's real content is ever kept: the full bytes for a
- *     non-image member (`scf.json`, `structure/*.json`, `source/*`, sidecar JSON), capped at
- *     `maxNonImageEntryBytes`; for an image, only its first `imageHeadBytes` (default 64 KiB —
- *     enough for magic-byte family detection and a header-only dimension read, see
- *     `@scrymore/scf`'s `image-dimensions.ts`) plus its real total size, as a `{head, size}` pair
- *     (see `@scrymore/scf`'s `BundleFileBytes`). Bytes beyond the head are counted (for the caps
- *     above) but never retained.
- *   - The ZIP's central directory (which immediately follows the local entries in the byte stream,
- *     so this still needs no seeking) is read afterwards, metadata-only, to cross-check symlinks: a
- *     Unix-created entry (`version made by` host byte 3) whose external attributes encode
- *     `S_IFLNK` is rejected — SCF bundles are files only. Symlink detection needs the central
- *     directory's Unix mode bits, which a local file header never carries.
+ *   1. `central-directory.ts` range-GETs just the ZIP's TAIL (the end-of-central-directory record,
+ *      then the central directory itself) and parses every entry's name, compression method, REAL
+ *      sizes, CRC-32, and local-header offset straight from it — the sole source of truth this
+ *      reader trusts for what an entry's data actually is. This matters because `archiver` (what our
+ *      own CLI and sbcov build bundles with) sets general-purpose flag bit 3 ("data descriptor
+ *      follows") on every entry, which zeroes out that entry's size/CRC fields in its LOCAL header;
+ *      the central directory's copies are always correct regardless (ledger F49).
+ *   2. This module then makes a genuine single forward pass over the object's byte stream (never a
+ *      seek): for each central directory entry, in ascending local-header-offset order, it reads
+ *      just enough of the LOCAL header to know the name/extra field lengths (never trusting its
+ *      size/CRC fields), skips past them, decompresses exactly the central directory's declared
+ *      `compressedSize` bytes (`DecompressionStream('deflate-raw')` for DEFLATE, a straight copy for
+ *      STORED), and — if flag bit 3 is set — skips the trailing data descriptor afterwards. The
+ *      **real, measured** decompressed byte count is checked after every chunk — never a declared
+ *      size — against: the central directory's own declared size (a real decompressor producing more
+ *      than that is a lying/corrupt entry), a per-entry cap, a running total-bytes cap across the
+ *      whole bundle, and a compression-ratio cap computed from real bytes produced vs. real
+ *      compressed bytes consumed so far. The read aborts the moment any of these is exceeded — the
+ *      ZIP bomb never finishes decompressing, let alone gets held in memory.
  *
- * Two classes of problem are reported this way: (1) structural issues found without needing to
- * abort the whole read (unsafe paths, symlinks) are collected into `issues` and the read continues,
- * so a bundle with several bad entries gets every one of them back in a single response; (2) a real
- * bomb / cap breach throws immediately, aborting the whole read with that one issue — there is no
- * value in continuing to read a request that has already proven itself hostile or corrupt.
+ * Additional integrity checks, all cheap (no extra buffering): a LOCAL header whose name disagrees
+ * with the central directory's is rejected outright (the classic "parser confusion" attack, where
+ * different tools reading the same ZIP via different headers disagree about what a given entry is);
+ * each local file header is expected at exactly the byte offset the central directory declared for
+ * it (no seeking — this cursor only ever reads forward — but a mismatch means the ZIP's local data
+ * doesn't actually match its own central directory, so the whole read aborts); a present data
+ * descriptor's own compressed/uncompressed size fields are cross-checked against the central
+ * directory's; and the real decompressed content's CRC-32 is compared against the central
+ * directory's declared CRC-32.
+ *
+ * Only a bounded amount of each entry's real content is ever kept: the full bytes for a non-image
+ * member (`scf.json`, `structure/*.json`, `source/*`, sidecar JSON), capped at
+ * `maxNonImageEntryBytes`; for an image, only its first `imageHeadBytes` (default 64 KiB — enough for
+ * magic-byte family detection and a header-only dimension read, see `@scrymore/scf`'s
+ * `image-dimensions.ts`) plus its real total size, as a `{head, size}` pair (see `@scrymore/scf`'s
+ * `BundleFileBytes` — the vendored validator refuses this partial shape for anything but an image,
+ * ledger F50). Bytes beyond the head are counted (for the caps above) but never retained.
+ *
+ * Two classes of problem are reported this way: (1) structural issues found without needing to abort
+ * the whole read (unsafe paths, symlinks) are collected into `issues` and the read continues, so a
+ * bundle with several bad entries gets every one of them back in a single response; (2) a real bomb /
+ * cap breach / integrity mismatch throws immediately, aborting the whole read with that one issue —
+ * there is no value in continuing to read a request that has already proven itself hostile or corrupt.
  */
 import { ByteCursor } from './byte-cursor.js';
+import { CRC32_SEED, crc32Final, crc32Update } from './crc32.js';
+import { readCentralDirectory, type CentralDirectoryEntry, type CentralDirectoryIssue } from './central-directory.js';
+import type { StorageObjectRange } from '../services/storage/storage.service.js';
 import type { BundleFiles } from '../vendor/scf/dist/index.js';
 
 export interface BoundedZipLimits {
   /** Central directory entry count above which the ZIP is rejected outright (no per-entry detail). */
   maxEntries: number;
+  /** Upper bound on the central directory's own declared byte size (contract §9: bounds the range-GET
+   *  and the memory it's held in before this reader ever streams a single local entry — ledger F49). */
+  maxCentralDirectoryBytes: number;
+  /** How far back from the end of the object to search for the end-of-central-directory record. */
+  maxEocdSearchBytes: number;
   /** Sum of every entry's REAL (measured, not declared) decompressed bytes, across the whole ZIP —
    *  a CPU/time bound: even entries that each individually pass `maxImageEntryBytes` /
    *  `maxNonImageEntryBytes` could otherwise be repeated enough times to still cost gigabytes of
@@ -80,6 +101,8 @@ export type BoundedZipResult = { ok: true; files: BundleFiles } | { ok: false; i
 
 export const DEFAULT_BOUNDED_ZIP_LIMITS: BoundedZipLimits = {
   maxEntries: 20_000,
+  maxCentralDirectoryBytes: 8 * 1024 * 1024, // 8 MiB — generous for 20,000 entries' worth of headers
+  maxEocdSearchBytes: 22 + 0xffff, // the format's own worst case: fixed record + max comment
   maxTotalUncompressedBytes: 1024 * 1024 * 1024, // 1 GiB
   maxCompressionRatio: 200,
   maxImageEntryBytes: 20 * 1024 * 1024, // matches @scrymore/scf's MAX_IMAGE_BYTES
@@ -88,19 +111,15 @@ export const DEFAULT_BOUNDED_ZIP_LIMITS: BoundedZipLimits = {
   imageHeadBytes: 64 * 1024,
 };
 
-const CENTRAL_DIR_SIGNATURE = 0x02014b50;
 const LOCAL_FILE_SIGNATURE = 0x04034b50;
-const EOCD_SIGNATURE = 0x06054b50;
+/** Optional signature word at the start of a data descriptor — most real writers (including
+ *  `archiver`) include it, though the ZIP spec allows omitting it. */
+const DATA_DESCRIPTOR_SIGNATURE = 0x08074b50;
 /** ZIP general-purpose flag bit 3: sizes/CRC are unknown in the local header and follow the entry's
- *  data in a trailing data descriptor instead. Safely bounding such an entry would mean scanning
- *  for the data-descriptor signature rather than trusting a byte count at all — out of scope here;
- *  every adapter this format targets (see AGENTS.md) writes ordinary, non-streamed ZIPs. */
+ *  data in a trailing data descriptor instead. This reader no longer needs those local-header fields
+ *  at all (the central directory's copies are authoritative — ledger F49) — this flag now only says
+ *  whether a data descriptor needs to be skipped after the entry's data. */
 const STREAMING_DATA_DESCRIPTOR_FLAG = 0x0008;
-/** "version made by" host byte for a UNIX-created entry (the only host that carries a Unix mode,
- *  and therefore a symlink bit, in its external file attributes). */
-const UNIX_HOST = 3;
-/** Unix file-type bits (`st_mode & S_IFMT`) for a symbolic link. */
-const S_IFLNK = 0xa000;
 const IMAGE_LIKE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'webp']);
 /** A ratio check below this many real compressed bytes consumed is too noisy to trust (a handful
  *  of DEFLATE's own framing bytes can look like an enormous "ratio" before any real content has
@@ -156,7 +175,7 @@ async function skipRawBytes(cursor: ByteCursor, n: number): Promise<void> {
   let remaining = n;
   while (remaining > 0) {
     const chunk = await cursor.takeUpTo(remaining);
-    if (chunk === null) throw new Error('Unexpected end of ZIP data while skipping a rejected entry.');
+    if (chunk === null) throw new Error('Unexpected end of ZIP data while skipping an entry.');
     remaining -= chunk.byteLength;
   }
 }
@@ -170,6 +189,7 @@ interface EntryScanState {
   headChunks: Uint8Array[];
   headFilled: number;
   fullChunks: Uint8Array[];
+  crcState: number;
 }
 
 /** Called with every chunk of an entry's REAL decompressed output, in order, as it is produced.
@@ -184,6 +204,7 @@ function accumulateChunk(
 ): void {
   entryState.realBytes += chunk.byteLength;
   totalState.realBytes += chunk.byteLength;
+  entryState.crcState = crc32Update(entryState.crcState, chunk);
 
   if (entryState.isImage) {
     if (entryState.headFilled < limits.imageHeadBytes) {
@@ -200,7 +221,7 @@ function accumulateChunk(
   if (entryState.realBytes > entryState.declaredUncompressedSize) {
     throw new BundleZipLimitError(
       'BUNDLE_SIZE_MISMATCH',
-      `ZIP entry decompresses to more bytes than its own declared uncompressed size (${entryState.declaredUncompressedSize}): ${entryState.path}`,
+      `ZIP entry decompresses to more bytes than the central directory's declared uncompressed size (${entryState.declaredUncompressedSize}): ${entryState.path}`,
       entryState.path
     );
   }
@@ -346,192 +367,252 @@ async function consumeDeflateEntry(
   if (failure !== null) throw failure;
 }
 
-async function processLocalEntry(
+/** Reads a data descriptor (12 bytes, or 16 with the optional signature word) immediately following
+ *  an entry's data when its general-purpose flag bit 3 is set, and cross-checks its size fields
+ *  against the central directory's own declared values (ledger F49: "verify the data descriptor ...
+ *  if cheap") — a disagreement between an entry's own trailing descriptor and its central directory
+ *  record means the ZIP is corrupt or was tampered with in transit. */
+async function skipAndVerifyDataDescriptor(cursor: ByteCursor, entry: CentralDirectoryEntry): Promise<void> {
+  const first = await mustTake(cursor, 4);
+  let compressedSize: number;
+  let uncompressedSize: number;
+  if (first.readUInt32LE(0) === DATA_DESCRIPTOR_SIGNATURE) {
+    // [signature(already read)][crc-32(4)][compressed size(4)][uncompressed size(4)].
+    const rest = await mustTake(cursor, 12);
+    compressedSize = rest.readUInt32LE(4);
+    uncompressedSize = rest.readUInt32LE(8);
+  } else {
+    // No signature word: `first` was actually the CRC-32 field itself, immediately followed by
+    // [compressed size(4)][uncompressed size(4)].
+    const rest = await mustTake(cursor, 8);
+    compressedSize = rest.readUInt32LE(0);
+    uncompressedSize = rest.readUInt32LE(4);
+  }
+  if (compressedSize !== entry.compressedSize || uncompressedSize !== entry.uncompressedSize) {
+    throw new BundleZipLimitError(
+      'BUNDLE_ZIP_INVALID',
+      `ZIP entry's data descriptor disagrees with its central directory record: ${entry.name}`,
+      entry.name
+    );
+  }
+}
+
+/** Skips an entry's raw data (and its trailing data descriptor, if any) without decompressing it —
+ *  used for an entry this reader has already decided to reject (unsafe path, symlink, unsupported
+ *  compression method) but must still walk past byte-for-byte to keep the stream aligned with the
+ *  central directory's offsets for every entry after it. */
+async function skipEntryData(cursor: ByteCursor, entry: CentralDirectoryEntry): Promise<void> {
+  if (entry.compressedSize > 0) await skipRawBytes(cursor, entry.compressedSize);
+  if ((entry.flags & STREAMING_DATA_DESCRIPTOR_FLAG) !== 0) {
+    await skipAndVerifyDataDescriptor(cursor, entry);
+  }
+}
+
+async function processEntry(
   cursor: ByteCursor,
+  entry: CentralDirectoryEntry,
   limits: BoundedZipLimits,
   issues: BoundedZipIssue[],
   files: BundleFiles,
   totalState: { realBytes: number }
 ): Promise<void> {
+  if (cursor.position !== entry.localHeaderOffset) {
+    throw new Error(
+      `Corrupt ZIP: expected entry ${JSON.stringify(entry.name)}'s local file header at byte offset ${entry.localHeaderOffset} (the central directory's declared offset), but the stream was at ${cursor.position}.`
+    );
+  }
+
+  const sig = await mustTake(cursor, 4);
+  if (sig.readUInt32LE(0) !== LOCAL_FILE_SIGNATURE) {
+    throw new Error(`Corrupt ZIP: no local file header signature at offset ${entry.localHeaderOffset} for entry ${JSON.stringify(entry.name)}.`);
+  }
   const fixed = await mustTake(cursor, 26); // local header fields after the 4-byte signature
-  const flags = fixed.readUInt16LE(2);
-  const compressionMethod = fixed.readUInt16LE(4);
-  const compressedSize = fixed.readUInt32LE(14);
-  const uncompressedSize = fixed.readUInt32LE(18);
   const nameLen = fixed.readUInt16LE(22);
   const extraLen = fixed.readUInt16LE(24);
 
   const nameBuf = await mustTake(cursor, nameLen);
-  const name = nameBuf.toString('utf8');
+  const localName = nameBuf.toString('utf8');
   if (extraLen > 0) await mustTake(cursor, extraLen); // discard; unused
 
-  if (name.endsWith('/')) {
-    // Directory entry, not a file (same as the CLI-only vendored reader) — ordinarily no data, but
-    // stay in sync with whatever (if anything) is declared, rather than assuming zero.
-    if (compressedSize > 0) await skipRawBytes(cursor, compressedSize);
+  // ledger F49: a local header that disagrees with the central directory about an entry's own name
+  // is the classic "parser confusion" shape (different consumers of the same ZIP, reading different
+  // headers, disagreeing about what a given entry even is) — reject outright rather than guess which
+  // header to believe.
+  if (localName !== entry.name) {
+    throw new BundleZipLimitError(
+      'BUNDLE_NAME_MISMATCH',
+      `ZIP entry's local file header name (${JSON.stringify(localName)}) does not match its central directory name (${JSON.stringify(entry.name)}).`,
+      entry.name
+    );
+  }
+
+  if (entry.isDirectory) {
+    // Directory entries carry no data of their own (archiver's own output confirms this), but stay
+    // in sync with whatever the central directory declares rather than assuming zero.
+    await skipEntryData(cursor, entry);
     return;
   }
-
-  if ((flags & STREAMING_DATA_DESCRIPTOR_FLAG) !== 0) {
-    throw new BundleZipLimitError(
-      'BUNDLE_ZIP_STREAMING_UNSUPPORTED',
-      `ZIP entry uses a streamed (data-descriptor) size, which this reader cannot bound safely: ${name}`,
-      name
-    );
+  if (entry.isUnixSymlink) {
+    // Already reported by `readCentralDirectory` (BUNDLE_SYMLINK_REJECTED); just walk past its data.
+    await skipEntryData(cursor, entry);
+    return;
   }
-  if (compressedSize === 0xffffffff || uncompressedSize === 0xffffffff) {
-    throw new BundleZipLimitError(
-      'BUNDLE_ZIP64_UNSUPPORTED',
-      `ZIP entry uses Zip64 sizes, which this reader does not support: ${name}`,
-      name
-    );
-  }
-
-  if (isUnsafeZipMemberName(name)) {
+  if (isUnsafeZipMemberName(entry.name)) {
     issues.push(
       issue(
         'BUNDLE_UNSAFE_PATH',
-        `ZIP entry has an unsafe path (absolute, backslash, drive letter, or "." / ".." segment): ${JSON.stringify(name)}`,
-        name
+        `ZIP entry has an unsafe path (absolute, backslash, drive letter, or "." / ".." segment): ${JSON.stringify(entry.name)}`,
+        entry.name
       )
     );
-    await skipRawBytes(cursor, compressedSize);
+    await skipEntryData(cursor, entry);
     return;
   }
-  if (compressionMethod !== 0 && compressionMethod !== 8) {
-    issues.push(issue('BUNDLE_ZIP_INVALID', `Unsupported ZIP compression method ${compressionMethod}: ${name}`, name));
-    await skipRawBytes(cursor, compressedSize);
+  if (entry.compressionMethod !== 0 && entry.compressionMethod !== 8) {
+    issues.push(issue('BUNDLE_ZIP_INVALID', `Unsupported ZIP compression method ${entry.compressionMethod}: ${entry.name}`, entry.name));
+    await skipEntryData(cursor, entry);
     return;
   }
 
-  const isImage = isImageLikeName(name);
+  const isImage = isImageLikeName(entry.name);
   const entryState: EntryScanState = {
-    path: name,
+    path: entry.name,
     isImage,
-    declaredUncompressedSize: uncompressedSize,
+    declaredUncompressedSize: entry.uncompressedSize,
     perEntryCap: isImage ? limits.maxImageEntryBytes : limits.maxNonImageEntryBytes,
     realBytes: 0,
     headChunks: [],
     headFilled: 0,
     fullChunks: [],
+    crcState: CRC32_SEED,
   };
   const onChunk = (chunk: Uint8Array, compressedConsumedSoFar: number): void =>
     accumulateChunk(entryState, totalState, limits, chunk, compressedConsumedSoFar);
 
-  if (compressionMethod === 0) {
-    await consumeStoredEntry(cursor, compressedSize, onChunk);
+  if (entry.compressionMethod === 0) {
+    await consumeStoredEntry(cursor, entry.compressedSize, onChunk);
   } else {
-    await consumeDeflateEntry(cursor, compressedSize, onChunk);
+    await consumeDeflateEntry(cursor, entry.compressedSize, onChunk);
+  }
+
+  if (entryState.realBytes !== entry.uncompressedSize) {
+    // A real decompressor producing FEWER bytes than declared is just as much a mismatch as more
+    // (the `>` check inside accumulateChunk only ever catches "too many", mid-stream); this is the
+    // "too few" half of the same integrity check, checked once the entry's data is fully consumed.
+    throw new BundleZipLimitError(
+      'BUNDLE_SIZE_MISMATCH',
+      `ZIP entry decompresses to ${entryState.realBytes} bytes, not the central directory's declared ${entry.uncompressedSize}: ${entry.name}`,
+      entry.name
+    );
+  }
+
+  if ((entry.flags & STREAMING_DATA_DESCRIPTOR_FLAG) !== 0) {
+    await skipAndVerifyDataDescriptor(cursor, entry);
+  }
+
+  // ledger F49: "verify ... CRC if cheap" — a single table lookup per byte, already paid for as the
+  // entry streamed through `accumulateChunk`; finalize and compare now that all of it has arrived.
+  const realCrc32 = crc32Final(entryState.crcState);
+  if (realCrc32 !== entry.crc32) {
+    throw new BundleZipLimitError(
+      'BUNDLE_CRC_MISMATCH',
+      `ZIP entry's real CRC-32 (0x${realCrc32.toString(16)}) does not match the central directory's declared CRC-32 (0x${entry.crc32.toString(16)}): ${entry.name}`,
+      entry.name
+    );
   }
 
   files.set(
-    name,
+    entry.name,
     isImage ? { head: concatUint8(entryState.headChunks), size: entryState.realBytes } : concatUint8(entryState.fullChunks)
   );
 }
 
-/** Metadata-only pass over the central directory (which immediately follows the local entries in
- *  the byte stream — no seek needed): the only thing this reader still needs from it is each
- *  entry's Unix symlink bit, which a local file header never carries. The caller has already
- *  consumed the CENTRAL_DIR_SIGNATURE that starts the first record. */
-async function processCentralDirectory(cursor: ByteCursor, issues: BoundedZipIssue[]): Promise<void> {
-  for (;;) {
-    const fixed = await mustTake(cursor, 42); // central directory fields after the 4-byte signature
-    const versionMadeByHost = fixed.readUInt8(1);
-    const nameLen = fixed.readUInt16LE(24);
-    const extraLen = fixed.readUInt16LE(26);
-    const commentLen = fixed.readUInt16LE(28);
-    const externalAttrs = fixed.readUInt32LE(34);
-
-    const nameBuf = await mustTake(cursor, nameLen);
-    const name = nameBuf.toString('utf8');
-    if (extraLen > 0) await mustTake(cursor, extraLen);
-    if (commentLen > 0) await mustTake(cursor, commentLen);
-
-    const isUnixSymlink = versionMadeByHost === UNIX_HOST && ((externalAttrs >>> 16) & 0xf000) === S_IFLNK;
-    if (isUnixSymlink) {
-      issues.push(issue('BUNDLE_SYMLINK_REJECTED', `ZIP entry is a symlink, which a bundle must not contain: ${name}`, name));
-    }
-
-    const sig = await mustTake(cursor, 4);
-    const sigValue = sig.readUInt32LE(0);
-    if (sigValue === CENTRAL_DIR_SIGNATURE) continue;
-    if (sigValue === EOCD_SIGNATURE) {
-      await consumeEocdTail(cursor);
-      return;
-    }
-    throw new Error('Corrupt ZIP: central directory record not followed by another record or the end-of-central-directory signature.');
-  }
-}
-
-async function consumeEocdTail(cursor: ByteCursor): Promise<void> {
-  const fixed = await mustTake(cursor, 18); // EOCD fields after the 4-byte signature
-  const commentLen = fixed.readUInt16LE(16);
-  if (commentLen > 0) await mustTake(cursor, commentLen);
-}
-
-async function readBoundedZipStreamInner(cursor: ByteCursor, limits: BoundedZipLimits): Promise<BoundedZipResult> {
-  const issues: BoundedZipIssue[] = [];
-  const files: BundleFiles = new Map();
-  const totalState = { realBytes: 0 };
-  let entryCount = 0;
-
-  for (;;) {
-    // Checked between entries, not mid-entry: the object's physical size (checked cheaply via
-    // `storage.head()` before this stream was ever opened, in app.ts) already caps how many raw
-    // bytes this stream can possibly yield in total, so this is a same-request backstop for that
-    // HEAD/GET disagreeing — not a defense against one entry declaring an enormous compressedSize,
-    // which costs an attacker real upload bytes 1:1 and is bounded the same way regardless (see
-    // `accumulateChunk`'s per-entry/total REAL-byte caps, which apply continuously as any entry's
-    // data streams through, no matter how large its declared size claims to be).
-    if (cursor.totalBytesRead > limits.maxRawBytes) {
-      throw new BundleZipLimitError('BUNDLE_TOO_LARGE', `ZIP object exceeds the ${limits.maxRawBytes} raw byte limit.`);
-    }
-    const sig = await mustTake(cursor, 4);
-    const sigValue = sig.readUInt32LE(0);
-
-    if (sigValue === LOCAL_FILE_SIGNATURE) {
-      entryCount++;
-      if (entryCount > limits.maxEntries) {
-        throw new BundleZipLimitError('BUNDLE_TOO_MANY_ENTRIES', `ZIP has more than ${limits.maxEntries} entries.`);
-      }
-      await processLocalEntry(cursor, limits, issues, files, totalState);
-      continue;
-    }
-    if (sigValue === CENTRAL_DIR_SIGNATURE) {
-      await processCentralDirectory(cursor, issues);
-      break;
-    }
-    if (sigValue === EOCD_SIGNATURE) {
-      // Zero-entry archive: no central directory records at all, straight to EOCD.
-      await consumeEocdTail(cursor);
-      break;
-    }
-    throw new Error('Corrupt ZIP: expected a local file header, central directory record, or end-of-central-directory signature.');
-  }
-
-  if (issues.length > 0) return { ok: false, issues };
-  return { ok: true, files };
-}
-
 /**
- * Reads a ZIP object's stream into a bundle-relative path -> bytes map, enforcing `limits` as a
- * true streaming pass (see module docs) — never buffering the whole compressed object, an entry's
- * whole decompressed output, or the whole bundle's decompressed content at once.
+ * The forward streaming pass over a ZIP's local entries, given the entries already parsed from its
+ * central directory (`readCentralDirectory`). Exported mainly for tests that want to exercise this
+ * pass directly against an in-memory buffer's own (also locally-parsed) central directory; real
+ * callers should use `readBoundedZip` below.
  */
-export async function readBoundedZipStream(
+export async function readBoundedZipEntries(
   stream: ReadableStream<Uint8Array>,
-  limits: BoundedZipLimits = DEFAULT_BOUNDED_ZIP_LIMITS
+  entries: CentralDirectoryEntry[],
+  centralDirectoryOffset: number,
+  limits: BoundedZipLimits = DEFAULT_BOUNDED_ZIP_LIMITS,
+  centralDirectoryIssues: CentralDirectoryIssue[] = []
 ): Promise<BoundedZipResult> {
   const cursor = new ByteCursor(stream);
   try {
-    return await readBoundedZipStreamInner(cursor, limits);
+    const issues: BoundedZipIssue[] = [...centralDirectoryIssues];
+    const files: BundleFiles = new Map();
+    const totalState = { realBytes: 0 };
+
+    // ascending local-header-offset order: this reader only ever moves forward, so a corrupt or
+    // adversarial central directory that lists entries out of physical order (or aliases two
+    // entries onto the same offset) is caught by `processEntry`'s own position check below, not by
+    // sorting away the anomaly.
+    const ordered = [...entries].sort((a, b) => a.localHeaderOffset - b.localHeaderOffset);
+
+    for (const entry of ordered) {
+      if (cursor.position > limits.maxRawBytes) {
+        throw new BundleZipLimitError('BUNDLE_TOO_LARGE', `ZIP object exceeds the ${limits.maxRawBytes} raw byte limit.`);
+      }
+      await processEntry(cursor, entry, limits, issues, files, totalState);
+    }
+
+    if (cursor.position !== centralDirectoryOffset) {
+      throw new Error(
+        `Corrupt ZIP: local entries ended at byte offset ${cursor.position}, not the central directory's declared start (${centralDirectoryOffset}).`
+      );
+    }
+
+    if (issues.length > 0) return { ok: false, issues };
+    return { ok: true, files };
   } catch (e) {
     if (e instanceof BundleZipLimitError) {
       return { ok: false, issues: [issue(e.issueCode, e.message, e.path)] };
     }
     return { ok: false, issues: [issue('BUNDLE_ZIP_INVALID', `Corrupt or truncated ZIP: ${(e as Error).message}`)] };
   } finally {
+    // Deliberately never reads through to the object's own trailing central directory/EOCD bytes —
+    // those were already fetched via a targeted range-GET, not this stream. Cancelling here as soon
+    // as every local entry is accounted for lets the underlying connection close early instead of
+    // paying to transfer bytes this reader already has.
     await cursor.cancel().catch(() => undefined);
   }
+}
+
+/** Minimal shape this module needs from a `StorageService` — just enough to range-GET the tail and
+ *  then open a full stream, so tests can pass a lighter double than the whole interface. */
+export interface BoundedZipStorage {
+  getObjectRange(key: string, range: StorageObjectRange): Promise<Uint8Array | null>;
+  getObjectStream(key: string): Promise<ReadableStream | null>;
+}
+
+/**
+ * Reads an SCF bundle ZIP object from storage into a bundle-relative path -> bytes map, enforcing
+ * `limits` (ledger F11, F31, F32, F49). `objectSize` must be the object's real, already-HEAD-checked
+ * size (the caller in `app.ts` already needs this for its own size cap, so this never HEADs again).
+ */
+export async function readBoundedZip(
+  storage: BoundedZipStorage,
+  key: string,
+  objectSize: number,
+  limits: BoundedZipLimits = DEFAULT_BOUNDED_ZIP_LIMITS
+): Promise<BoundedZipResult> {
+  const centralDirectory = await readCentralDirectory((range) => storage.getObjectRange(key, range), objectSize, limits);
+  if (!centralDirectory.ok) return { ok: false, issues: centralDirectory.issues };
+
+  if (centralDirectory.entries.length === 0) {
+    // Nothing to stream — a zero-entry archive never needs to open the (potentially large) object
+    // stream at all.
+    if (centralDirectory.issues.length > 0) return { ok: false, issues: centralDirectory.issues };
+    return { ok: true, files: new Map() };
+  }
+
+  const stream = await storage.getObjectStream(key);
+  if (!stream) {
+    return { ok: false, issues: [issue('BUNDLE_ZIP_INVALID', 'Bundle object disappeared between reading its central directory and opening its full stream.')] };
+  }
+
+  return readBoundedZipEntries(stream, centralDirectory.entries, centralDirectory.centralDirectoryOffset, limits, centralDirectory.issues);
 }

@@ -24,7 +24,7 @@ import { extractGitContext, normalizeCoverageInput } from './coverage/coverage.j
 import { parseMultipartFormData } from './utils/multipart.js';
 import { ciEventFields, mergeCiTimings, parseCiTimings, type CiTimings, type CiTimingsParse } from './ci-timings/ci-timings.js';
 import { parseSourceKey } from './bundle/source-key.js';
-import { readBoundedZipStream, DEFAULT_BOUNDED_ZIP_LIMITS, type BoundedZipIssue } from './bundle/bounded-zip.js';
+import { readBoundedZip, DEFAULT_BOUNDED_ZIP_LIMITS, type BoundedZipIssue } from './bundle/bounded-zip.js';
 import { validateBundle, type ValidationIssue as ScfValidationIssue } from './vendor/scf/dist/index.js';
 
 // Define the application's environment, including injectable variables.
@@ -1116,7 +1116,7 @@ const ValidationIssueSchema = z.object({
  * before this route did anything else with it — well past what a Cloudflare Worker's ~128 MB
  * isolate can hold, so any legitimately large bundle reliably crashed the request with an
  * out-of-memory error rather than reaching a clean 422. The route below now reads the object as a
- * true stream (`readBoundedZipStream`, ledger F31) and never buffers more than a small bounded
+ * true stream (`readBoundedZip`, ledger F31/F49) and never buffers more than a small bounded
  * window of it at once, so this cap can be — and is — sized to what a real bundle needs rather than
  * to what used to fit in memory. Kept equal to `bounded-zip.ts`'s own `maxRawBytes` (the same cap,
  * enforced a second time here as a cheap pre-download HEAD check) — one number, not two to drift.
@@ -1367,17 +1367,15 @@ app.openapi(bundleCompleteRoute, async (c) => {
       ]);
     }
 
-    const stream = await storage.getObjectStream(zipKey);
-    if (!stream) {
-      return c.json({ error: 'Bundle object not found. Upload it to the presigned URL first.' }, 400);
-    }
-
-    // A genuine streaming pass (ledger F31/F32): entries, REAL (measured, not declared) per-entry
-    // and total decompressed sizes, compression ratio, path traversal, symlinks — all checked, and
-    // enforced against actual decompressor output, before any member is handed to the shared
-    // validator. Never buffers the whole (still-compressed) object, an entry's whole decompressed
-    // output, or the whole bundle's decompressed content — see bundle/bounded-zip.ts.
-    const zipResult = await readBoundedZipStream(stream, DEFAULT_BOUNDED_ZIP_LIMITS);
+    // A genuine two-pass, never-buffer-the-whole-object read (ledger F31/F32/F49): the central
+    // directory (range-GET of the object's tail, bounded) is the sole source of truth for every
+    // entry's name/size/CRC — archiver (our own CLI's and sbcov's zip writer) sets every entry's
+    // general-purpose "data descriptor follows" bit, which zeroes those fields in the LOCAL header
+    // alone, so trusting the local header (as this route used to) would reject every real bundle.
+    // Real (measured, not declared) per-entry and total decompressed sizes, compression ratio, path
+    // traversal, symlinks, and each entry's real CRC-32 are all checked as its data actually streams
+    // through, before any member is handed to the shared validator — see bundle/bounded-zip.ts.
+    const zipResult = await readBoundedZip(storage, zipKey, meta.size, DEFAULT_BOUNDED_ZIP_LIMITS);
     if (!zipResult.ok) {
       return reject(zipResult.issues);
     }

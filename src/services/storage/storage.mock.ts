@@ -1,4 +1,4 @@
-import { StorageService, StorageObjectMeta, UploadResult } from './storage.service.js';
+import { StorageService, StorageObjectMeta, StorageObjectRange, UploadResult } from './storage.service.js';
 
 /**
  * A mock StorageService implementation for testing that returns
@@ -56,6 +56,14 @@ export class MockStorageService implements StorageService {
         controller.close();
       },
     });
+  }
+
+  async getObjectRange(key: string, range: StorageObjectRange): Promise<Uint8Array | null> {
+    const object = this.objects.get(key);
+    if (!object) return null;
+    const start = Math.max(0, range.offset);
+    const end = Math.min(object.bytes.byteLength, start + Math.max(0, range.length));
+    return object.bytes.subarray(start, end);
   }
 
   async delete(key: string): Promise<void> {

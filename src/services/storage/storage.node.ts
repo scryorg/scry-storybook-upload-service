@@ -11,7 +11,7 @@ import {
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { Upload } from '@aws-sdk/lib-storage';
-import { StorageService, StorageObjectMeta, UploadResult } from './storage.service.js';
+import { StorageService, StorageObjectMeta, StorageObjectRange, UploadResult } from './storage.service.js';
 import { Readable } from 'stream';
 
 /** True for the S3/R2 "not found" errors both HeadObject and GetObject can throw. */
@@ -114,6 +114,25 @@ export class R2S3StorageService implements StorageService {
       if (!body) return null;
       if (typeof body.transformToWebStream === 'function') return body.transformToWebStream();
       return Readable.toWeb(body) as unknown as ReadableStream;
+    } catch (error) {
+      if (isNotFoundError(error)) return null;
+      throw error;
+    }
+  }
+
+  /**
+   * Reads a byte range of an object's body via the S3-compatible API's standard `Range` header
+   * (ledger F49) — R2's S3-compatible endpoint supports byte ranges the same way S3 does.
+   */
+  async getObjectRange(key: string, range: StorageObjectRange): Promise<Uint8Array | null> {
+    if (range.length <= 0) return new Uint8Array(0);
+    try {
+      const end = range.offset + range.length - 1;
+      const result = await this.s3.send(
+        new GetObjectCommand({ Bucket: this.bucketName, Key: key, Range: `bytes=${range.offset}-${end}` })
+      );
+      if (!result.Body) return null;
+      return await result.Body.transformToByteArray();
     } catch (error) {
       if (isNotFoundError(error)) return null;
       throw error;
