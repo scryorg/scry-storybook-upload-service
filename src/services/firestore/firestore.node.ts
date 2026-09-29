@@ -205,7 +205,14 @@ export class FirestoreServiceNode implements FirestoreService {
     updates: UpdateBuildData
   ): Promise<void> {
     const buildRef = this.db.doc(`projects/${projectId}/builds/${buildId}`);
-    await buildRef.update(updates as any);
+    // `provenanceError: null` means "clear it" (upload-provenance-updatemask D2); the Admin SDK
+    // writes a literal null for a plain `null` value, so it needs FieldValue.delete() to actually
+    // remove the field the way the Worker implementation's mask-without-body trick does.
+    const payload: Record<string, unknown> = { ...updates };
+    if (updates.provenanceError === null) {
+      payload.provenanceError = admin.firestore.FieldValue.delete();
+    }
+    await buildRef.update(payload as any);
   }
 
   /**
@@ -376,6 +383,11 @@ export class FirestoreServiceNode implements FirestoreService {
       archivedBy: data.archivedBy,
       coverage: data.coverage,
       processingStatus: data.processingStatus,
+      // Same sibling gap as firestore.worker.ts: #25 wrote commitSha/branch but never read them
+      // back here (upload-provenance-updatemask, ISSUES.md #61).
+      ...(data.commitSha ? { commitSha: data.commitSha } : {}),
+      ...(data.branch ? { branch: data.branch } : {}),
+      ...(data.provenanceError ? { provenanceError: data.provenanceError } : {}),
       ...(data.uploadedByKeyId ? { uploadedByKeyId: data.uploadedByKeyId } : {}),
       ...(data.uploadedByKeyProject ? { uploadedByKeyProject: data.uploadedByKeyProject } : {}),
       ...(data.ciTimings ? { ciTimings: data.ciTimings } : {}),
