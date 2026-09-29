@@ -4,6 +4,7 @@ import { app, type AppEnv } from './app.js';
 
 import type { StorageService } from './services/storage/storage.service.js';
 import type { FirestoreService } from './services/firestore/firestore.service.js';
+import type { CreateBuildData } from './services/firestore/firestore.types.js';
 
 function createTestServer(options: {
   storage: StorageService;
@@ -30,12 +31,12 @@ describe('app routes (coverage)', () => {
 
   it('GET /health returns ok + timestamp', async () => {
     const storage: StorageService = {
-      upload: vi.fn() as any,
-      getPresignedUploadUrl: vi.fn() as any,
-      head: vi.fn() as any,
-      getObjectStream: vi.fn() as any,
-      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
-      deleteByPrefix: vi.fn() as any,
+      upload: vi.fn(),
+      getPresignedUploadUrl: vi.fn(),
+      head: vi.fn(),
+      getObjectStream: vi.fn(),
+      getObjectRange: vi.fn(),      delete: vi.fn(),
+      deleteByPrefix: vi.fn(),
     };
     const server = createTestServer({ storage });
 
@@ -49,12 +50,12 @@ describe('app routes (coverage)', () => {
 
   it('GET /upload/:project/:version returns file info', async () => {
     const storage: StorageService = {
-      upload: vi.fn() as any,
-      getPresignedUploadUrl: vi.fn() as any,
-      head: vi.fn() as any,
-      getObjectStream: vi.fn() as any,
-      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
-      deleteByPrefix: vi.fn() as any,
+      upload: vi.fn(),
+      getPresignedUploadUrl: vi.fn(),
+      head: vi.fn(),
+      getObjectStream: vi.fn(),
+      getObjectRange: vi.fn(),      delete: vi.fn(),
+      deleteByPrefix: vi.fn(),
     };
     const server = createTestServer({ storage });
 
@@ -68,12 +69,12 @@ describe('app routes (coverage)', () => {
   it('DELETE /cleanup/:project/:version requires configured X-Cleanup-Token', async () => {
     const deleteByPrefix = vi.fn(async () => undefined);
     const storage: StorageService = {
-      upload: vi.fn() as any,
-      getPresignedUploadUrl: vi.fn() as any,
-      head: vi.fn() as any,
-      getObjectStream: vi.fn() as any,
-      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
-      deleteByPrefix: deleteByPrefix as any,
+      upload: vi.fn(),
+      getPresignedUploadUrl: vi.fn(),
+      head: vi.fn(),
+      getObjectStream: vi.fn(),
+      getObjectRange: vi.fn(),      delete: vi.fn(),
+      deleteByPrefix: deleteByPrefix,
     };
     const disabledServer = createTestServer({ storage });
     const disabledRes = await disabledServer.request('/cleanup/my-proj/v1', { method: 'DELETE' });
@@ -93,12 +94,12 @@ describe('app routes (coverage)', () => {
 
   it('POST /upload/:project/:version enforces Content-Length max size', async () => {
     const storage: StorageService = {
-      upload: vi.fn() as any,
-      getPresignedUploadUrl: vi.fn() as any,
-      head: vi.fn() as any,
-      getObjectStream: vi.fn() as any,
-      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
-      deleteByPrefix: vi.fn() as any,
+      upload: vi.fn(),
+      getPresignedUploadUrl: vi.fn(),
+      head: vi.fn(),
+      getObjectStream: vi.fn(),
+      getObjectRange: vi.fn(),      delete: vi.fn(),
+      deleteByPrefix: vi.fn(),
     };
     const server = createTestServer({ storage });
 
@@ -117,12 +118,12 @@ describe('app routes (coverage)', () => {
 
   it('POST /upload/:project/:version raw binary returns 400 on empty body', async () => {
     const storage: StorageService = {
-      upload: vi.fn() as any,
-      getPresignedUploadUrl: vi.fn() as any,
-      head: vi.fn() as any,
-      getObjectStream: vi.fn() as any,
-      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
-      deleteByPrefix: vi.fn() as any,
+      upload: vi.fn(),
+      getPresignedUploadUrl: vi.fn(),
+      head: vi.fn(),
+      getObjectStream: vi.fn(),
+      getObjectRange: vi.fn(),      delete: vi.fn(),
+      deleteByPrefix: vi.fn(),
     };
     const server = createTestServer({ storage });
 
@@ -139,12 +140,12 @@ describe('app routes (coverage)', () => {
 
   it('POST /upload/:project/:version multipart returns 400 when file is missing', async () => {
     const storage: StorageService = {
-      upload: vi.fn() as any,
-      getPresignedUploadUrl: vi.fn() as any,
-      head: vi.fn() as any,
-      getObjectStream: vi.fn() as any,
-      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
-      deleteByPrefix: vi.fn() as any,
+      upload: vi.fn(),
+      getPresignedUploadUrl: vi.fn(),
+      head: vi.fn(),
+      getObjectStream: vi.fn(),
+      getObjectRange: vi.fn(),      delete: vi.fn(),
+      deleteByPrefix: vi.fn(),
     };
     const server = createTestServer({ storage });
 
@@ -167,12 +168,12 @@ describe('app routes (coverage)', () => {
 
   it('POST /upload/:project/:version multipart returns 400 for invalid coverageJson', async () => {
     const storage: StorageService = {
-      upload: vi.fn() as any,
-      getPresignedUploadUrl: vi.fn() as any,
-      head: vi.fn() as any,
-      getObjectStream: vi.fn() as any,
-      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
-      deleteByPrefix: vi.fn() as any,
+      upload: vi.fn(),
+      getPresignedUploadUrl: vi.fn(),
+      head: vi.fn(),
+      getObjectStream: vi.fn(),
+      getObjectRange: vi.fn(),      delete: vi.fn(),
+      deleteByPrefix: vi.fn(),
     };
     const server = createTestServer({ storage });
 
@@ -193,26 +194,26 @@ describe('app routes (coverage)', () => {
   it('POST /upload/:project/:version does not fail when Firestore createBuild throws', async () => {
     const uploadMock = vi.fn(async (key: string) => ({ url: `https://storage.test/${key}`, path: key }));
     const storage: StorageService = {
-      upload: uploadMock as any,
-      getPresignedUploadUrl: vi.fn() as any,
-      head: vi.fn() as any,
-      getObjectStream: vi.fn() as any,
-      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
-      deleteByPrefix: vi.fn() as any,
+      upload: uploadMock,
+      getPresignedUploadUrl: vi.fn(),
+      head: vi.fn(),
+      getObjectStream: vi.fn(),
+      getObjectRange: vi.fn(),      delete: vi.fn(),
+      deleteByPrefix: vi.fn(),
     };
 
     const firestore: FirestoreService = {
       createBuild: vi.fn(async () => {
         throw new Error('firestore down');
-      }) as any,
-      getBuild: vi.fn() as any,
-      getProjectBuilds: vi.fn() as any,
-      getBuildByVersion: vi.fn() as any,
-      getLatestBuild: vi.fn() as any,
-      updateBuild: vi.fn() as any,
-      updateBuildCoverage: vi.fn() as any,
-      archiveBuild: vi.fn() as any,
-      deleteBuild: vi.fn() as any,
+      }),
+      getBuild: vi.fn(),
+      getProjectBuilds: vi.fn(),
+      getBuildByVersion: vi.fn(),
+      getLatestBuild: vi.fn(),
+      updateBuild: vi.fn(),
+      updateBuildCoverage: vi.fn(),
+      archiveBuild: vi.fn(),
+      deleteBuild: vi.fn(),
     };
 
     const server = createTestServer({ storage, firestore });
@@ -240,12 +241,12 @@ describe('app routes (coverage)', () => {
   it('POST /upload/:project/:version never enqueues (F2): it creates the build but sends nothing to the processing queue', async () => {
     const uploadMock = vi.fn(async (key: string) => ({ url: `https://storage.test/${key}`, path: key }));
     const storage: StorageService = {
-      upload: uploadMock as any,
-      getPresignedUploadUrl: vi.fn() as any,
-      head: vi.fn() as any,
-      getObjectStream: vi.fn() as any,
-      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
-      deleteByPrefix: vi.fn() as any,
+      upload: uploadMock,
+      getPresignedUploadUrl: vi.fn(),
+      head: vi.fn(),
+      getObjectStream: vi.fn(),
+      getObjectRange: vi.fn(),      delete: vi.fn(),
+      deleteByPrefix: vi.fn(),
     };
     const createBuild = vi.fn(async () => ({
       id: 'build-1',
@@ -258,16 +259,16 @@ describe('app routes (coverage)', () => {
       createdBy: 'test',
     }));
     const firestore: FirestoreService = {
-      createBuild: createBuild as any,
-      getBuild: vi.fn() as any,
-      getProjectBuilds: vi.fn() as any,
-      getBuildByVersion: vi.fn() as any,
-      getLatestBuild: vi.fn() as any,
-      updateBuild: vi.fn() as any,
-      updateBuildCoverage: vi.fn() as any,
-      archiveBuild: vi.fn() as any,
-      deleteBuild: vi.fn() as any,
-      trackEvent: vi.fn(async () => undefined) as any,
+      createBuild: createBuild,
+      getBuild: vi.fn(),
+      getProjectBuilds: vi.fn(),
+      getBuildByVersion: vi.fn(),
+      getLatestBuild: vi.fn(),
+      updateBuild: vi.fn(),
+      updateBuildCoverage: vi.fn(),
+      archiveBuild: vi.fn(),
+      deleteBuild: vi.fn(),
+      trackEvent: vi.fn(async () => undefined),
     };
     const send = vi.fn(async () => undefined);
     const server = createTestServer({ storage, firestore, queue: { send } });
@@ -286,17 +287,17 @@ describe('app routes (coverage)', () => {
 
   it('POST /presigned-url/:project/:version/:filename uses default contentType if JSON body is invalid and creates build for .zip', async () => {
     const storage: StorageService = {
-      upload: vi.fn() as any,
+      upload: vi.fn(),
       getPresignedUploadUrl: vi.fn(async (key: string, contentType: string) => {
-        return { url: `https://signed.example/${key}?sig=1`, key, contentType } as any;
-      }) as any,
-      head: vi.fn() as any,
-      getObjectStream: vi.fn() as any,
-      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
-      deleteByPrefix: vi.fn() as any,
+        return { url: `https://signed.example/${key}?sig=1`, key, contentType };
+      }),
+      head: vi.fn(),
+      getObjectStream: vi.fn(),
+      getObjectRange: vi.fn(),      delete: vi.fn(),
+      deleteByPrefix: vi.fn(),
     };
 
-    const createBuildMock = vi.fn(async (_projectId: string, data: any) => ({
+    const createBuildMock = vi.fn(async (_projectId: string, data: CreateBuildData) => ({
       id: 'build-1',
       projectId: 'my-proj',
       versionId: data.versionId,
@@ -308,15 +309,15 @@ describe('app routes (coverage)', () => {
     }));
 
     const firestore: FirestoreService = {
-      createBuild: createBuildMock as any,
-      getBuild: vi.fn() as any,
-      getProjectBuilds: vi.fn() as any,
-      getBuildByVersion: vi.fn() as any,
-      getLatestBuild: vi.fn() as any,
-      updateBuild: vi.fn() as any,
-      updateBuildCoverage: vi.fn() as any,
-      archiveBuild: vi.fn() as any,
-      deleteBuild: vi.fn() as any,
+      createBuild: createBuildMock,
+      getBuild: vi.fn(),
+      getProjectBuilds: vi.fn(),
+      getBuildByVersion: vi.fn(),
+      getLatestBuild: vi.fn(),
+      updateBuild: vi.fn(),
+      updateBuildCoverage: vi.fn(),
+      archiveBuild: vi.fn(),
+      deleteBuild: vi.fn(),
     };
 
     const server = createTestServer({ storage, firestore });
@@ -336,33 +337,33 @@ describe('app routes (coverage)', () => {
     expect(body.buildNumber).toBe(1);
 
     // zipUrl should strip query params
-    const buildData = (createBuildMock.mock.calls[0] as any)[1];
+    const buildData = (createBuildMock.mock.calls[0])[1];
     expect(buildData.zipUrl).toBe('https://signed.example/my-proj/v1/storybook.zip');
 
     // default contentType used when body is invalid
-    expect((storage.getPresignedUploadUrl as any).mock.calls[0][1]).toBe('application/octet-stream');
+    expect((storage.getPresignedUploadUrl).mock.calls[0][1]).toBe('application/octet-stream');
   });
 
   it('POST /presigned-url/:project/:version/:filename does not create build for non-zip', async () => {
     const storage: StorageService = {
-      upload: vi.fn() as any,
-      getPresignedUploadUrl: vi.fn(async (key: string) => ({ url: `https://signed.example/${key}?sig=1`, key })) as any,
-      head: vi.fn() as any,
-      getObjectStream: vi.fn() as any,
-      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
-      deleteByPrefix: vi.fn() as any,
+      upload: vi.fn(),
+      getPresignedUploadUrl: vi.fn(async (key: string) => ({ url: `https://signed.example/${key}?sig=1`, key })),
+      head: vi.fn(),
+      getObjectStream: vi.fn(),
+      getObjectRange: vi.fn(),      delete: vi.fn(),
+      deleteByPrefix: vi.fn(),
     };
 
     const firestore: FirestoreService = {
-      createBuild: vi.fn() as any,
-      getBuild: vi.fn() as any,
-      getProjectBuilds: vi.fn() as any,
-      getBuildByVersion: vi.fn() as any,
-      getLatestBuild: vi.fn() as any,
-      updateBuild: vi.fn() as any,
-      updateBuildCoverage: vi.fn() as any,
-      archiveBuild: vi.fn() as any,
-      deleteBuild: vi.fn() as any,
+      createBuild: vi.fn(),
+      getBuild: vi.fn(),
+      getProjectBuilds: vi.fn(),
+      getBuildByVersion: vi.fn(),
+      getLatestBuild: vi.fn(),
+      updateBuild: vi.fn(),
+      updateBuildCoverage: vi.fn(),
+      archiveBuild: vi.fn(),
+      deleteBuild: vi.fn(),
     };
 
     const server = createTestServer({ storage, firestore });
@@ -383,12 +384,12 @@ describe('app routes (coverage)', () => {
 
   it('POST /presigned-url/:project/:version/:filename rejects unsafe filename segments', async () => {
     const storage: StorageService = {
-      upload: vi.fn() as any,
-      getPresignedUploadUrl: vi.fn() as any,
-      head: vi.fn() as any,
-      getObjectStream: vi.fn() as any,
-      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
-      deleteByPrefix: vi.fn() as any,
+      upload: vi.fn(),
+      getPresignedUploadUrl: vi.fn(),
+      head: vi.fn(),
+      getObjectStream: vi.fn(),
+      getObjectRange: vi.fn(),      delete: vi.fn(),
+      deleteByPrefix: vi.fn(),
     };
     const server = createTestServer({ storage });
 
@@ -402,12 +403,12 @@ describe('app routes (coverage)', () => {
 
   it('POST /upload/:project/:version/coverage returns 500 if Firestore is not configured', async () => {
     const storage: StorageService = {
-      upload: vi.fn() as any,
-      getPresignedUploadUrl: vi.fn() as any,
-      head: vi.fn() as any,
-      getObjectStream: vi.fn() as any,
-      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
-      deleteByPrefix: vi.fn() as any,
+      upload: vi.fn(),
+      getPresignedUploadUrl: vi.fn(),
+      head: vi.fn(),
+      getObjectStream: vi.fn(),
+      getObjectRange: vi.fn(),      delete: vi.fn(),
+      deleteByPrefix: vi.fn(),
     };
     const server = createTestServer({ storage });
 
@@ -421,24 +422,24 @@ describe('app routes (coverage)', () => {
 
   it('POST /upload/:project/:version/coverage returns 404 when build is not found', async () => {
     const storage: StorageService = {
-      upload: vi.fn() as any,
-      getPresignedUploadUrl: vi.fn() as any,
-      head: vi.fn() as any,
-      getObjectStream: vi.fn() as any,
-      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
-      deleteByPrefix: vi.fn() as any,
+      upload: vi.fn(),
+      getPresignedUploadUrl: vi.fn(),
+      head: vi.fn(),
+      getObjectStream: vi.fn(),
+      getObjectRange: vi.fn(),      delete: vi.fn(),
+      deleteByPrefix: vi.fn(),
     };
 
     const firestore: FirestoreService = {
-      createBuild: vi.fn() as any,
-      getBuild: vi.fn() as any,
-      getProjectBuilds: vi.fn() as any,
-      getBuildByVersion: vi.fn(async () => null) as any,
-      getLatestBuild: vi.fn() as any,
-      updateBuild: vi.fn() as any,
-      updateBuildCoverage: vi.fn() as any,
-      archiveBuild: vi.fn() as any,
-      deleteBuild: vi.fn() as any,
+      createBuild: vi.fn(),
+      getBuild: vi.fn(),
+      getProjectBuilds: vi.fn(),
+      getBuildByVersion: vi.fn(async () => null),
+      getLatestBuild: vi.fn(),
+      updateBuild: vi.fn(),
+      updateBuildCoverage: vi.fn(),
+      archiveBuild: vi.fn(),
+      deleteBuild: vi.fn(),
     };
 
     const server = createTestServer({ storage, firestore });
@@ -453,24 +454,24 @@ describe('app routes (coverage)', () => {
 
   it('POST /upload/:project/:version/coverage returns 400 on invalid JSON body', async () => {
     const storage: StorageService = {
-      upload: vi.fn() as any,
-      getPresignedUploadUrl: vi.fn() as any,
-      head: vi.fn() as any,
-      getObjectStream: vi.fn() as any,
-      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
-      deleteByPrefix: vi.fn() as any,
+      upload: vi.fn(),
+      getPresignedUploadUrl: vi.fn(),
+      head: vi.fn(),
+      getObjectStream: vi.fn(),
+      getObjectRange: vi.fn(),      delete: vi.fn(),
+      deleteByPrefix: vi.fn(),
     };
 
     const firestore: FirestoreService = {
-      createBuild: vi.fn() as any,
-      getBuild: vi.fn() as any,
-      getProjectBuilds: vi.fn() as any,
-      getBuildByVersion: vi.fn(async () => ({ id: 'b1' })) as any,
-      getLatestBuild: vi.fn() as any,
-      updateBuild: vi.fn() as any,
-      updateBuildCoverage: vi.fn() as any,
-      archiveBuild: vi.fn() as any,
-      deleteBuild: vi.fn() as any,
+      createBuild: vi.fn(),
+      getBuild: vi.fn(),
+      getProjectBuilds: vi.fn(),
+      getBuildByVersion: vi.fn(async () => ({ id: 'b1' })),
+      getLatestBuild: vi.fn(),
+      updateBuild: vi.fn(),
+      updateBuildCoverage: vi.fn(),
+      archiveBuild: vi.fn(),
+      deleteBuild: vi.fn(),
     };
 
     const server = createTestServer({ storage, firestore });
@@ -486,24 +487,24 @@ describe('app routes (coverage)', () => {
   it('POST /upload/:project/:version/coverage accepts multipart form-data', async () => {
     const uploadMock = vi.fn(async (key: string) => ({ url: `https://storage.test/${key}`, path: key }));
     const storage: StorageService = {
-      upload: uploadMock as any,
-      getPresignedUploadUrl: vi.fn() as any,
-      head: vi.fn() as any,
-      getObjectStream: vi.fn() as any,
-      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
-      deleteByPrefix: vi.fn() as any,
+      upload: uploadMock,
+      getPresignedUploadUrl: vi.fn(),
+      head: vi.fn(),
+      getObjectStream: vi.fn(),
+      getObjectRange: vi.fn(),      delete: vi.fn(),
+      deleteByPrefix: vi.fn(),
     };
 
     const firestore: FirestoreService = {
-      createBuild: vi.fn() as any,
-      getBuild: vi.fn() as any,
-      getProjectBuilds: vi.fn() as any,
-      getBuildByVersion: vi.fn(async () => ({ id: 'build-1' })) as any,
-      getLatestBuild: vi.fn() as any,
-      updateBuild: vi.fn() as any,
-      updateBuildCoverage: vi.fn(async () => undefined) as any,
-      archiveBuild: vi.fn() as any,
-      deleteBuild: vi.fn() as any,
+      createBuild: vi.fn(),
+      getBuild: vi.fn(),
+      getProjectBuilds: vi.fn(),
+      getBuildByVersion: vi.fn(async () => ({ id: 'build-1' })),
+      getLatestBuild: vi.fn(),
+      updateBuild: vi.fn(),
+      updateBuildCoverage: vi.fn(async () => undefined),
+      archiveBuild: vi.fn(),
+      deleteBuild: vi.fn(),
     };
 
     const server = createTestServer({ storage, firestore });

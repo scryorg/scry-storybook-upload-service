@@ -220,6 +220,13 @@ function categorizeMember(name: string): MemberCategory {
   return 'sidecar';
 }
 
+/** The per-entry real-size cap for a member category (ledger F60: scf.json gets its own, larger cap). */
+function perEntryCapFor(category: MemberCategory, limits: BoundedZipLimits): number {
+  if (category === 'image') return limits.maxImageEntryBytes;
+  if (category === 'scfJson') return limits.maxScfJsonBytes;
+  return limits.maxNonImageEntryBytes;
+}
+
 function concatUint8(chunks: Uint8Array[]): Uint8Array {
   if (chunks.length === 1) return chunks[0];
   const total = chunks.reduce((sum, c) => sum + c.byteLength, 0);
@@ -267,6 +274,35 @@ interface TotalScanState {
   sidecarBytes: number;
 }
 
+/** Retains up to `limits.imageHeadBytes` of an image entry's real output (for later dimension
+ *  measurement) — a no-op once the head is already full. Never throws. */
+function bufferImageHeadBytes(entryState: EntryScanState, limits: BoundedZipLimits, chunk: Uint8Array): void {
+  if (entryState.headFilled >= limits.imageHeadBytes) return;
+  const room = limits.imageHeadBytes - entryState.headFilled;
+  const slice = chunk.byteLength <= room ? chunk : chunk.subarray(0, room);
+  entryState.headChunks.push(slice);
+  entryState.headFilled += slice.byteLength;
+}
+
+/** Ledger F60: sidecars have no check-then-discard mechanism to fall back on (unlike structure/
+ *  source), so they get their own, much tighter running-total cap instead — index-only per-image
+ *  metadata has no legitimate reason to add up to much. Throws once the aggregate is exceeded. */
+function checkSidecarAggregate(
+  entryState: EntryScanState,
+  totalState: TotalScanState,
+  limits: BoundedZipLimits,
+  chunk: Uint8Array
+): void {
+  totalState.sidecarBytes += chunk.byteLength;
+  if (totalState.sidecarBytes > limits.maxSidecarsTotalBytes) {
+    throw new BundleZipLimitError(
+      'BUNDLE_SIDECARS_TOO_LARGE',
+      `ZIP's sidecar JSON members total more than the ${limits.maxSidecarsTotalBytes} byte limit.`,
+      entryState.path
+    );
+  }
+}
+
 /** Called with every chunk of an entry's REAL decompressed output, in order, as it is produced.
  *  Throws a `BundleZipLimitError` the instant any bound is exceeded — the caller (both the STORED
  *  and DEFLATE consumers below) lets that propagate straight out, aborting the whole read. */
@@ -282,13 +318,8 @@ function accumulateChunk(
   entryState.crcState = crc32Update(entryState.crcState, chunk);
 
   if (entryState.category === 'image') {
-    if (entryState.headFilled < limits.imageHeadBytes) {
-      const room = limits.imageHeadBytes - entryState.headFilled;
-      const slice = chunk.byteLength <= room ? chunk : chunk.subarray(0, room);
-      entryState.headChunks.push(slice);
-      entryState.headFilled += slice.byteLength;
-    }
     // Bytes beyond imageHeadBytes are counted above (for the caps below) but never retained.
+    bufferImageHeadBytes(entryState, limits, chunk);
   } else {
     // scf.json, a checked-then-discarded structure/source member (still needs its full bytes
     // transiently to run checkStructureMember/checkSourceTextMember, ledger F60), or a sidecar: all
@@ -319,17 +350,7 @@ function accumulateChunk(
     );
   }
   if (entryState.category === 'sidecar') {
-    // Ledger F60: sidecars have no check-then-discard mechanism to fall back on (unlike structure/
-    // source), so they get their own, much tighter aggregate instead — index-only per-image metadata
-    // has no legitimate reason to add up to much.
-    totalState.sidecarBytes += chunk.byteLength;
-    if (totalState.sidecarBytes > limits.maxSidecarsTotalBytes) {
-      throw new BundleZipLimitError(
-        'BUNDLE_SIDECARS_TOO_LARGE',
-        `ZIP's sidecar JSON members total more than the ${limits.maxSidecarsTotalBytes} byte limit.`,
-        entryState.path
-      );
-    }
+    checkSidecarAggregate(entryState, totalState, limits, chunk);
   }
   if (
     compressedConsumedSoFar >= MIN_BYTES_FOR_RATIO_CHECK &&
@@ -500,6 +521,35 @@ async function skipEntryData(cursor: ByteCursor, entry: CentralDirectoryEntry): 
   }
 }
 
+/** Reads past an entry's local file header (signature, fixed fields, name, extra field) and
+ *  confirms its name agrees with the central directory's. Ledger F49: a local header that
+ *  disagrees with the central directory about an entry's own name is the classic "parser
+ *  confusion" shape (different consumers of the same ZIP, reading different headers, disagreeing
+ *  about what a given entry even is) — reject outright rather than guess which header to believe.
+ *  Throws (plain `Error` for a malformed/corrupt header, `BundleZipLimitError` for a name
+ *  mismatch) rather than returning a result: both are fatal to the whole read either way. */
+async function readAndVerifyLocalHeaderName(cursor: ByteCursor, entry: CentralDirectoryEntry): Promise<void> {
+  const sig = await mustTake(cursor, 4);
+  if (sig.readUInt32LE(0) !== LOCAL_FILE_SIGNATURE) {
+    throw new Error(`Corrupt ZIP: no local file header signature at offset ${entry.localHeaderOffset} for entry ${JSON.stringify(entry.name)}.`);
+  }
+  const fixed = await mustTake(cursor, 26); // local header fields after the 4-byte signature
+  const nameLen = fixed.readUInt16LE(22);
+  const extraLen = fixed.readUInt16LE(24);
+
+  const nameBuf = await mustTake(cursor, nameLen);
+  const localName = nameBuf.toString('utf8');
+  if (extraLen > 0) await mustTake(cursor, extraLen); // discard; unused
+
+  if (localName !== entry.name) {
+    throw new BundleZipLimitError(
+      'BUNDLE_NAME_MISMATCH',
+      `ZIP entry's local file header name (${JSON.stringify(localName)}) does not match its central directory name (${JSON.stringify(entry.name)}).`,
+      entry.name
+    );
+  }
+}
+
 async function processEntry(
   cursor: ByteCursor,
   entry: CentralDirectoryEntry,
@@ -515,29 +565,7 @@ async function processEntry(
     );
   }
 
-  const sig = await mustTake(cursor, 4);
-  if (sig.readUInt32LE(0) !== LOCAL_FILE_SIGNATURE) {
-    throw new Error(`Corrupt ZIP: no local file header signature at offset ${entry.localHeaderOffset} for entry ${JSON.stringify(entry.name)}.`);
-  }
-  const fixed = await mustTake(cursor, 26); // local header fields after the 4-byte signature
-  const nameLen = fixed.readUInt16LE(22);
-  const extraLen = fixed.readUInt16LE(24);
-
-  const nameBuf = await mustTake(cursor, nameLen);
-  const localName = nameBuf.toString('utf8');
-  if (extraLen > 0) await mustTake(cursor, extraLen); // discard; unused
-
-  // ledger F49: a local header that disagrees with the central directory about an entry's own name
-  // is the classic "parser confusion" shape (different consumers of the same ZIP, reading different
-  // headers, disagreeing about what a given entry even is) — reject outright rather than guess which
-  // header to believe.
-  if (localName !== entry.name) {
-    throw new BundleZipLimitError(
-      'BUNDLE_NAME_MISMATCH',
-      `ZIP entry's local file header name (${JSON.stringify(localName)}) does not match its central directory name (${JSON.stringify(entry.name)}).`,
-      entry.name
-    );
-  }
+  await readAndVerifyLocalHeaderName(cursor, entry);
 
   if (entry.isDirectory) {
     // Directory entries carry no data of their own (archiver's own output confirms this), but stay
@@ -570,8 +598,7 @@ async function processEntry(
   }
 
   const category = categorizeMember(entry.name);
-  const perEntryCap =
-    category === 'image' ? limits.maxImageEntryBytes : category === 'scfJson' ? limits.maxScfJsonBytes : limits.maxNonImageEntryBytes;
+  const perEntryCap = perEntryCapFor(category, limits);
   const entryState: EntryScanState = {
     path: entry.name,
     category,
@@ -619,47 +646,61 @@ async function processEntry(
   }
 
   if (entryState.category === 'image') {
-    // Ledger F69: `headChunks` is only ever the TRANSIENT prefix accumulated during this one entry's
-    // own decompression (never summed across entries, and this local `prefixBytes` value itself
-    // becomes garbage the moment this block returns) — `measureImage` turns it into a small,
-    // fixed-size record, and only that record (never the bytes) is retained in `files` from here on.
-    // A `null` result (family unidentifiable, or identifiable but dimensions unreadable from this
-    // bounded prefix — see `measureImage`'s own doc comment for why those collapse together) is
-    // still recorded as `family: null`, letting `validateBundle` reject it the same way it would an
-    // unreadable/wrong-format full image.
-    const prefixBytes = concatUint8(entryState.headChunks);
-    const measured = measureImage(prefixBytes);
-    files.set(entry.name, {
-      measured: true,
-      family: measured?.family ?? null,
-      width: measured?.width ?? 0,
-      height: measured?.height ?? 0,
-      size: entryState.realBytes,
-    });
+    finalizeImageEntry(entry, entryState, files);
     return;
   }
 
   if (entryState.category === 'checkedMember') {
-    // Ledger F60: run the exact content checks validateBundle would otherwise apply (moved into
-    // @scrymore/scf as checkStructureMember/checkSourceTextMember precisely for this), record whatever
-    // they find as ordinary read issues (the same "collected, read continues" bucket as an unsafe path
-    // or a symlink above), and then let `fullBytes` — and every chunk that built it — be freed: only a
-    // few bytes (`{checked: true, size}`) are ever retained for this member from this point on, not its
-    // content. `optedIn: true` in the sourceText case mirrors validateBundle's own call — the aggregate
-    // SOURCE_TEXT_NOT_OPT_IN check (once the whole manifest is known) is always the source of truth,
-    // never this per-member fast path; see checkSourceTextMember's own doc comment.
-    const fullBytes = concatUint8(entryState.fullChunks);
-    const result = entry.name.startsWith('structure/')
-      ? checkStructureMember(entry.name, fullBytes)
-      : checkSourceTextMember(entry.name, fullBytes, true);
-    for (const e of result.errors) issues.push(issue(e.code, e.message, e.path));
-    for (const w of result.warnings) warnings.push(issue(w.code, w.message, w.path));
-    files.set(entry.name, { checked: true, size: entryState.realBytes });
+    finalizeCheckedMember(entry, entryState, issues, warnings, files);
     return;
   }
 
   // scf.json or a sidecar JSON member: kept in full, per this module's own doc comment.
   files.set(entry.name, concatUint8(entryState.fullChunks));
+}
+
+/** Ledger F69: `headChunks` is only ever the TRANSIENT prefix accumulated during this one entry's
+ *  own decompression (never summed across entries, and this local `prefixBytes` value itself
+ *  becomes garbage the moment this function returns) — `measureImage` turns it into a small,
+ *  fixed-size record, and only that record (never the bytes) is retained in `files` from here on.
+ *  A `null` result (family unidentifiable, or identifiable but dimensions unreadable from this
+ *  bounded prefix — see `measureImage`'s own doc comment for why those collapse together) is still
+ *  recorded as `family: null`, letting `validateBundle` reject it the same way it would an
+ *  unreadable/wrong-format full image. */
+function finalizeImageEntry(entry: CentralDirectoryEntry, entryState: EntryScanState, files: BundleFiles): void {
+  const prefixBytes = concatUint8(entryState.headChunks);
+  const measured = measureImage(prefixBytes);
+  files.set(entry.name, {
+    measured: true,
+    family: measured?.family ?? null,
+    width: measured?.width ?? 0,
+    height: measured?.height ?? 0,
+    size: entryState.realBytes,
+  });
+}
+
+/** Ledger F60: run the exact content checks validateBundle would otherwise apply (moved into
+ *  @scrymore/scf as checkStructureMember/checkSourceTextMember precisely for this), record whatever
+ *  they find as ordinary read issues (the same "collected, read continues" bucket as an unsafe path
+ *  or a symlink above), and then let `fullBytes` — and every chunk that built it — be freed: only a
+ *  few bytes (`{checked: true, size}`) are ever retained for this member from this point on, not its
+ *  content. `optedIn: true` in the sourceText case mirrors validateBundle's own call — the aggregate
+ *  SOURCE_TEXT_NOT_OPT_IN check (once the whole manifest is known) is always the source of truth,
+ *  never this per-member fast path; see checkSourceTextMember's own doc comment. */
+function finalizeCheckedMember(
+  entry: CentralDirectoryEntry,
+  entryState: EntryScanState,
+  issues: BoundedZipIssue[],
+  warnings: BoundedZipIssue[],
+  files: BundleFiles
+): void {
+  const fullBytes = concatUint8(entryState.fullChunks);
+  const result = entry.name.startsWith('structure/')
+    ? checkStructureMember(entry.name, fullBytes)
+    : checkSourceTextMember(entry.name, fullBytes, true);
+  for (const e of result.errors) issues.push(issue(e.code, e.message, e.path));
+  for (const w of result.warnings) warnings.push(issue(w.code, w.message, w.path));
+  files.set(entry.name, { checked: true, size: entryState.realBytes });
 }
 
 /**

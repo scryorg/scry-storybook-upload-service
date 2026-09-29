@@ -9,7 +9,7 @@ import { z } from 'zod';
 import { swaggerUI } from '@hono/swagger-ui';
 import { requestIdMiddleware, errorHandler } from './middleware/request-id.js';
 import { log, logInfo, logWarn, reportError, reqFields } from './lib/log.js';
-import type { StorageService } from './services/storage/storage.service.js';
+import type { StorageService, StorageObjectMeta } from './services/storage/storage.service.js';
 import type { FirestoreService } from './services/firestore/firestore.service.js';
 import type {
   BuildCoverage,
@@ -17,7 +17,6 @@ import type {
   BuildSource,
   BuildValidationIssue,
   CreateBuildData,
-  CreateUploadData,
 } from './services/firestore/firestore.types.js';
 import type { ApiKeyService } from './services/apikey/apikey.service.js';
 import { apiKeyAuth, type AuthVariables } from './middleware/auth.js';
@@ -25,8 +24,8 @@ import { extractGitContext, normalizeCoverageInput } from './coverage/coverage.j
 import { parseMultipartFormData } from './utils/multipart.js';
 import { ciEventFields, mergeCiTimings, parseCiTimings, type CiTimings, type CiTimingsParse } from './ci-timings/ci-timings.js';
 import { parseSourceKey } from './bundle/source-key.js';
-import { readBoundedZip, DEFAULT_BOUNDED_ZIP_LIMITS, type BoundedZipIssue } from './bundle/bounded-zip.js';
-import { validateBundle, type ValidationIssue as ScfValidationIssue } from './vendor/scf/dist/index.js';
+import { readBoundedZip, DEFAULT_BOUNDED_ZIP_LIMITS } from './bundle/bounded-zip.js';
+import { validateBundle } from './vendor/scf/dist/index.js';
 
 // Define the application's environment, including injectable variables.
 export type AppEnv = {
@@ -345,6 +344,13 @@ const uploadRoute = createRoute({
   }
 });
 
+// 78 vs. 15: this is the main storybook.zip upload route, and its size reflects real accumulated
+// product history (see the F9/F31/F49/F60/F69/F80/F85/F86/F91/F92/P13a references throughout this
+// file) rather than one function doing one simple thing badly. A cognitive-complexity-driven
+// decomposition of a route this central and this hotfix-dense, done as part of a lint-wiring pass
+// rather than its own reviewed change with its own regression tests, risks reintroducing exactly
+// the bugs those ledger items already fixed. Left for a dedicated follow-up, not attempted here.
+// eslint-disable-next-line sonarjs/cognitive-complexity
 app.openapi(uploadRoute, async (c) => {
   try {
     const storage = c.var.storage;
@@ -655,6 +661,11 @@ const coverageUploadRoute = createRoute({
   },
 });
 
+// 25 vs. 15: coverage upload's dual-path body parsing (native multipart, then a busboy fallback,
+// then a plain-JSON path) plus its own validation/provenance-write steps. Same reasoning as
+// uploadRoute above: a real decomposition belongs in its own reviewed change with its own
+// regression tests, not folded into this lint-wiring pass.
+// eslint-disable-next-line sonarjs/cognitive-complexity
 app.openapi(coverageUploadRoute, async (c) => {
   try {
     const storage = c.var.storage;
@@ -694,8 +705,10 @@ app.openapi(coverageUploadRoute, async (c) => {
 
         const fileContent = await file.text();
         coveragePayload = JSON.parse(fileContent);
-      } catch (e) {
-        // Fallback to busboy parser for Node.js compatibility
+      } catch {
+        // Native multipart parsing failed (e.g. not actually multipart, or Hono's
+        // FormData parser choked on it) -- fall back to busboy below rather than
+        // surfacing this specific error, since the busboy path may still succeed.
         try {
           log.debug('multipart parse failed using busboy', reqFields(c));
           const parsed = await parseMultipartFormData(c.req.raw);
@@ -1295,6 +1308,48 @@ const bundleCompleteRoute = createRoute({
   },
 });
 
+// Best-effort cleanup for a rejected bundle upload (ledger F31/F32/F49 contract §9): delete the
+// uploaded object and mark the build failed, logging either half's failure rather than throwing --
+// a rejection response must still reach the caller even if this cleanup half-fails.
+async function cleanupRejectedBundle(
+  c: Context<any>,
+  storage: StorageService,
+  firestore: FirestoreService,
+  project: string,
+  buildId: string,
+  zipKey: string,
+  issues: BuildValidationIssue[]
+): Promise<void> {
+  await storage.delete(zipKey).catch(() => {
+    logWarn(c, 'could not delete rejected object', 'bundle_delete_failed');
+  });
+  await firestore
+    .updateBuild(project, buildId, { processingStatus: 'failed', validationErrors: issues })
+    .catch(() => {
+      logWarn(c, 'could not mark build failed', 'bundle_mark_failed');
+    });
+}
+
+// zipKey is caller-supplied (the client's own record of the presigned URL's key). The API key
+// already scopes the caller to :project; this additionally stops them asking the validator to
+// read and enqueue an object outside their own build's namespace.
+function isExpectedBundleZipKey(zipKey: string, expectedPrefix: string): boolean {
+  return zipKey.startsWith(expectedPrefix) && zipKey.endsWith('/bundle.zip');
+}
+
+// Contract §1: false when the presigned URL was never used (no object), or was used to upload
+// nothing. A type predicate (rather than the equivalent `isMissingOrEmpty`) so the caller's
+// `if (!hasBundleObjectMeta(meta))` guard still narrows `meta` to non-null afterward.
+function hasBundleObjectMeta(meta: StorageObjectMeta | null): meta is StorageObjectMeta {
+  return !!meta && meta.size > 0;
+}
+
+// 16 vs. 15: a linear chain of early-return guard clauses over one request (auth/shape checks,
+// then HEAD, then stream-validate, then queue); extracting the compound conditions and the
+// reject-cleanup helper (see above) did not move this number, and splitting the remaining
+// sequential checks across functions would trade one easy-to-follow request flow for several,
+// for a security-sensitive route, without changing behavior.
+// eslint-disable-next-line sonarjs/cognitive-complexity
 app.openapi(bundleCompleteRoute, async (c) => {
   try {
     const { project, version } = c.req.valid('param');
@@ -1309,11 +1364,8 @@ app.openapi(bundleCompleteRoute, async (c) => {
       return c.json({ error: 'Firestore not configured' }, 500);
     }
 
-    // zipKey is caller-supplied (the client's own record of the presigned URL's key). The API key
-    // already scopes the caller to :project; this additionally stops them asking the validator to
-    // read and enqueue an object outside their own build's namespace.
     const expectedPrefix = `${project}/${version}/builds/`;
-    if (!zipKey.startsWith(expectedPrefix) || !zipKey.endsWith('/bundle.zip')) {
+    if (!isExpectedBundleZipKey(zipKey, expectedPrefix)) {
       return c.json({ error: `zipKey must be under ${expectedPrefix} and end in /bundle.zip` }, 400);
     }
 
@@ -1331,21 +1383,14 @@ app.openapi(bundleCompleteRoute, async (c) => {
     // cleanup half-fails; the object then just outlives its failed build, same as any other
     // best-effort write in this file (e.g. the metadata route's provenance backfill).
     const reject = async (issues: BuildValidationIssue[]) => {
-      await storage.delete(zipKey).catch(() => {
-        logWarn(c, 'could not delete rejected object', 'bundle_delete_failed');
-      });
-      await firestore
-        .updateBuild(project, buildId, { processingStatus: 'failed', validationErrors: issues })
-        .catch(() => {
-          logWarn(c, 'could not mark build failed', 'bundle_mark_failed');
-        });
+      await cleanupRejectedBundle(c, storage, firestore, project, buildId, zipKey, issues);
       log.warn('bundle rejected', reqFields(c, { err_code: 'bundle_rejected' }));
       return c.json({ success: false, error: 'Bundle rejected', errors: issues }, 422);
     };
 
     // HEAD/size check (contract §1) before reading anything.
     const meta = await storage.head(zipKey);
-    if (!meta || meta.size === 0) {
+    if (!hasBundleObjectMeta(meta)) {
       return c.json({ error: 'Bundle object not found. Upload it to the presigned URL first.' }, 400);
     }
     if (meta.size > MAX_BUNDLE_ZIP_BYTES) {
@@ -1489,7 +1534,7 @@ app.openapi(presignedUrlRoute, async (c) => {
     const body = await c.req.json();
     contentType = body.contentType || contentType;
     ciTimingsInput = body?.ciTimings;
-  } catch (e) {
+  } catch {
     // If no JSON body, use default content type
   }
 

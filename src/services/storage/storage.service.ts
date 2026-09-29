@@ -1,5 +1,3 @@
-import { Readable } from 'stream';
-
 /**
  * Represents the result of a successful file upload operation.
  */

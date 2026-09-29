@@ -194,7 +194,7 @@ describe('POST /upload/:project/:version/bundle/complete', () => {
     // simulator that reproduces Firestore's actual behavior: a PATCH whose `updateMask.fieldPaths`
     // query string is a single comma-joined value (the pre-fix bug) 400s with "Invalid property
     // path", exactly as stage did; one repeated param per field (the fix) succeeds.
-    const docs: Record<string, any> = {
+    const docs: Record<string, Record<string, unknown>> = {
       'projects/acme/builds/build-100': {
         projectId: { stringValue: 'acme' },
         versionId: { stringValue: 'main' },
@@ -215,8 +215,8 @@ describe('POST /upload/:project/:version/bundle/complete', () => {
       if (method === 'GET') {
         const fields = docs[docPath];
         return fields
-          ? ({ ok: true, status: 200, json: async () => ({ fields }) } as any)
-          : ({ ok: false, status: 404, statusText: 'Not Found' } as any);
+          ? ({ ok: true, status: 200, json: async () => ({ fields }) })
+          : ({ ok: false, status: 404, statusText: 'Not Found' });
       }
 
       if (method === 'PATCH') {
@@ -228,11 +228,11 @@ describe('POST /upload/:project/:version/bundle/complete', () => {
             status: 400,
             statusText: 'Bad Request',
             text: async () => `{"error":{"message":"Invalid property path \\"${fieldPaths[0]}\\""}}`,
-          } as any;
+          };
         }
         const body = JSON.parse(String(init?.body));
         docs[docPath] = { ...(docs[docPath] ?? {}), ...body.fields };
-        return { ok: true, status: 200, json: async () => ({}) } as any;
+        return { ok: true, status: 200, json: async () => ({}) };
       }
 
       throw new Error(`Unexpected request: ${method} ${url}`);
@@ -248,8 +248,8 @@ describe('POST /upload/:project/:version/bundle/complete', () => {
       privateKey: '-----BEGIN PRIVATE KEY-----\\nZm9v\\n-----END PRIVATE KEY-----',
       serviceAccountId: 'upload-service',
     });
-    (firestore as any).accessToken = 'test-token';
-    (firestore as any).tokenExpiry = Date.now() + 60_000;
+    (firestore).accessToken = 'test-token';
+    (firestore).tokenExpiry = Date.now() + 60_000;
 
     const storage = new MockStorageService();
     storage.seed(

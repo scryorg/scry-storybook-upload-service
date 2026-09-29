@@ -10,8 +10,8 @@ function createSvc() {
   });
 
   // Bypass token generation logic.
-  (svc as any).accessToken = 'test-token';
-  (svc as any).tokenExpiry = Date.now() + 60_000;
+  (svc).accessToken = 'test-token';
+  (svc).tokenExpiry = Date.now() + 60_000;
 
   return svc;
 }
@@ -32,13 +32,13 @@ describe('FirestoreServiceWorker', () => {
           json: async () => ({
             fields: { currentBuildNumber: { integerValue: '7' } },
           }),
-        } as any;
+        };
       }
 
       if (method === 'PATCH' && url.includes('/documents/projects/my-project/counters/builds')) {
         const body = JSON.parse(String(init?.body));
         expect(body.fields.currentBuildNumber.integerValue).toBe('8');
-        return { ok: true, status: 200, json: async () => ({}) } as any;
+        return { ok: true, status: 200, json: async () => ({}) };
       }
 
       if (method === 'PATCH' && url.includes('/documents/projects/my-project/builds/')) {
@@ -47,7 +47,7 @@ describe('FirestoreServiceWorker', () => {
         expect(body.fields.versionId.stringValue).toBe('v1');
         expect(body.fields.buildNumber.integerValue).toBe('8');
         expect(body.fields.zipUrl.stringValue).toContain('storybook.zip');
-        return { ok: true, status: 200, json: async () => ({}) } as any;
+        return { ok: true, status: 200, json: async () => ({}) };
       }
 
       throw new Error(`Unexpected request: ${method} ${url}`);
@@ -87,19 +87,19 @@ describe('FirestoreServiceWorker', () => {
       const method = (init?.method || 'GET').toUpperCase();
 
       if (method === 'GET' && url.includes('/documents/projects/my-project/counters/builds')) {
-        return { ok: false, status: 500, statusText: 'boom' } as any;
+        return { ok: false, status: 500, statusText: 'boom' };
       }
 
       if (method === 'PATCH' && url.includes('/documents/projects/my-project/counters/builds')) {
         const body = JSON.parse(String(init?.body));
         expect(body.fields.currentBuildNumber.integerValue).toBe('1');
-        return { ok: true, status: 200, json: async () => ({}) } as any;
+        return { ok: true, status: 200, json: async () => ({}) };
       }
 
       if (method === 'PATCH' && url.includes('/documents/projects/my-project/builds/')) {
         const body = JSON.parse(String(init?.body));
         expect(body.fields.buildNumber.integerValue).toBe('1');
-        return { ok: true, status: 200, json: async () => ({}) } as any;
+        return { ok: true, status: 200, json: async () => ({}) };
       }
 
       throw new Error(`Unexpected request: ${method} ${url}`);
@@ -120,7 +120,7 @@ describe('FirestoreServiceWorker', () => {
   it('getBuild() returns null on 404', async () => {
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
       expect((init?.method || 'GET').toUpperCase()).toBe('GET');
-      return { ok: false, status: 404 } as any;
+      return { ok: false, status: 404 };
     });
 
     // @ts-expect-error - test override
@@ -173,7 +173,7 @@ describe('FirestoreServiceWorker', () => {
             },
           },
         ],
-      } as any;
+      };
     });
 
     // @ts-expect-error - test override
@@ -195,7 +195,7 @@ describe('FirestoreServiceWorker', () => {
       const body = JSON.parse(String(init?.body));
       expect(body.structuredQuery.where.fieldFilter.field.fieldPath).toBe('status');
       expect(body.structuredQuery.where.fieldFilter.value.stringValue).toBe('archived');
-      return { ok: true, status: 200, json: async () => [] } as any;
+      return { ok: true, status: 200, json: async () => [] };
     });
 
     // @ts-expect-error - test override
@@ -249,7 +249,7 @@ describe('FirestoreServiceWorker', () => {
             },
           },
         ],
-      } as any;
+      };
     });
 
     // @ts-expect-error - test override
@@ -286,7 +286,7 @@ describe('FirestoreServiceWorker', () => {
             },
           },
         ],
-      } as any;
+      };
     });
 
     // @ts-expect-error - test override
@@ -304,10 +304,10 @@ describe('FirestoreServiceWorker', () => {
     // processingStatus is written, so the orphan-bundle sweep's collection-group query never re-reads
     // an already-resolved bundle build forever) — proving it as two REPEATED params, never one
     // comma-joined value, is exactly what this guarantee exists to pin.
-    const calls: Array<{ url: string; body: any }> = [];
+    const calls: Array<{ url: string; body: { fields: Record<string, Record<string, unknown>> } }> = [];
     const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       calls.push({ url, body: JSON.parse(String(init?.body ?? '{}')) });
-      return { ok: true, status: 200, json: async () => ({}) } as any;
+      return { ok: true, status: 200, json: async () => ({}) };
     });
 
     // @ts-expect-error - test override
@@ -365,7 +365,7 @@ describe('FirestoreServiceWorker', () => {
       // bigint should fall back to string
       expect(body.fields.coverage.mapValue.fields.extra.stringValue).toBe('1');
 
-      return { ok: true, status: 200, json: async () => ({}) } as any;
+      return { ok: true, status: 200, json: async () => ({}) };
     });
 
     // @ts-expect-error - test override
@@ -390,8 +390,8 @@ describe('FirestoreServiceWorker', () => {
         },
         qualityGate: { passed: true, checks: [] },
         generatedAt: '2026-01-01T00:00:00.000Z',
-        extra: 1n as any,
-      } as any,
+        extra: 1n,
+      },
     });
   });
 
@@ -421,7 +421,7 @@ describe('FirestoreServiceWorker', () => {
         'FORBIDDEN_MEMBER'
       );
 
-      return { ok: true, status: 200, json: async () => ({}) } as any;
+      return { ok: true, status: 200, json: async () => ({}) };
     });
 
     // @ts-expect-error - test override
@@ -460,7 +460,7 @@ describe('FirestoreServiceWorker', () => {
       expect(body.fields.commitSha.stringValue).toBe('a1b2c3d4e5f60718293a4b5c6d7e8f9012345678');
       expect(body.fields.branch.stringValue).toBe('main');
 
-      return { ok: true, status: 200, json: async () => ({}) } as any;
+      return { ok: true, status: 200, json: async () => ({}) };
     });
 
     // @ts-expect-error - test override
@@ -499,7 +499,7 @@ describe('FirestoreServiceWorker', () => {
       status: 400,
       statusText: 'Bad Request',
       text: async () => '{"error":{"message":"Invalid property path \\"a,b\\""}}',
-    })) as any;
+    }));
 
     // @ts-expect-error - test override
     globalThis.fetch = fetchMock;
@@ -603,7 +603,7 @@ describe('FirestoreServiceWorker', () => {
       const body = JSON.parse(String(init?.body));
       expect(body.fields.status.stringValue).toBe('archived');
       expect(body.fields.archivedBy.stringValue).toBe('user-1');
-      return { ok: true, status: 200, json: async () => ({}) } as any;
+      return { ok: true, status: 200, json: async () => ({}) };
     });
 
     // @ts-expect-error - test override
@@ -616,8 +616,8 @@ describe('FirestoreServiceWorker', () => {
   it('deleteBuild() issues DELETE and throws on non-ok response', async () => {
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce({ ok: true, status: 200 } as any)
-      .mockResolvedValueOnce({ ok: false, status: 500, statusText: 'nope' } as any);
+      .mockResolvedValueOnce({ ok: true, status: 200 })
+      .mockResolvedValueOnce({ ok: false, status: 500, statusText: 'nope' });
 
     // @ts-expect-error - test override
     globalThis.fetch = fetchMock;
@@ -679,7 +679,7 @@ describe('FirestoreServiceWorker', () => {
             },
           },
         }),
-      } as any;
+      };
     });
 
     // @ts-expect-error - test override
@@ -688,8 +688,8 @@ describe('FirestoreServiceWorker', () => {
     const svc = createSvc();
     const build = await svc.getBuild('my-project', 'build-123');
     expect(build?.coverage?.reportUrl).toBe('https://r2/c.json');
-    expect((build?.coverage as any)?.summary?.totalComponents).toBe(10);
-    expect((build?.coverage as any)?.qualityGate?.checks?.[0]?.name).toBe('passRate');
+    expect((build?.coverage)?.summary?.totalComponents).toBe(10);
+    expect((build?.coverage)?.qualityGate?.checks?.[0]?.name).toBe('passRate');
   });
 
   it('guarantee-3: getBuild() reads commitSha/branch/provenanceError back from the document (upload-provenance-updatemask, ISSUES.md #61)', async () => {
@@ -723,7 +723,7 @@ describe('FirestoreServiceWorker', () => {
           },
         },
       }),
-    })) as any;
+    }));
 
     // @ts-expect-error - test override
     globalThis.fetch = fetchMock;
@@ -754,7 +754,7 @@ describe('FirestoreServiceWorker', () => {
           createdBy: { stringValue: 'svc' },
         },
       }),
-    })) as any;
+    }));
 
     // @ts-expect-error - test override
     globalThis.fetch = fetchMock;

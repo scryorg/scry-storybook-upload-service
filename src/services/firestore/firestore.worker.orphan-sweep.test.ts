@@ -22,8 +22,8 @@ describe('FirestoreServiceWorker orphan-bundle sweep', () => {
       privateKey: '-----BEGIN PRIVATE KEY-----\\nZm9v\\n-----END PRIVATE KEY-----',
       serviceAccountId: 'upload-service',
     });
-    (svc as any).accessToken = 'test-token';
-    (svc as any).tokenExpiry = Date.now() + 60_000;
+    (svc).accessToken = 'test-token';
+    (svc).tokenExpiry = Date.now() + 60_000;
     return svc;
   }
 
@@ -77,7 +77,7 @@ describe('FirestoreServiceWorker orphan-bundle sweep', () => {
 
       const query = sentQuery();
       expect(query.where.compositeFilter.op).toBe('AND');
-      const filters = query.where.compositeFilter.filters.map((f: any) => f.fieldFilter);
+      const filters = query.where.compositeFilter.filters.map((f) => f.fieldFilter);
       expect(filters).toEqual(
         expect.arrayContaining([
           { field: { fieldPath: 'bundlePending' }, op: 'EQUAL', value: { booleanValue: true } },
@@ -130,12 +130,12 @@ describe('FirestoreServiceWorker orphan-bundle sweep', () => {
 
   describe('createBuild() sets bundlePending only for a bundle build', () => {
     function mockCreateBuildFetches() {
-      const calls: Array<{ url: string; method: string; body: any }> = [];
+      const calls: Array<{ url: string; method: string; body: { fields: Record<string, unknown> } | undefined }> = [];
       fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
         const method = (init?.method || 'GET').toUpperCase();
         calls.push({ url, method, body: init?.body ? JSON.parse(String(init.body)) : undefined });
-        if (method === 'GET') return { ok: false, status: 404 } as any; // no counter doc yet
-        return { ok: true, status: 200, json: async () => ({}) } as any;
+        if (method === 'GET') return { ok: false, status: 404 }; // no counter doc yet
+        return { ok: true, status: 200, json: async () => ({}) };
       });
       vi.stubGlobal('fetch', fetchMock);
       return calls;

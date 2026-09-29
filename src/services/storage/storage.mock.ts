@@ -30,7 +30,7 @@ export class MockStorageService implements StorageService {
     };
   }
 
-  async getPresignedUploadUrl(key: string, contentType: string): Promise<{ url: string; key: string }> {
+  async getPresignedUploadUrl(key: string, _contentType: string): Promise<{ url: string; key: string }> {
     // Return a URL that contains s3.amazonaws.com to match test expectations
     const presignedUrl = `https://test-bucket.s3.amazonaws.com/${key}?AWSAccessKeyId=test&Expires=1234567890&Signature=test`;
 

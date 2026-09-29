@@ -160,7 +160,7 @@ describe('sweepOrphanBundleBuilds', () => {
     // The query's own snapshot still shows no processingStatus (candidate.hasProcessingStatus is
     // false), but a real /bundle/complete call resolved it in Firestore before the fresh re-check
     // runs -- simulate exactly that gap.
-    (store.getFreshState as any).mockResolvedValueOnce({ hasProcessingStatus: true, updateTime: 'irrelevant' });
+    (store.getFreshState).mockResolvedValueOnce({ hasProcessingStatus: true, updateTime: 'irrelevant' });
 
     const result = await sweepOrphanBundleBuilds(store, { now: NOW });
 
@@ -179,7 +179,7 @@ describe('sweepOrphanBundleBuilds', () => {
     // fresh re-check couldn't.
     const c = candidate();
     const { store, marked } = makeStore([c]);
-    (store.markUploadNeverCompletedIfUnchanged as any).mockResolvedValueOnce('precondition-failed');
+    (store.markUploadNeverCompletedIfUnchanged).mockResolvedValueOnce('precondition-failed');
 
     const result = await sweepOrphanBundleBuilds(store, { now: NOW });
 
@@ -194,7 +194,7 @@ describe('sweepOrphanBundleBuilds', () => {
   it('a build deleted between the query and the fresh re-check is left alone, not errored', async () => {
     const c = candidate();
     const { store, marked } = makeStore([c]);
-    (store.getFreshState as any).mockResolvedValueOnce(null);
+    (store.getFreshState).mockResolvedValueOnce(null);
 
     const result = await sweepOrphanBundleBuilds(store, { now: NOW });
 
@@ -207,7 +207,7 @@ describe('sweepOrphanBundleBuilds', () => {
 
   it('the candidate query itself throwing is recorded as an error, not fatal to the caller', async () => {
     const { store } = makeStore([]);
-    (store.findCandidates as any).mockRejectedValueOnce(new Error('FAILED_PRECONDITION: index missing'));
+    (store.findCandidates).mockRejectedValueOnce(new Error('FAILED_PRECONDITION: index missing'));
 
     const result = await sweepOrphanBundleBuilds(store, { now: NOW });
 
@@ -234,7 +234,7 @@ describe('sweepOrphanBundleBuilds', () => {
     const ok = candidate({ buildId: 'ok-1' });
     const broken = candidate({ buildId: 'broken-1' });
     const { store, marked } = makeStore([broken, ok]);
-    (store.bundleObjectExists as any).mockImplementation(async (c: OrphanBundleCandidate) => {
+    (store.bundleObjectExists).mockImplementation(async (c: OrphanBundleCandidate) => {
       if (c.buildId === 'broken-1') throw new Error('R2 unavailable');
       return false;
     });

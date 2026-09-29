@@ -101,6 +101,18 @@ function safeHeader(response: Response, name: string): string | null {
   }
 }
 
+/** `Retry-After` when the response carries one and parses; otherwise jittered exponential backoff. */
+function computeRetryDelayMs(
+  response: Response | undefined,
+  attempt: number,
+  baseMs: number,
+  capMs: number,
+  random: () => number
+): number {
+  const retryAfterMs = response ? parseRetryAfterMs(safeHeader(response, 'retry-after'), capMs) : null;
+  return retryAfterMs ?? backoffMs(attempt, baseMs, capMs, random);
+}
+
 /**
  * Call `doFetch()` and retry the same request on a transient failure. Returns
  * the last `Response` unchanged on a non-retryable status or once attempts are
@@ -136,8 +148,7 @@ export async function retryFetch(doFetch: () => Promise<Response>, opts: RetryFe
       throw error;
     }
 
-    const retryAfterMs = response ? parseRetryAfterMs(safeHeader(response, 'retry-after'), capMs) : null;
-    const delayMs = retryAfterMs ?? backoffMs(attempt, baseMs, capMs, random);
+    const delayMs = computeRetryDelayMs(response, attempt, baseMs, capMs, random);
     // Status-bearing (log-standardization M2): 429 vs 503 vs a network throw is the whole diagnosis.
     log.warn('firestore retrying after transient error', {
       err_code: status === null ? 'firestore_transient_network' : 'firestore_transient',

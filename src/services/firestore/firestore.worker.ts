@@ -5,7 +5,11 @@ import type {
   Build,
   BuildCoverage,
   BuildProcessingStatus,
+  BuildProvenanceError,
+  BuildSource,
   BuildStatus,
+  BuildValidationIssue,
+  CiTimings,
   CreateBuildData,
   UpdateBuildData,
   Upload,
@@ -55,6 +59,50 @@ interface FirestoreConfig {
   clientEmail: string;
   privateKey: string;
   serviceAccountId: string;
+}
+
+/**
+ * A Firestore REST API "Value" wire object (recursive) — narrowed to the variants
+ * `toFirestoreValue`/`fromFirestoreValue` actually produce or consume in this file.
+ */
+interface FirestoreValue {
+  nullValue?: null;
+  booleanValue?: boolean;
+  integerValue?: string;
+  doubleValue?: number;
+  stringValue?: string;
+  timestampValue?: string;
+  arrayValue?: { values?: FirestoreValue[] };
+  mapValue?: { fields?: FirestoreFields };
+}
+
+/** A Firestore REST document's `fields` map — also the shape every write body sends. */
+type FirestoreFields = Record<string, FirestoreValue>;
+
+/** A Firestore REST document, as returned by get/runQuery. */
+interface FirestoreDocument {
+  name: string;
+  fields: FirestoreFields;
+  updateTime: string;
+}
+
+/** A Firestore REST `StructuredQuery`, narrowed to the shapes this file builds. */
+interface FirestoreStructuredQuery {
+  from: Array<{ collectionId: string; allDescendants?: boolean }>;
+  where?: {
+    fieldFilter?: { field: { fieldPath: string }; op: string; value: FirestoreValue };
+    compositeFilter?: {
+      op: string;
+      filters: Array<{ fieldFilter: { field: { fieldPath: string }; op: string; value: FirestoreValue } }>;
+    };
+  };
+  orderBy?: Array<{ field: { fieldPath: string }; direction: 'ASCENDING' | 'DESCENDING' }>;
+  limit?: number;
+}
+
+/** One element of a Firestore REST `runQuery` response body. */
+interface FirestoreRunQueryResponseItem {
+  document?: FirestoreDocument;
 }
 
 /**
@@ -159,7 +207,7 @@ export class FirestoreServiceWorker implements FirestoreService {
       if (counterDoc && counterDoc.fields?.currentBuildNumber?.integerValue) {
         buildNumber = parseInt(counterDoc.fields.currentBuildNumber.integerValue) + 1;
       }
-    } catch (error) {
+    } catch {
       // Counter doesn't exist, will create it
     }
 
@@ -239,7 +287,9 @@ export class FirestoreServiceWorker implements FirestoreService {
       const doc = await this.getDocument(buildPath, token);
       if (!doc) return null;
       return this.convertDocToBuild(buildId, doc.fields);
-    } catch (error) {
+    } catch {
+      // Any read/parse failure here is treated the same as "not found" — callers
+      // of getBuild already handle a null return exactly like a missing document.
       return null;
     }
   }
@@ -253,10 +303,9 @@ export class FirestoreServiceWorker implements FirestoreService {
     limitCount: number = 50
   ): Promise<Build[]> {
     const token = await this.getAccessToken();
-    const collectionPath = `projects/${projectId}/builds`;
-    
+
     // Build query
-    const structuredQuery: any = {
+    const structuredQuery: FirestoreStructuredQuery = {
       from: [{ collectionId: 'builds' }],
       orderBy: [{ field: { fieldPath: 'buildNumber' }, direction: 'DESCENDING' }],
       limit: limitCount
@@ -302,7 +351,7 @@ export class FirestoreServiceWorker implements FirestoreService {
    */
   async findOrphanBundleCandidates(cutoff: Date, limit = 200): Promise<OrphanBundleCandidate[]> {
     const token = await this.getAccessToken();
-    const structuredQuery = {
+    const structuredQuery: FirestoreStructuredQuery = {
       from: [{ collectionId: 'builds', allDescendants: true }],
       where: {
         compositeFilter: {
@@ -428,7 +477,7 @@ export class FirestoreServiceWorker implements FirestoreService {
     const token = await this.getAccessToken();
     log.debug('get build by version step');
 
-    const structuredQuery = {
+    const structuredQuery: FirestoreStructuredQuery = {
       from: [{ collectionId: 'builds' }],
       where: {
         fieldFilter: {
@@ -486,7 +535,7 @@ export class FirestoreServiceWorker implements FirestoreService {
 
     const token = await this.getAccessToken();
     
-    const structuredQuery = {
+    const structuredQuery: FirestoreStructuredQuery = {
       from: [{ collectionId: 'builds' }],
       where: {
         fieldFilter: {
@@ -517,7 +566,7 @@ export class FirestoreServiceWorker implements FirestoreService {
     const token = await this.getAccessToken();
     const buildPath = `projects/${projectId}/builds/${buildId}`;
     
-    const fields: any = {};
+    const fields: FirestoreFields = {};
     if (updates.status) fields.status = { stringValue: updates.status };
     if (updates.zipUrl) fields.zipUrl = { stringValue: updates.zipUrl };
     if (updates.archivedAt) fields.archivedAt = { timestampValue: updates.archivedAt.toISOString() };
@@ -716,7 +765,7 @@ export class FirestoreServiceWorker implements FirestoreService {
   ): Promise<Upload[]> {
     const token = await this.getAccessToken();
 
-    const structuredQuery: any = {
+    const structuredQuery: FirestoreStructuredQuery = {
       from: [{ collectionId: 'uploads' }],
       orderBy: [{ field: { fieldPath: 'uploadNumber' }, direction: 'DESCENDING' }],
       limit: limitCount
@@ -759,7 +808,7 @@ export class FirestoreServiceWorker implements FirestoreService {
     }
   }
 
-  private convertDocToUpload(id: string, fields: any): Upload {
+  private convertDocToUpload(id: string, fields: FirestoreFields): Upload {
     const projectId = fields.projectId?.stringValue;
     const uploadNumber = fields.uploadNumber?.integerValue;
     if (!projectId || uploadNumber === undefined) {
@@ -773,7 +822,7 @@ export class FirestoreServiceWorker implements FirestoreService {
       imageCount: parseInt(fields.imageCount?.integerValue || '0'),
       zipUrl: fields.zipUrl?.stringValue || '',
       status: (fields.status?.stringValue || 'active') as Upload['status'],
-      processingStatus: fields.processingStatus?.stringValue,
+      processingStatus: fields.processingStatus?.stringValue as BuildProcessingStatus | undefined,
       createdAt: new Date(fields.createdAt?.timestampValue || new Date()),
       createdBy: fields.createdBy?.stringValue || '',
     };
@@ -789,18 +838,19 @@ export class FirestoreServiceWorker implements FirestoreService {
    * This is used for nested objects (coverage payload) to keep the Worker
    * implementation feature-parity with the Node Admin SDK version.
    */
-  private toFirestoreValue(value: any): any {
+  private toFirestoreValue(value: unknown): FirestoreValue {
     if (value === null) return { nullValue: null };
     if (value === undefined) return { nullValue: null };
 
     if (value instanceof Date) return { timestampValue: value.toISOString() };
 
     const t = typeof value;
-    if (t === 'string') return { stringValue: value };
-    if (t === 'boolean') return { booleanValue: value };
+    if (t === 'string') return { stringValue: value as string };
+    if (t === 'boolean') return { booleanValue: value as boolean };
     if (t === 'number') {
-      if (Number.isInteger(value)) return { integerValue: value.toString() };
-      return { doubleValue: value };
+      const n = value as number;
+      if (Number.isInteger(n)) return { integerValue: n.toString() };
+      return { doubleValue: n };
     }
 
     if (Array.isArray(value)) {
@@ -812,8 +862,8 @@ export class FirestoreServiceWorker implements FirestoreService {
     }
 
     if (t === 'object') {
-      const fields: Record<string, any> = {};
-      for (const [k, v] of Object.entries(value)) {
+      const fields: FirestoreFields = {};
+      for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
         if (v === undefined) continue;
         fields[k] = this.toFirestoreValue(v);
       }
@@ -829,19 +879,19 @@ export class FirestoreServiceWorker implements FirestoreService {
    *
    * This is only used for returning typed data from read operations.
    */
-  private fromFirestoreValue(value: any): any {
+  private fromFirestoreValue(value: FirestoreValue | undefined): unknown {
     if (!value || typeof value !== 'object') return value;
 
     if ('nullValue' in value) return null;
     if ('booleanValue' in value) return value.booleanValue;
-    if ('integerValue' in value) return parseInt(value.integerValue, 10);
+    if ('integerValue' in value) return parseInt(value.integerValue!, 10);
     if ('doubleValue' in value) return value.doubleValue;
     if ('stringValue' in value) return value.stringValue;
     if ('timestampValue' in value) return value.timestampValue;
 
     if ('mapValue' in value) {
       const fields = value.mapValue?.fields || {};
-      const obj: Record<string, any> = {};
+      const obj: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(fields)) {
         obj[k] = this.fromFirestoreValue(v);
       }
@@ -850,14 +900,14 @@ export class FirestoreServiceWorker implements FirestoreService {
 
     if ('arrayValue' in value) {
       const values = value.arrayValue?.values || [];
-      return values.map((v: any) => this.fromFirestoreValue(v));
+      return values.map((v) => this.fromFirestoreValue(v));
     }
 
     return value;
   }
 
   // Idempotent read: retried on 429/503/500/network (F85/F86).
-  private async getDocument(path: string, token: string): Promise<any> {
+  private async getDocument(path: string, token: string): Promise<FirestoreDocument | null> {
     const url = `${this.baseUrl}/${path}`;
     const response = await retryFetch(() => fetch(url, {
       headers: {
@@ -873,14 +923,14 @@ export class FirestoreServiceWorker implements FirestoreService {
       throw new Error(`Failed to get document: ${response.statusText}`);
     }
 
-    return response.json();
+    return response.json() as Promise<FirestoreDocument>;
   }
 
   // Idempotent write: every field here is a fixed value the caller already
   // computed (never a Firestore increment transform — the build/upload
   // counters are read-then-written as an absolute number), so resending the
   // same PATCH on a transient failure is safe. Retried on 429/503/500/network (F85).
-  private async setDocument(path: string, fields: any, token: string): Promise<void> {
+  private async setDocument(path: string, fields: FirestoreFields, token: string): Promise<void> {
     const url = `${this.baseUrl}/${path}`;
     const response = await retryFetch(() => fetch(url, {
       method: 'PATCH',
@@ -914,7 +964,7 @@ export class FirestoreServiceWorker implements FirestoreService {
    */
   private async patchDocument(
     path: string,
-    fields: any,
+    fields: FirestoreFields,
     token: string,
     maskFieldPaths?: string[],
     opts?: { ifUpdateTime?: string }
@@ -928,7 +978,7 @@ export class FirestoreServiceWorker implements FirestoreService {
     // segment containing anything other than [A-Za-z0-9_] — or one starting with a digit — must be
     // wrapped in backticks per Firestore's field-path syntax, so this stays correct if a future
     // field name ever needs it.
-    const needsBackticks = (segment: string) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(segment);
+    const needsBackticks = (segment: string) => !/^[A-Za-z_]\w*$/.test(segment);
     const quoteFieldPath = (fieldPath: string) =>
       needsBackticks(fieldPath) ? `\`${fieldPath.replace(/`/g, '\\`')}\`` : fieldPath;
 
@@ -996,7 +1046,7 @@ export class FirestoreServiceWorker implements FirestoreService {
     return { preconditionFailed: false };
   }
 
-  private async queryDocuments(parent: string, structuredQuery: any, token: string): Promise<any[]> {
+  private async queryDocuments(parent: string, structuredQuery: FirestoreStructuredQuery, token: string): Promise<FirestoreDocument[]> {
     const parentName = `projects/${this.config.projectId}/databases/(default)/documents/${parent}`;
     log.debug('query documents step');
     // Use the parent path in the URL for subcollection queries. An empty parent means a query
@@ -1021,12 +1071,12 @@ export class FirestoreServiceWorker implements FirestoreService {
       throw new Error(`Failed to query documents: ${response.statusText}`);
     }
 
-    const results = await response.json() as any[];
+    const results = await response.json() as FirestoreRunQueryResponseItem[];
     log.debug('query documents step');
-    return results.filter((r: any) => r.document).map((r: any) => r.document);
+    return results.flatMap((r) => (r.document ? [r.document] : []));
   }
 
-  private convertDocToBuild(id: string, fields: any): Build {
+  private convertDocToBuild(id: string, fields: FirestoreFields): Build {
     return {
       id,
       projectId: fields.projectId?.stringValue || '',
@@ -1038,8 +1088,8 @@ export class FirestoreServiceWorker implements FirestoreService {
       createdBy: fields.createdBy?.stringValue || '',
       archivedAt: fields.archivedAt?.timestampValue ? new Date(fields.archivedAt.timestampValue) : undefined,
       archivedBy: fields.archivedBy?.stringValue,
-      coverage: fields.coverage ? (this.fromFirestoreValue(fields.coverage) as any) : undefined,
-      processingStatus: fields.processingStatus?.stringValue,
+      coverage: fields.coverage ? (this.fromFirestoreValue(fields.coverage) as BuildCoverage) : undefined,
+      processingStatus: fields.processingStatus?.stringValue as BuildProcessingStatus | undefined,
       // commitSha/branch (P13a) were added to the write side by #25 but never read back here —
       // every read (getBuild, getBuildByVersion, getProjectBuilds, getLatestBuild) silently dropped
       // them even once the document had them, independent of the updateMask bug this hotfix fixes
@@ -1048,10 +1098,10 @@ export class FirestoreServiceWorker implements FirestoreService {
       ...(fields.branch?.stringValue ? { branch: fields.branch.stringValue } : {}),
       ...(fields.uploadedByKeyId?.stringValue ? { uploadedByKeyId: fields.uploadedByKeyId.stringValue } : {}),
       ...(fields.uploadedByKeyProject?.stringValue ? { uploadedByKeyProject: fields.uploadedByKeyProject.stringValue } : {}),
-      ...(fields.ciTimings ? { ciTimings: this.fromFirestoreValue(fields.ciTimings) as any } : {}),
-      ...(fields.source ? { source: this.fromFirestoreValue(fields.source) as any } : {}),
-      ...(fields.validationErrors ? { validationErrors: this.fromFirestoreValue(fields.validationErrors) as any } : {}),
-      ...(fields.provenanceError ? { provenanceError: this.fromFirestoreValue(fields.provenanceError) as any } : {}),
+      ...(fields.ciTimings ? { ciTimings: this.fromFirestoreValue(fields.ciTimings) as CiTimings } : {}),
+      ...(fields.source ? { source: this.fromFirestoreValue(fields.source) as BuildSource } : {}),
+      ...(fields.validationErrors ? { validationErrors: this.fromFirestoreValue(fields.validationErrors) as BuildValidationIssue[] } : {}),
+      ...(fields.provenanceError ? { provenanceError: this.fromFirestoreValue(fields.provenanceError) as BuildProvenanceError } : {}),
       ...(fields.processingError?.stringValue ? { processingError: fields.processingError.stringValue } : {}),
     };
   }
@@ -1177,10 +1227,12 @@ export class FirestoreServiceWorker implements FirestoreService {
       base64 = btoa(binary);
     }
     
-    return base64
-      .replace(/\+/g, '-')
-      .replace(/\//g, '_')
-      .replace(/=+$/, '');
+    const unpadded = base64.replace(/\+/g, '-').replace(/\//g, '_');
+    // Strip trailing '=' padding without a `=+$`-shaped regex (sonarjs/super-linear-regex):
+    // a hand-rolled scan is O(n) with no backtracking, unlike a trailing-quantifier regex.
+    let end = unpadded.length;
+    while (end > 0 && unpadded[end - 1] === '=') end--;
+    return unpadded.slice(0, end);
   }
 
   /**
@@ -1188,9 +1240,13 @@ export class FirestoreServiceWorker implements FirestoreService {
    */
   private generateId(): string {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    // crypto.getRandomValues (not Math.random, sonarjs/pseudo-random) — same 20-char,
+    // 62-symbol alphabet and length as before, just a non-pseudorandom byte source.
+    const randomBytes = new Uint8Array(20);
+    crypto.getRandomValues(randomBytes);
     let id = '';
     for (let i = 0; i < 20; i++) {
-      id += chars.charAt(Math.floor(Math.random() * chars.length));
+      id += chars.charAt(randomBytes[i] % chars.length);
     }
     return id;
   }

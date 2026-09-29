@@ -26,7 +26,7 @@ describe('R2S3StorageService (Worker)', () => {
 
   it('should upload a file using the R2 binding and return the correct result', async () => {
     // Arrange
-    const storageService = new R2S3StorageService(mockR2Bucket as any, config);
+    const storageService = new R2S3StorageService(mockR2Bucket, config);
     const mockR2Object = {
       key: 'test-project/test-version/storybook.zip',
       version: 'test-version-id',
@@ -53,7 +53,7 @@ describe('R2S3StorageService (Worker)', () => {
 
   it('should generate a presigned URL and return it', async () => {
     // Arrange
-    const storageService = new R2S3StorageService(mockR2Bucket as any, config);
+    const storageService = new R2S3StorageService(mockR2Bucket, config);
     const mockSignedUrl = 'https://s3.presigned.url/for/upload';
     (getSignedUrl as vi.Mock).mockResolvedValue(mockSignedUrl);
 
@@ -76,26 +76,26 @@ describe('R2S3StorageService (Worker)', () => {
   });
 
   it('getObjectRange() passes offset/length through to the native R2 binding and returns its bytes', async () => {
-    const storageService = new R2S3StorageService(mockR2Bucket as any, config);
+    const storageService = new R2S3StorageService(mockR2Bucket, config);
     const bytes = new Uint8Array([1, 2, 3, 4, 5]);
     const mockR2Object = { arrayBuffer: vi.fn(async () => bytes.buffer) };
-    (mockR2Bucket as any).get = vi.fn(async () => mockR2Object);
+    (mockR2Bucket).get = vi.fn(async () => mockR2Object);
 
     const result = await storageService.getObjectRange('k.bin', { offset: 10, length: 5 });
 
-    expect((mockR2Bucket as any).get).toHaveBeenCalledWith('k.bin', { range: { offset: 10, length: 5 } });
+    expect((mockR2Bucket).get).toHaveBeenCalledWith('k.bin', { range: { offset: 10, length: 5 } });
     expect(result).toEqual(bytes);
   });
 
   it('getObjectRange() returns null when the R2 binding reports the object does not exist', async () => {
-    const storageService = new R2S3StorageService(mockR2Bucket as any, config);
-    (mockR2Bucket as any).get = vi.fn(async () => null);
+    const storageService = new R2S3StorageService(mockR2Bucket, config);
+    (mockR2Bucket).get = vi.fn(async () => null);
 
     expect(await storageService.getObjectRange('missing.bin', { offset: 0, length: 5 })).toBeNull();
   });
 
   it('deleteByPrefix() lists and deletes objects until cursor is exhausted', async () => {
-    const storageService = new R2S3StorageService(mockR2Bucket as any, config);
+    const storageService = new R2S3StorageService(mockR2Bucket, config);
 
     mockR2Bucket.list
       .mockResolvedValueOnce({

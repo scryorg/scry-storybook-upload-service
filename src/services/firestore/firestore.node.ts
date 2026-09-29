@@ -1,5 +1,5 @@
 import admin from 'firebase-admin';
-import type { Firestore, FieldValue } from 'firebase-admin/firestore';
+import type { Firestore, DocumentData } from 'firebase-admin/firestore';
 import type { FirestoreService } from './firestore.service.js';
 import type {
   Build,
@@ -44,7 +44,7 @@ export class FirestoreServiceNode implements FirestoreService {
       } else {
         buildNumber = counterSnap.data()!.currentBuildNumber + 1;
         transaction.update(counterRef, {
-          currentBuildNumber: admin.firestore.FieldValue.increment(1) as any
+          currentBuildNumber: admin.firestore.FieldValue.increment(1)
         });
       }
 
@@ -161,8 +161,8 @@ export class FirestoreServiceNode implements FirestoreService {
     // Choose the latest build by buildNumber
     let bestDoc = snapshot.docs[0];
     for (const doc of snapshot.docs) {
-      const current = doc.data() as any;
-      const best = bestDoc.data() as any;
+      const current = doc.data();
+      const best = bestDoc.data();
       if ((current?.buildNumber ?? 0) > (best?.buildNumber ?? 0)) {
         bestDoc = doc;
       }
@@ -212,7 +212,7 @@ export class FirestoreServiceNode implements FirestoreService {
     if (updates.provenanceError === null) {
       payload.provenanceError = admin.firestore.FieldValue.delete();
     }
-    await buildRef.update(payload as any);
+    await buildRef.update(payload);
   }
 
   /**
@@ -224,7 +224,7 @@ export class FirestoreServiceNode implements FirestoreService {
     coverage: BuildCoverage
   ): Promise<void> {
     const buildRef = this.db.doc(`projects/${projectId}/builds/${buildId}`);
-    await buildRef.update({ coverage } as any);
+    await buildRef.update({ coverage });
   }
 
   /**
@@ -236,7 +236,7 @@ export class FirestoreServiceNode implements FirestoreService {
     status: BuildProcessingStatus
   ): Promise<void> {
     const buildRef = this.db.doc(`projects/${projectId}/builds/${buildId}`);
-    await buildRef.update({ processingStatus: status } as any);
+    await buildRef.update({ processingStatus: status });
   }
 
   /**
@@ -352,7 +352,7 @@ export class FirestoreServiceNode implements FirestoreService {
     await ref.delete();
   }
 
-  private convertDocToUpload(id: string, data: any): Upload {
+  private convertDocToUpload(id: string, data: DocumentData): Upload {
     return {
       id,
       projectId: data.projectId,
@@ -369,7 +369,7 @@ export class FirestoreServiceNode implements FirestoreService {
   /**
    * Helper method to convert Firestore document to Build object
    */
-  private convertDocToBuild(id: string, data: any): Build {
+  private convertDocToBuild(id: string, data: DocumentData): Build {
     return {
       id,
       projectId: data.projectId,

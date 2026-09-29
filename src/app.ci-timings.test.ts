@@ -11,7 +11,7 @@ import { Hono } from 'hono';
 import { app, type AppEnv } from './app.js';
 import type { ApiKeyService } from './services/apikey/apikey.service.js';
 import type { FirestoreService } from './services/firestore/firestore.service.js';
-import type { Build } from './services/firestore/firestore.types.js';
+import type { Build, CreateBuildData, UpdateBuildData } from './services/firestore/firestore.types.js';
 import type { StorageService } from './services/storage/storage.service.js';
 
 function createTestServer(options: {
@@ -32,16 +32,16 @@ function createTestServer(options: {
 
 function createStorage(): StorageService {
   return {
-    upload: vi.fn(async (key: string) => ({ url: `https://r2.example/${key}`, key })) as any,
+    upload: vi.fn(async (key: string) => ({ url: `https://r2.example/${key}`, key })),
     getPresignedUploadUrl: vi.fn(async (key: string, contentType: string) => ({
       url: `https://signed.example/${key}?sig=1`,
       key,
       contentType,
-    })) as any,
-    head: vi.fn() as any,
-    getObjectStream: vi.fn() as any,
-    getObjectRange: vi.fn() as any,    delete: vi.fn() as any,
-    deleteByPrefix: vi.fn() as any,
+    })),
+    head: vi.fn(),
+    getObjectStream: vi.fn(),
+    getObjectRange: vi.fn(),    delete: vi.fn(),
+    deleteByPrefix: vi.fn(),
   };
 }
 
@@ -61,7 +61,7 @@ function makeBuild(overrides: Partial<Build> = {}): Build {
 
 function createFirestore(overrides: Partial<FirestoreService> = {}): FirestoreService {
   return {
-    createBuild: vi.fn(async (_p: string, data: any) => makeBuild({ versionId: data.versionId, zipUrl: data.zipUrl })),
+    createBuild: vi.fn(async (_p: string, data: CreateBuildData) => makeBuild({ versionId: data.versionId, zipUrl: data.zipUrl })),
     getBuild: vi.fn(async () => null),
     getProjectBuilds: vi.fn(async () => []),
     getBuildByVersion: vi.fn(async () => null),
@@ -136,7 +136,7 @@ describe('regression-storybook-preview-ci-runtime: CI timings stored with the up
     const res = await presign(server, { contentType: 'application/zip', ciTimings: PRE_UPLOAD });
     expect(res.status).toBe(200);
 
-    const data = (firestore.createBuild as any).mock.calls[0][1];
+    const data = (firestore.createBuild).mock.calls[0][1];
     expect(data.ciTimings).toEqual(PRE_UPLOAD);
   });
 
@@ -167,10 +167,10 @@ describe('regression-storybook-preview-ci-runtime: CI timings stored with the up
     const body = await res.json();
     expect(body.buildId).toBe('build-7');
 
-    const data = (firestore.createBuild as any).mock.calls[0][1];
+    const data = (firestore.createBuild).mock.calls[0][1];
     expect('ciTimings' in data).toBe(false);
 
-    const event = (firestore.trackEvent as any).mock.calls[0][1];
+    const event = (firestore.trackEvent).mock.calls[0][1];
     expect(Object.keys(event).filter((k) => k.startsWith('ci'))).toEqual([]);
 
     expect(logged(logSpy)).toContain('"err_code":"ci_timings_absent"');
@@ -182,16 +182,16 @@ describe('regression-storybook-preview-ci-runtime: CI timings stored with the up
 
     await presign(server, { contentType: 'application/zip', ciTimings: { analyzeMs: 1200, runner: 'unknown' } });
 
-    const data = (firestore.createBuild as any).mock.calls[0][1];
+    const data = (firestore.createBuild).mock.calls[0][1];
     expect(data.ciTimings).toEqual({ analyzeMs: 1200, runner: 'unknown' });
-    const event = (firestore.trackEvent as any).mock.calls[0][1];
+    const event = (firestore.trackEvent).mock.calls[0][1];
     expect(event.ciRunner).toBe('unknown');
     expect('ciExecuteMs' in event).toBe(false);
     expect('ciStoryCount' in event).toBe(false);
   });
 
   it('guarantee-7 bad values dropped field by field: each out-of-bounds leaf is dropped and counted, the rest of the record is stored, the build is still created', async () => {
-    const cases: Array<[Record<string, unknown>, (t: any) => void]> = [
+    const cases: Array<[Record<string, unknown>, (t: Record<string, unknown>) => void]> = [
       [{ executeMs: -1 }, (t) => expect('executeMs' in t).toBe(false)],
       [{ executeMs: 24 * 60 * 60 * 1000 }, (t) => expect('executeMs' in t).toBe(false)],
       [{ executeMs: Number.NaN }, (t) => expect('executeMs' in t).toBe(false)],
@@ -215,7 +215,7 @@ describe('regression-storybook-preview-ci-runtime: CI timings stored with the up
 
       const res = await presign(server, { contentType: 'application/zip', ciTimings: { ...PRE_UPLOAD, ...bad } });
       expect(res.status, JSON.stringify(bad)).toBe(200);
-      const stored = (firestore.createBuild as any).mock.calls[0][1].ciTimings;
+      const stored = (firestore.createBuild).mock.calls[0][1].ciTimings;
       expect(stored, JSON.stringify(bad)).toBeDefined();
       check(stored);
       // everything else survives
@@ -231,7 +231,7 @@ describe('regression-storybook-preview-ci-runtime: CI timings stored with the up
     const ci = { ...PRE_UPLOAD.ci, workflow: "Build & test, it's #1 (preview) — ünïcode", job: 'deploy [macOS]' };
 
     await presign(server, { contentType: 'application/zip', ciTimings: { ...PRE_UPLOAD, ci } });
-    const stored = (firestore.createBuild as any).mock.calls[0][1].ciTimings;
+    const stored = (firestore.createBuild).mock.calls[0][1].ciTimings;
     expect(stored.ci).toEqual(ci);
     expect(droppedCount()).toBe(0);
   });
@@ -243,7 +243,7 @@ describe('regression-storybook-preview-ci-runtime: CI timings stored with the up
       const server = createTestServer({ storage: createStorage(), firestore });
       const res = await presign(server, { contentType: 'application/zip', ciTimings: bad });
       expect(res.status, JSON.stringify(bad)).toBe(200);
-      const data = (firestore.createBuild as any).mock.calls[0][1];
+      const data = (firestore.createBuild).mock.calls[0][1];
       expect('ciTimings' in data, JSON.stringify(bad)).toBe(false);
       expect(logged(warnSpy), JSON.stringify(bad)).toContain('"err_code":"ci_timings_invalid"');
     }
@@ -253,23 +253,23 @@ describe('regression-storybook-preview-ci-runtime: CI timings stored with the up
     const firestore = createFirestore();
     const server = createTestServer({ storage: createStorage(), firestore });
     await presign(server, { contentType: 'application/zip', ciTimings: { ...PRE_UPLOAD, timeLostMs: {} } });
-    expect((firestore.createBuild as any).mock.calls[0][1].ciTimings.timeLostMs).toEqual({});
+    expect((firestore.createBuild).mock.calls[0][1].ciTimings.timeLostMs).toEqual({});
 
     const alone = createFirestore();
     await presign(createTestServer({ storage: createStorage(), firestore: alone }), { contentType: 'application/zip', ciTimings: { timeLostMs: {} } });
-    expect((alone.createBuild as any).mock.calls[0][1].ciTimings).toEqual({ timeLostMs: {} });
+    expect((alone.createBuild).mock.calls[0][1].ciTimings).toEqual({ timeLostMs: {} });
 
     const { timeLostMs: _omit, ...withoutTimeLost } = PRE_UPLOAD;
     const older = createFirestore();
     await presign(createTestServer({ storage: createStorage(), firestore: older }), { contentType: 'application/zip', ciTimings: withoutTimeLost });
-    expect('timeLostMs' in (older.createBuild as any).mock.calls[0][1].ciTimings).toBe(false);
+    expect('timeLostMs' in (older.createBuild).mock.calls[0][1].ciTimings).toBe(false);
   });
 
   it('guarantee-7 a timeLostMs whose every entry is out of bounds is not stored as {} (that would claim nothing was lost)', async () => {
     const firestore = createFirestore();
     const server = createTestServer({ storage: createStorage(), firestore });
     await presign(server, { contentType: 'application/zip', ciTimings: { ...PRE_UPLOAD, timeLostMs: { timeout: -1, 'Bad Key': 5 } } });
-    const stored = (firestore.createBuild as any).mock.calls[0][1].ciTimings;
+    const stored = (firestore.createBuild).mock.calls[0][1].ciTimings;
     expect('timeLostMs' in stored).toBe(false);
     expect(droppedCount()).toBe(2);
   });
@@ -295,7 +295,7 @@ describe('regression-storybook-preview-ci-runtime: CI timings stored with the up
       },
     });
 
-    const stored = (firestore.createBuild as any).mock.calls[0][1].ciTimings;
+    const stored = (firestore.createBuild).mock.calls[0][1].ciTimings;
     expect(stored.secretToken).toBeUndefined();
     expect(stored.ci).toEqual(PRE_UPLOAD.ci);
     expect(stored.timeLostMs).toEqual({ timeout: 1500, render_timeout: 400 });
@@ -318,7 +318,7 @@ describe('POST /upload/:project/:version/builds/:buildId/ci-timings', () => {
     });
 
   it('merges the final record into the build ciTimings', async () => {
-    const build = makeBuild({ ciTimings: PRE_UPLOAD as any });
+    const build = makeBuild({ ciTimings: PRE_UPLOAD });
     const firestore = createFirestore({ getBuild: vi.fn(async () => build) });
     const server = createTestServer({ storage: createStorage(), firestore });
 
@@ -334,10 +334,10 @@ describe('POST /upload/:project/:version/builds/:buildId/ci-timings', () => {
   });
 
   it('accepts the record as the bare body too, and is idempotent', async () => {
-    let doc = makeBuild({ ciTimings: PRE_UPLOAD as any });
+    let doc = makeBuild({ ciTimings: PRE_UPLOAD });
     const firestore = createFirestore({
       getBuild: vi.fn(async () => doc),
-      updateBuild: vi.fn(async (_p: string, _b: string, u: any) => {
+      updateBuild: vi.fn(async (_p: string, _b: string, u: UpdateBuildData) => {
         doc = { ...doc, ...u };
       }),
     });
@@ -351,19 +351,19 @@ describe('POST /upload/:project/:version/builds/:buildId/ci-timings', () => {
   });
 
   it('merges nested blocks rather than replacing them', async () => {
-    const build = makeBuild({ ciTimings: { stories: { declared: 461 }, ci: { runId: '1' } } as any });
+    const build = makeBuild({ ciTimings: { stories: { declared: 461 }, ci: { runId: '1' } } });
     const firestore = createFirestore({ getBuild: vi.fn(async () => build) });
     const server = createTestServer({ storage: createStorage(), firestore });
 
     await post(server, { ciTimings: { stories: { passed: 457 }, ci: { runAttempt: 2 } } });
-    expect((firestore.updateBuild as any).mock.calls[0][2].ciTimings).toEqual({
+    expect((firestore.updateBuild).mock.calls[0][2].ciTimings).toEqual({
       stories: { declared: 461, passed: 457 },
       ci: { runId: '1', runAttempt: 2 },
     });
   });
 
   it('guarantee-7 a bad field is dropped and counted, the rest is merged, and the response names what was dropped', async () => {
-    const build = makeBuild({ ciTimings: PRE_UPLOAD as any });
+    const build = makeBuild({ ciTimings: PRE_UPLOAD });
     const firestore = createFirestore({ getBuild: vi.fn(async () => build) });
     const server = createTestServer({ storage: createStorage(), firestore });
 
@@ -371,7 +371,7 @@ describe('POST /upload/:project/:version/builds/:buildId/ci-timings', () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.dropped).toEqual(['ciTimings.uploadMs', 'ciTimings.jobTimeSource']);
-    const merged = (firestore.updateBuild as any).mock.calls[0][2].ciTimings;
+    const merged = (firestore.updateBuild).mock.calls[0][2].ciTimings;
     expect(merged.uploadMs).toBeUndefined();
     expect(merged.jobTimeSource).toBeUndefined();
     expect(merged.deployerTotalMs).toBe(FINAL.deployerTotalMs);
@@ -453,15 +453,15 @@ describe('POST /upload/:project/:version/builds/:buildId/ci-timings', () => {
 
   describe('auth (same as the other upload routes)', () => {
     const apiKeyService: ApiKeyService = {
-      createApiKey: vi.fn() as any,
+      createApiKey: vi.fn(),
       validateApiKey: vi.fn(async () => ({
         valid: true,
         apiKey: { id: 'k1', name: 'ci', prefix: 'scry_proj_my' },
-      })) as any,
-      listApiKeys: vi.fn() as any,
-      revokeApiKey: vi.fn() as any,
-      deleteApiKey: vi.fn() as any,
-      updateLastUsed: vi.fn(async () => undefined) as any,
+      })),
+      listApiKeys: vi.fn(),
+      revokeApiKey: vi.fn(),
+      deleteApiKey: vi.fn(),
+      updateLastUsed: vi.fn(async () => undefined),
     };
 
     it('401 without an API key', async () => {
