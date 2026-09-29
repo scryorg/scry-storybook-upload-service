@@ -237,6 +237,34 @@ export interface Build {
    * for this build; absent otherwise (upload-provenance-updatemask).
    */
   provenanceError?: BuildProvenanceError;
+
+  /**
+   * Set alongside `processingStatus: 'failed'` to explain why a build never finished, on the same
+   * terms as the field of this name already written by scry-build-processing-service: a short,
+   * human-readable diagnostic, never a stack trace. The orphan-bundle sweep (`bundle/orphan-
+   * sweep.ts`, ledger F80) is this service's first writer of it, for a bundle build whose
+   * `/bundle/complete` call never arrived.
+   */
+  processingError?: string;
+}
+
+/**
+ * One build document read while scanning for bundle uploads whose `/bundle/complete` call never
+ * arrived (`bundle/orphan-sweep.ts`, ledger F80). Deliberately narrow — just enough to decide
+ * whether a build is a candidate (old enough, a bundle build, not already resolved) and to compute
+ * the R2 key its bundle ZIP would have landed at.
+ */
+export interface OrphanBundleCandidate {
+  buildId: string;
+  projectId: string;
+  versionId: string;
+  buildNumber: number;
+  createdAt: Date;
+  /** `source` is present (contract §4): a bundle build, never a legacy storybook.zip build (G1). */
+  hasSource: boolean;
+  /** Any processingStatus at all — queued, processing, completed, partial or failed — means
+   *  `/bundle/complete` already ran and resolved this build; never true for a genuine orphan. */
+  hasProcessingStatus: boolean;
 }
 
 /**
@@ -377,4 +405,7 @@ export interface UpdateBuildData {
    * succeeds. Omitted entirely: this call does not touch the field either way.
    */
   provenanceError?: BuildProvenanceError | null;
+
+  /** See `Build.processingError`. Set alongside `processingStatus: 'failed'`. */
+  processingError?: string;
 }

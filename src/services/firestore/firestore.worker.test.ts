@@ -297,10 +297,13 @@ describe('FirestoreServiceWorker', () => {
     expect(build?.id).toBe('build-latest');
   });
 
-  it('guarantee-2-single-field-unchanged: every existing single-field patchDocument() caller is byte-identical after the fix (processingStatus, coverage)', async () => {
+  it('guarantee-2-single-field-unchanged: updateBuildCoverage() stays single-field, and updateProcessingStatus() repeats (never comma-joins) its now-two-field mask', async () => {
     // A mask of one field, repeated once, is identical to the pre-fix comma-join for n=1 -- there is
-    // no comma to mis-parse. Proves updateProcessingStatus() and updateBuildCoverage() (the two
-    // single-field callers that existed before commitSha/branch) are unaffected by the fix.
+    // no comma to mis-parse. updateBuildCoverage() is unaffected by either fix. updateProcessingStatus()
+    // gained a second mask entry under ledger F91 (clearing `bundlePending` the instant any
+    // processingStatus is written, so the orphan-bundle sweep's collection-group query never re-reads
+    // an already-resolved bundle build forever) — proving it as two REPEATED params, never one
+    // comma-joined value, is exactly what this guarantee exists to pin.
     const calls: Array<{ url: string; body: any }> = [];
     const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       calls.push({ url, body: JSON.parse(String(init?.body ?? '{}')) });
@@ -329,9 +332,11 @@ describe('FirestoreServiceWorker', () => {
 
     expect(calls).toHaveLength(2);
     const processingStatusParams = new URL(calls[0].url).searchParams.getAll('updateMask.fieldPaths');
-    expect(processingStatusParams).toEqual(['processingStatus']);
+    expect(processingStatusParams).toEqual(['processingStatus', 'bundlePending']);
     expect(calls[0].url).not.toContain(',');
     expect(calls[0].body.fields.processingStatus.stringValue).toBe('queued');
+    // bundlePending is mask-only (a clear), never present in the written fields.
+    expect(calls[0].body.fields.bundlePending).toBeUndefined();
 
     const coverageParams = new URL(calls[1].url).searchParams.getAll('updateMask.fieldPaths');
     expect(coverageParams).toEqual(['coverage']);
@@ -402,8 +407,10 @@ describe('FirestoreServiceWorker', () => {
       expect(parsed.pathname).toBe(
         '/v1/projects/firebase-proj/databases/(default)/documents/projects/my-project/builds/build-9'
       );
+      // Ledger F91: any processingStatus write also clears `bundlePending` (mask-only, no value),
+      // still as its own repeated param -- never comma-joined onto the others.
       expect(parsed.search).toBe(
-        '?updateMask.fieldPaths=processingStatus&updateMask.fieldPaths=validationErrors'
+        '?updateMask.fieldPaths=processingStatus&updateMask.fieldPaths=validationErrors&updateMask.fieldPaths=bundlePending'
       );
       expect((init?.method || 'GET').toUpperCase()).toBe('PATCH');
 

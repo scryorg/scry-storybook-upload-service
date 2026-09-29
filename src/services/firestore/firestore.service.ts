@@ -7,6 +7,7 @@ import type {
   UpdateBuildData,
   Upload,
   CreateUploadData,
+  OrphanBundleCandidate,
 } from './firestore.types.js';
 
 /**
@@ -25,6 +26,42 @@ export interface FirestoreService {
    * is not forced to grow one; the deployed Worker provides it.
    */
   trackEvent?(name: string, props?: Record<string, string | number | boolean | undefined>): Promise<void>;
+
+  /**
+   * Bundle builds still awaiting their `/bundle/complete` call, created before `cutoff`, for the
+   * orphan-bundle sweep (ledger F80, cost/coverage fix F91). ONE collection-group query across every
+   * project, filtered on `bundlePending == true` (see `firestore.worker.ts` for the full field
+   * lifecycle) — replaces the original `listProjectIds` + per-project scan, which cost reads
+   * proportional to project count and total build history rather than the orphan rate. Optional so
+   * the Node implementation is not forced to grow one; only the deployed Worker runs the cron that
+   * needs it (same reasoning as `trackEvent` above).
+   */
+  findOrphanBundleCandidates?(cutoff: Date, limit?: number): Promise<OrphanBundleCandidate[]>;
+
+  /**
+   * Fresh re-read of one candidate's `processingStatus` presence + `updateTime`, immediately before
+   * the orphan sweep would mark it failed (ledger F92). `null` means the document no longer exists.
+   * Optional for the same reason as `findOrphanBundleCandidates` above.
+   */
+  getBuildOrphanState?(
+    projectId: string,
+    buildId: string
+  ): Promise<{ hasProcessingStatus: boolean; updateTime: string } | null>;
+
+  /**
+   * Mark a bundle build's upload as never completed (ledger F80), guarded by the `updateTime`
+   * `getBuildOrphanState` returned (ledger F92) — a Firestore `currentDocument.updateTime`
+   * precondition that makes the write atomic with that read. `'precondition-failed'` means the
+   * document changed since (a genuine, concurrent `/bundle/complete` most likely); the caller must
+   * treat that as skipped, never retry it with the same fields. Optional for the same reason as
+   * `findOrphanBundleCandidates` above.
+   */
+  markBuildFailedIfUnchanged?(
+    projectId: string,
+    buildId: string,
+    processingError: string,
+    expectedUpdateTime: string
+  ): Promise<'marked' | 'precondition-failed'>;
 
   createBuild(
     projectId: string,

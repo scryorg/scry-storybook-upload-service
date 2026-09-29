@@ -8,8 +8,45 @@ import type {
   UpdateBuildData,
   Upload,
   CreateUploadData,
+  OrphanBundleCandidate,
 } from './firestore.types.js';
 import { retryFetch } from '../../utils/firestore-retry.js';
+
+/**
+ * True when a Firestore REST error response is specifically a `currentDocument` precondition
+ * mismatch (ledger F92) — the document changed since the `updateTime` the caller sent, not some
+ * other 400/409. Firestore's REST API always shapes an error body as
+ * `{ error: { code, message, status } }`; `status` is the canonical gRPC status name
+ * (FAILED_PRECONDITION for an updateTime mismatch; ABORTED can also carry contention-style
+ * failures under load, treated the same way here since both mean "the write did not apply, and
+ * retrying the same stale fields would not help"). A 400/409 for any other reason (malformed
+ * field path, auth, a genuinely missing document with `currentDocument.exists=false` — not used by
+ * this client) reports a status other than these two and is NOT treated as a precondition failure,
+ * so it still surfaces as a thrown error.
+ */
+export function isPreconditionFailure(status: number, bodyText: string): boolean {
+  if (status !== 400 && status !== 409) return false;
+  try {
+    const parsed = JSON.parse(bodyText);
+    const rpcStatus = parsed?.error?.status;
+    return rpcStatus === 'FAILED_PRECONDITION' || rpcStatus === 'ABORTED';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A collection-group query's results (`findOrphanBundleCandidates`, ledger F91) come back with the
+ * FULL document path, not scoped under a single project like every other query in this file:
+ * `projects/{firestoreProjectId}/databases/(default)/documents/projects/{appProjectId}/builds/{buildId}`.
+ * `null` for a shape this never expects (defensive; a build doc always lives at exactly this depth
+ * under a project).
+ */
+export function parseProjectAndBuildFromDocName(name: string): { projectId: string; buildId: string } | null {
+  const match = name.match(/\/documents\/projects\/([^/]+)\/builds\/([^/]+)$/);
+  if (!match) return null;
+  return { projectId: match[1], buildId: match[2] };
+}
 
 interface FirestoreConfig {
   projectId: string;
@@ -133,6 +170,13 @@ export class FirestoreServiceWorker implements FirestoreService {
       ...(data.ciTimings ? { ciTimings: this.toFirestoreValue(data.ciTimings) } : {}),
       // Where this build's captures came from (capture-sources); absent = legacy Storybook web.
       ...(data.source ? { source: this.toFirestoreValue(data.source) } : {}),
+      // Ledger F91/F80: set only alongside `source` (only the bundle presign route passes one) —
+      // marks a bundle build as awaiting its `/bundle/complete` call. Cleared by `updateBuild`/
+      // `updateProcessingStatus` the instant any processingStatus is written for this build,
+      // whichever writer does it first. The orphan-bundle sweep's sole query filters on this field
+      // (`findOrphanBundleCandidates`) instead of scanning every project's builds looking for one
+      // with `source` set and no `processingStatus` — see that method's doc comment.
+      ...(data.source ? { bundlePending: { booleanValue: true } } : {}),
     };
 
     console.log('[FIRESTORE] createBuild writing build doc', {
@@ -215,6 +259,131 @@ export class FirestoreServiceWorker implements FirestoreService {
       const id = doc.name.split('/').pop()!;
       return this.convertDocToBuild(id, doc.fields);
     });
+  }
+
+  /**
+   * Bundle builds still awaiting their `/bundle/complete` call, created before `cutoff`, for the
+   * orphan-bundle sweep (ledger F80, cost/coverage fix F91).
+   *
+   * ONE `collectionGroup('builds')` query across every project, filtered on `bundlePending == true`
+   * (set only by `createBuild` for a bundle build, cleared by `updateBuild`/`updateProcessingStatus`
+   * the instant any processingStatus is written — see those methods) AND `createdAt < cutoff`,
+   * ordered by `createdAt` ascending so the longest-stuck builds surface first. This replaces the
+   * original `listProjectIds` + per-project `createdAt`-only scan: that shape cost ~(project count) +
+   * up to `maxDocsPerRun` reads every run regardless of orphan rate (re-reading the same resolved
+   * builds indefinitely) and could silently starve later-listed projects once the run-wide cap was
+   * reached. Filtering server-side on `bundlePending` instead means the read cost is bounded by the
+   * number of builds ACTUALLY still pending, not by total build history or project count, and
+   * `listProjectIds` is no longer needed at all.
+   *
+   * Requires one manually-created composite index (collection-group indexes for a multi-field
+   * filter are never automatic): collectionGroup `builds`, queryScope COLLECTION_GROUP, fields
+   * `bundlePending` ASC then `createdAt` ASC — see `docs/ORPHAN_SWEEP_FIRESTORE_INDEX.md`. Without
+   * it this query throws FAILED_PRECONDITION on every run (caught by the sweep's own per-run error
+   * handling, logged, not thrown to the caller — but the sweep does nothing until the index exists).
+   */
+  async findOrphanBundleCandidates(cutoff: Date, limit = 200): Promise<OrphanBundleCandidate[]> {
+    const token = await this.getAccessToken();
+    const structuredQuery = {
+      from: [{ collectionId: 'builds', allDescendants: true }],
+      where: {
+        compositeFilter: {
+          op: 'AND',
+          filters: [
+            {
+              fieldFilter: {
+                field: { fieldPath: 'bundlePending' },
+                op: 'EQUAL',
+                value: { booleanValue: true },
+              },
+            },
+            {
+              fieldFilter: {
+                field: { fieldPath: 'createdAt' },
+                op: 'LESS_THAN',
+                value: { timestampValue: cutoff.toISOString() },
+              },
+            },
+          ],
+        },
+      },
+      orderBy: [{ field: { fieldPath: 'createdAt' }, direction: 'ASCENDING' }],
+      limit,
+    };
+
+    // Empty parent = query rooted at the documents collection (same pattern the removed
+    // `listProjectIds` used) — required for a true collection-group query (`allDescendants: true`)
+    // that is not scoped under any single project.
+    const docs = await this.queryDocuments('', structuredQuery, token);
+    return docs
+      .map((doc) => {
+        const parsed = parseProjectAndBuildFromDocName(String(doc.name));
+        if (!parsed) return null;
+        const fields = doc.fields ?? {};
+        return {
+          buildId: parsed.buildId,
+          projectId: parsed.projectId,
+          versionId: fields.versionId?.stringValue || '',
+          buildNumber: parseInt(fields.buildNumber?.integerValue || '0', 10),
+          createdAt: new Date(fields.createdAt?.timestampValue || new Date().toISOString()),
+          hasSource: fields.source !== undefined,
+          hasProcessingStatus: fields.processingStatus !== undefined,
+        };
+      })
+      .filter((c): c is OrphanBundleCandidate => c !== null);
+  }
+
+  /**
+   * Fresh re-read of one candidate's `processingStatus` presence + Firestore `updateTime`,
+   * immediately before the orphan sweep would mark it failed (ledger F92). The candidate's own
+   * query snapshot (`findOrphanBundleCandidates`, above) can be stale by however long the R2 HEAD
+   * check — and any retries either call made — took, so this must happen right before the write,
+   * never reuse the original query's snapshot. `null` means the document no longer exists (the
+   * build or project was deleted since the query ran); the sweep treats that as "no longer a
+   * candidate", never as an error.
+   */
+  async getBuildOrphanState(
+    projectId: string,
+    buildId: string
+  ): Promise<{ hasProcessingStatus: boolean; updateTime: string } | null> {
+    const token = await this.getAccessToken();
+    const doc = await this.getDocument(`projects/${projectId}/builds/${buildId}`, token);
+    if (!doc) return null;
+    return {
+      hasProcessingStatus: doc.fields?.processingStatus !== undefined,
+      updateTime: doc.updateTime,
+    };
+  }
+
+  /**
+   * Mark a bundle build's upload as never completed (ledger F80), guarded by the document's
+   * `updateTime` at the moment `getBuildOrphanState` read it (ledger F92). Firestore's
+   * `currentDocument.updateTime` precondition makes this atomic with that read: if a genuine,
+   * concurrent `/bundle/complete` call has landed (and so changed `updateTime`) since, Firestore
+   * rejects the whole PATCH with FAILED_PRECONDITION instead of applying it — `patchDocument`
+   * reports that back as `preconditionFailed` rather than throwing, and it is never retried with
+   * the same stale fields (400/409 are outside `retryFetch`'s retryable set).
+   */
+  async markBuildFailedIfUnchanged(
+    projectId: string,
+    buildId: string,
+    processingError: string,
+    expectedUpdateTime: string
+  ): Promise<'marked' | 'precondition-failed'> {
+    const token = await this.getAccessToken();
+    const buildPath = `projects/${projectId}/builds/${buildId}`;
+    const result = await this.patchDocument(
+      buildPath,
+      {
+        processingStatus: { stringValue: 'failed' },
+        processingError: { stringValue: processingError },
+      },
+      token,
+      // Clears bundlePending too — see the matching comment on updateBuild.
+      ['processingStatus', 'processingError', 'bundlePending'],
+      { ifUpdateTime: expectedUpdateTime }
+    );
+    return result.preconditionFailed ? 'precondition-failed' : 'marked';
   }
 
   /**
@@ -383,6 +552,7 @@ export class FirestoreServiceWorker implements FirestoreService {
     if (updates.branch) fields.branch = { stringValue: updates.branch };
     if (updates.ciTimings) fields.ciTimings = this.toFirestoreValue(updates.ciTimings);
     if (updates.validationErrors) fields.validationErrors = this.toFirestoreValue(updates.validationErrors);
+    if (updates.processingError) fields.processingError = { stringValue: updates.processingError };
 
     const maskFieldPaths = Object.keys(fields);
     if (updates.provenanceError !== undefined) {
@@ -392,6 +562,17 @@ export class FirestoreServiceWorker implements FirestoreService {
       if (updates.provenanceError !== null) {
         fields.provenanceError = this.toFirestoreValue(updates.provenanceError);
       }
+    }
+    // Ledger F91: `bundlePending` is set only by createBuild, only for a bundle build (alongside
+    // `source`), and exists solely so the orphan-bundle sweep's collection-group query can find
+    // bundle builds whose upload never completed without scanning every project. ANY write of
+    // processingStatus here — success (`queued`, via /bundle/complete), rejection (`failed` with
+    // validationErrors), or the sweep's own verdict — means that question is now resolved, so it is
+    // cleared in the same PATCH regardless of which caller set processingStatus. Absent on every
+    // legacy/non-bundle build; Firestore's masked-absent-field semantics make this a harmless no-op
+    // for those (D2/F9).
+    if (updates.processingStatus) {
+      maskFieldPaths.push('bundlePending');
     }
 
     await this.patchDocument(buildPath, fields, token, maskFieldPaths);
@@ -441,7 +622,15 @@ export class FirestoreServiceWorker implements FirestoreService {
   ): Promise<void> {
     const token = await this.getAccessToken();
     const buildPath = `projects/${projectId}/builds/${buildId}`;
-    await this.patchDocument(buildPath, { processingStatus: { stringValue: status } }, token);
+    // Ledger F91: this is the route's own success path (`/bundle/complete` sets `queued` here after
+    // validation) — see the matching comment on `updateBuild` above for why `bundlePending` is
+    // cleared alongside processingStatus in every writer, not only there.
+    await this.patchDocument(
+      buildPath,
+      { processingStatus: { stringValue: status } },
+      token,
+      ['processingStatus', 'bundlePending']
+    );
   }
 
   /**
@@ -738,7 +927,22 @@ export class FirestoreServiceWorker implements FirestoreService {
    * ['provenanceError'])` deletes `provenanceError` rather than writing it as `null`
    * (upload-provenance-updatemask D2).
    */
-  private async patchDocument(path: string, fields: any, token: string, maskFieldPaths?: string[]): Promise<void> {
+  /**
+   * `opts.ifUpdateTime` (ledger F92) adds Firestore's own `currentDocument.updateTime` precondition
+   * to the PATCH: the write only applies if the document's `updateTime` still matches what the
+   * caller most recently read. A mismatch means the document changed since — Firestore rejects the
+   * whole PATCH with FAILED_PRECONDITION (never partially applied), which `isPreconditionFailure`
+   * below recognizes so the caller gets `{ preconditionFailed: true }` back instead of a thrown
+   * error. That status is outside `retryFetch`'s retryable set (429/500/503 only), so a precondition
+   * mismatch is never blindly retried with the same stale fields.
+   */
+  private async patchDocument(
+    path: string,
+    fields: any,
+    token: string,
+    maskFieldPaths?: string[],
+    opts?: { ifUpdateTime?: string }
+  ): Promise<{ preconditionFailed: boolean }> {
     const url = `${this.baseUrl}/${path}`;
 
     // Firestore's REST API takes one `updateMask.fieldPaths` query param PER field, not a single
@@ -769,6 +973,9 @@ export class FirestoreServiceWorker implements FirestoreService {
     for (const key of resolvedMaskFields) {
       params.append('updateMask.fieldPaths', quoteFieldPath(key));
     }
+    if (opts?.ifUpdateTime) {
+      params.append('currentDocument.updateTime', opts.ifUpdateTime);
+    }
 
     // Idempotent write: every field here is a fixed value the caller already
     // computed (never a Firestore increment transform), so resending the same
@@ -783,12 +990,23 @@ export class FirestoreServiceWorker implements FirestoreService {
     }), { op: 'patchDocument' });
 
     if (!response.ok) {
+      const errorBody = await response.text().catch(() => '');
+      if (opts?.ifUpdateTime && isPreconditionFailure(response.status, errorBody)) {
+        // Not a failure to surface as an error (F92): the document changed since the caller's read,
+        // which is exactly the condition `ifUpdateTime` exists to catch. The caller decides what a
+        // stale write means for it (the orphan sweep counts this as skipped, never retried).
+        console.warn('[FIRESTORE] patchDocument precondition failed (document changed since read)', {
+          path,
+          status: response.status,
+          fieldPaths: resolvedMaskFields,
+        });
+        return { preconditionFailed: true };
+      }
       // Surface the failure so a rejected multi-field update (e.g. marking a build failed with
       // validationErrors, or recording commitSha+branch provenance) shows up in logs instead of
       // only reaching the caller's best-effort .catch() as a swallowed warning (ledger F73 /
       // upload-provenance-updatemask). Never logs the token or the request body, which may carry
       // validationErrors/coverage content but never secrets.
-      const errorBody = await response.text().catch(() => '');
       console.error('[FIRESTORE] patchDocument failed', {
         path,
         status: response.status,
@@ -798,6 +1016,7 @@ export class FirestoreServiceWorker implements FirestoreService {
       });
       throw new Error(`Failed to patch document: ${response.status} ${response.statusText}`);
     }
+    return { preconditionFailed: false };
   }
 
   private async queryDocuments(parent: string, structuredQuery: any, token: string): Promise<any[]> {
@@ -808,8 +1027,12 @@ export class FirestoreServiceWorker implements FirestoreService {
       parentName,
       structuredQuery,
     });
-    // Use the parent path in the URL for subcollection queries
-    const url = `${this.baseUrl}/${parent}:runQuery`;
+    // Use the parent path in the URL for subcollection queries. An empty parent means a query
+    // rooted at the documents collection itself — a top-level collection query, or a true
+    // collection-group query (`allDescendants: true`, e.g. `findOrphanBundleCandidates`, ledger
+    // F80/F91) that spans every project — the runQuery call then targets the documents root itself,
+    // not `.../documents/:runQuery` (a trailing slash Firestore rejects).
+    const url = parent ? `${this.baseUrl}/${parent}:runQuery` : `${this.baseUrl}:runQuery`;
     // Idempotent read: retried on 429/503/500/network (F85/F86).
     const response = await retryFetch(() => fetch(url, {
       method: 'POST',
@@ -862,6 +1085,7 @@ export class FirestoreServiceWorker implements FirestoreService {
       ...(fields.source ? { source: this.fromFirestoreValue(fields.source) as any } : {}),
       ...(fields.validationErrors ? { validationErrors: this.fromFirestoreValue(fields.validationErrors) as any } : {}),
       ...(fields.provenanceError ? { provenanceError: this.fromFirestoreValue(fields.provenanceError) as any } : {}),
+      ...(fields.processingError?.stringValue ? { processingError: fields.processingError.stringValue } : {}),
     };
   }
 

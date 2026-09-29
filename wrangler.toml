@@ -64,6 +64,23 @@ name = "storybook-deployment-service"
 R2_BUCKET_NAME = "my-storybooks-production"
 SCRY_ENV = "production"
 
+# Orphan-bundle sweep (ledger F80): a bundle build's presigned-url call creates its Firestore
+# document immediately, before any bytes move; if the client's later `/bundle/complete` call never
+# arrives (crash mid-upload, dropped network, abandoned CLI run) nothing else ever revisits that
+# document again. Hourly against a 60-minute age threshold (src/bundle/orphan-sweep.ts) gives
+# worst-case detection within about 2 hours. Ledger F91 (cs-rev-39 security review): originally
+# every 15 minutes, four checks inside one 60-minute threshold window is redundant, and repeating a
+# burst of Firestore queries that often — against a project sitting at low steady-state traffic,
+# straight after any quiet period when Firestore's per-project ramp-up allowance has decayed back
+# down — is exactly the pattern that triggered F86's sustained 429s. Hourly cuts both the read total
+# and the burst frequency, on top of the query itself now being one collection-group read instead of
+# a per-project scan (see `findOrphanBundleCandidates` in firestore.worker.ts).
+# Declared per environment, not once at the top level: per this file's own convention above,
+# bindings and vars are not inherited by named environments here, and a cron silently missing from
+# one environment is exactly the kind of drift that convention exists to avoid.
+[env.production.triggers]
+crons = ["0 * * * *"]
+
 [[env.production.r2_buckets]]
 binding = "STORYBOOK_BUCKET"
 bucket_name = "my-storybooks-production"
@@ -80,6 +97,10 @@ name = "storybook-deployment-service-preview"
 [env.staging.vars]
 R2_BUCKET_NAME = "my-storybooks-staging"
 SCRY_ENV = "staging"
+
+# Orphan-bundle sweep (ledger F80/F91) — see the matching comment under [env.production.triggers].
+[env.staging.triggers]
+crons = ["0 * * * *"]
 
 [[env.staging.r2_buckets]]
 binding = "STORYBOOK_BUCKET"
