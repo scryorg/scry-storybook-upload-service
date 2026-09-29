@@ -1,4 +1,4 @@
-import { log, reqFields } from '../lib/log.js';
+import { log, reqFields, reportError } from '../lib/log.js';
 import { Context, Next } from 'hono';
 import type { ApiKeyService } from '../services/apikey/apikey.service.js';
 import { extractProjectIdFromKey } from '../services/apikey/apikey.utils.js';
@@ -175,7 +175,19 @@ export function apiKeyAuth(options: ApiKeyAuthOptions = {}) {
     const projectId = routeProjectId || keyProjectId;
 
     // Validate the API key
-    const result = await apiKeyService.validateApiKey(projectId, apiKey);
+    // A backend failure (Firestore/token exchange down or slow) is not the caller's fault and not an
+    // unhandled 500: answer 503 + Retry-After, which the CLI's upload retry treats as transient (F145).
+    let result: Awaited<ReturnType<typeof apiKeyService.validateApiKey>>;
+    try {
+      result = await apiKeyService.validateApiKey(projectId, apiKey);
+    } catch (error) {
+      reportError(c as never, error, 'api key validation backend failed', 'apikey_backend_unavailable', { project: projectId });
+      c.header('Retry-After', '2');
+      return c.json(
+        { error: 'Authentication temporarily unavailable', message: 'Could not validate the API key right now; retry shortly' },
+        503
+      );
+    }
 
     if (!result.valid) {
       log.warn('api key rejected', reqFields(c as never, { err_code: 'apikey_invalid', project: projectId }));
