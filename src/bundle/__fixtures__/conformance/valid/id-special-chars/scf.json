@@ -1,0 +1,13 @@
+{
+  "scf": "1.0",
+  "source": { "kind": "storybook", "platform": "web" },
+  "counts": { "declared": 6, "captured": 6 },
+  "captures": [
+    { "id": "Login/Default", "image": "images/a.png" },
+    { "id": "login-default", "image": "images/b.png" },
+    { "id": "pkg.Button#Preview", "image": "images/c.png" },
+    { "id": "pkg.Button-Preview", "image": "images/d.png" },
+    { "id": "com.x.ButtonKt:Preview", "image": "images/e.png" },
+    { "id": "Checkout flow/step 3", "image": "images/f.png" }
+  ]
+}

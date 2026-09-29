@@ -1,0 +1,7 @@
+{
+  "scf": "1.0",
+  "source": { "kind": "storybook", "platform": "web" },
+  "captures": [
+    { "id": "Components/Button--Primary", "image": "images/a.png", "links": { "live": "data:text/html,<script>alert(1)</script>" } }
+  ]
+}

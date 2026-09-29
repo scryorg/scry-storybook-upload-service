@@ -1,9 +1,4 @@
 import type { ScfManifest } from './types.js';
-/** Mirrors Storybook's `toId(kind, name)` closely enough to reproduce the same identity that the
- *  dashboard's suggest feature already derives from `storyTitle` + `testName` when no `storyId`
- *  field is present in metadata.json (the normal case — see search-api-client.ts:208-228). This id
- *  is for capture identity only; the legacy storage key stays `basename(screenshotPath)` (contract §3,
- *  guarantee G1), so byte-identical web rows do not depend on this function. */
 export declare function toStorybookId(title: string, name: string): string;
 /**
  * Converts a legacy sbcov `metadata.json` (+ optional `sbcov-manifest.json`) into an SCF 1.0

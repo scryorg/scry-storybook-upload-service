@@ -1,0 +1,18 @@
+{
+  "scf": "1.0",
+  "source": {
+    "kind": "storybook",
+    "platform": "web"
+  },
+  "captures": [
+    {
+      "id": "Components/Button--Primary",
+      "image": "images/a.png",
+      "structure": {
+        "file": "structure/a.json",
+        "origin": "html-scrape",
+        "format": "scf-tree/1"
+      }
+    }
+  ]
+}

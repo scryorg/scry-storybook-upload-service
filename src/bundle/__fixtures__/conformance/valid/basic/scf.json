@@ -1,0 +1,29 @@
+{
+  "scf": "1.0",
+  "source": { "kind": "storybook", "platform": "web", "tool": { "name": "scry-sbcov", "version": "0.7.0" } },
+  "createdAt": "2026-09-28T00:00:00Z",
+  "counts": { "declared": 2, "captured": 2, "skipped": [] },
+  "captures": [
+    {
+      "id": "Components/Button--Primary",
+      "image": "images/button-primary.png",
+      "kind": "component",
+      "title": ["Components", "Button"],
+      "name": "Primary",
+      "code": { "file": "src/components/Button.stories.tsx", "line": 12 },
+      "capture": { "method": "browser", "viewport": { "width": 1280, "height": 720 }, "scale": 2, "crop": "root" },
+      "links": { "live": "https://view.scrymore.com/acme/main/iframe.html?id=components-button--primary" },
+      "tags": ["button"]
+    },
+    {
+      "id": "Components/Button--Secondary",
+      "image": "images/button-secondary.png",
+      "kind": "component",
+      "title": ["Components", "Button"],
+      "name": "Secondary",
+      "code": { "file": "src/components/Button.stories.tsx", "line": 20 },
+      "capture": { "method": "browser", "viewport": { "width": 1280, "height": 720 }, "scale": 2, "crop": "root" },
+      "links": { "live": "https://view.scrymore.com/acme/main/iframe.html?id=components-button--secondary" }
+    }
+  ]
+}

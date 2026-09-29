@@ -1,0 +1,7 @@
+{
+  "scf": "1.0",
+  "source": { "kind": "storybook", "platform": "web" },
+  "captures": [
+    { "id": "Screens/Wide--Default", "image": "images/huge.png" }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "sbcovVersion": "0.4.2",
+  "declared": 3,
+  "captured": 2,
+  "dropped": [
+    { "storyId": "components-map--default", "reason": "timeout", "detail": "no render after 10s" }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "scf": "1.0",
+  "source": {
+    "kind": "storybook",
+    "platform": "web"
+  },
+  "captures": [
+    {
+      "id": "Components/Button--Primary",
+      "image": "images/a.png",
+      "kind": "widget"
+    }
+  ]
+}

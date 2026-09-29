@@ -1,0 +1,14 @@
+{
+  "scf": "1.0",
+  "source": { "kind": "storybook", "platform": "web", "tool": { "name": "scry-sbcov", "version": "0.7.0" } },
+  "optIn": { "sourceText": true },
+  "counts": { "declared": 1, "captured": 1 },
+  "captures": [
+    {
+      "id": "Components/Button--Primary",
+      "image": "images/button-primary.png",
+      "code": { "file": "src/components/Button.stories.tsx", "line": 12 },
+      "sourceText": { "file": "source/button-primary.src.txt", "path": "src/components/Button.tsx" }
+    }
+  ]
+}

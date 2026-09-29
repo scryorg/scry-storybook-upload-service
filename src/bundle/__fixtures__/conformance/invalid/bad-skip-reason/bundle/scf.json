@@ -1,0 +1,23 @@
+{
+  "scf": "1.0",
+  "source": {
+    "kind": "storybook",
+    "platform": "web"
+  },
+  "captures": [
+    {
+      "id": "Components/Button--Primary",
+      "image": "images/a.png"
+    }
+  ],
+  "counts": {
+    "declared": 2,
+    "captured": 1,
+    "skipped": [
+      {
+        "id": "x",
+        "reason": "flaky"
+      }
+    ]
+  }
+}

@@ -8,9 +8,15 @@ function printHuman(target, result) {
     else {
         console.log(`FAIL  ${target}`);
     }
+    const issueLocation = (i) => {
+        if (i.id)
+            return ` [${i.id}]`;
+        if (i.path)
+            return ` [${i.path}]`;
+        return '';
+    };
     const printIssue = (prefix) => (i) => {
-        const loc = i.id ? ` [${i.id}]` : i.path ? ` [${i.path}]` : '';
-        console.log(`  ${prefix} ${i.code}${loc}: ${i.message}`);
+        console.log(`  ${prefix} ${i.code}${issueLocation(i)}: ${i.message}`);
     };
     result.errors.forEach(printIssue('error'));
     result.warnings.forEach(printIssue('warn '));

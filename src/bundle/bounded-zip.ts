@@ -74,7 +74,7 @@ import { ByteCursor } from './byte-cursor.js';
 import { CRC32_SEED, crc32Final, crc32Update } from './crc32.js';
 import { readCentralDirectory, type CentralDirectoryEntry, type CentralDirectoryIssue } from './central-directory.js';
 import type { StorageObjectRange } from '../services/storage/storage.service.js';
-import { checkSourceTextMember, checkStructureMember, measureImage } from '../vendor/scf/dist/index.js';
+import { checkSourceTextMember, checkStructureMember, measureImageRecord } from '../vendor/scf/dist/index.js';
 import type { BundleFiles } from '../vendor/scf/dist/index.js';
 
 export interface BoundedZipLimits {
@@ -669,14 +669,9 @@ async function processEntry(
  *  unreadable/wrong-format full image. */
 function finalizeImageEntry(entry: CentralDirectoryEntry, entryState: EntryScanState, files: BundleFiles): void {
   const prefixBytes = concatUint8(entryState.headChunks);
-  const measured = measureImage(prefixBytes);
-  files.set(entry.name, {
-    measured: true,
-    family: measured?.family ?? null,
-    width: measured?.width ?? 0,
-    height: measured?.height ?? 0,
-    size: entryState.realBytes,
-  });
+  // Ledger F126 (G7): `measureImageRecord` keeps the detected family when the header is unreadable, so a
+  // truncated header is IMAGE_HEADER_UNREADABLE, the same code+message as the CLI/validator.
+  files.set(entry.name, measureImageRecord(prefixBytes, entryState.realBytes));
 }
 
 /** Ledger F60: run the exact content checks validateBundle would otherwise apply (moved into

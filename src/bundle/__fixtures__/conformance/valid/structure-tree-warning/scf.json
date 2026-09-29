@@ -1,0 +1,14 @@
+{
+  "scf": "1.0",
+  "source": { "kind": "storybook-rn", "platform": "ios", "framework": "react-native" },
+  "counts": { "declared": 1, "captured": 1 },
+  "captures": [
+    {
+      "id": "Screens/Home--Default",
+      "image": "images/screen-home.png",
+      "kind": "screen",
+      "capture": { "method": "simulator", "device": { "name": "iPhone 16", "os": "iOS 26.0" }, "scale": 3 },
+      "structure": { "file": "structure/screen-home.json", "origin": "rn-fiber", "format": "scf-tree/1" }
+    }
+  ]
+}

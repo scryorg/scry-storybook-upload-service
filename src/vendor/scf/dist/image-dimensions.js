@@ -1,15 +1,3 @@
-/**
- * Reads pixel width/height straight from an image's header — never decodes pixels — so the
- * validator can enforce the spec's "at most 16384 px on the longest side" without pulling in an
- * image-decoding dependency (which would also break "zero runtime deps"). A tiny file can still
- * declare an enormous canvas (PNG/JPEG/WebP all compress a large solid-colour image well under the
- * 20 MB byte cap), which is a resource-exhaustion risk for whatever decodes it later (thumbnailing,
- * pixel diff) — see ledger F25.
- *
- * Returns null when the format can't be determined (truncated/corrupt file, or a WebP variant this
- * parser doesn't recognise) rather than guessing; callers should not error on null, only on a
- * confirmed over-limit size.
- */
 function pngDimensions(bytes) {
     // Signature (8) + chunk length (4) + "IHDR" (4) + width (4) + height (4) = 24 bytes minimum.
     if (bytes.length < 24)
@@ -162,5 +150,18 @@ export function measureImage(prefixBytes) {
     if (!dims)
         return null;
     return { family, width: dims.width, height: dims.height };
+}
+/**
+ * Ledger F126 (G7): builds the `{measured: true, ...}` record a streaming caller hands `validateBundle`
+ * from a bounded prefix. Unlike `measureImage` (which collapses "wrong format" and "right format,
+ * header unreadable" into `null`), this KEEPS the detected family when the dimensions cannot be read
+ * (`width`/`height` 0), so `validateBundle` reports IMAGE_HEADER_UNREADABLE for a truncated header,
+ * exactly like the directory/CLI path, instead of IMAGE_FORMAT_INVALID. Use this, not `measureImage`,
+ * in any streaming reader (upload route, build processing).
+ */
+export function measureImageRecord(prefixBytes, size) {
+    const family = detectImageFamily(prefixBytes);
+    const dims = family ? readImageDimensions(prefixBytes, family) : null;
+    return { measured: true, family, width: dims?.width ?? 0, height: dims?.height ?? 0, size };
 }
 //# sourceMappingURL=image-dimensions.js.map

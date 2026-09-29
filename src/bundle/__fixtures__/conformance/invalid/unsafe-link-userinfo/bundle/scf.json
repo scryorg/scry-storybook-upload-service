@@ -1,0 +1,7 @@
+{
+  "scf": "1.0",
+  "source": { "kind": "crawler", "platform": "web" },
+  "captures": [
+    { "id": "/checkout", "image": "images/a.png", "links": { "page": "https://user:pw@evil.example.com/checkout" } }
+  ]
+}
