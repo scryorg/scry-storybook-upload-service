@@ -108,6 +108,17 @@ const VERSION_SHAPE = /^(?:[0-9a-f]{7,40}|\d{1,4}\.\d{1,3}\.\d{1,3}(?:[-+][A-Za-
 const REQUEST_ID = /^(?:[0-9A-HJKMNP-TV-Z]{26}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
 
 const ID_KEYS = new Set(['request_id', 'project', 'run_id', 'build_id']);
+// Identifier shapes recognised BEFORE the PII patterns run (the digit-run, phone and card patterns match inside a uuid).
+// Exactly a canonical uuid (either case), a 26-char Crockford ULID, or a 7-31 char lowercase hex sha. Nothing else.
+// Hex is capped at 31: 32+ hex chars is a token to the scrubber (kept redacted in id fields; `version` alone accepts 7-40).
+const IDENTIFIER_SHAPE = /^(?:[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}|[0-9A-HJKMNP-TV-Z]{26}|[0-9a-f]{7,31})$/;
+const ALL_DIGITS = /^\d+$/;
+// Keys that carry identifiers. A pure-digit value (e.g. a 10-digit phone number, which is also valid "hex") is NOT
+// treated as an identifier and goes through the scrubber as before.
+const SHAPE_ID_KEYS = new Set(['project', 'run_id', 'build_id']);
+function isIdentifier(k: string, val: string): boolean {
+  return SHAPE_ID_KEYS.has(k) && val.length <= 40 && IDENTIFIER_SHAPE.test(val) && !ALL_DIGITS.test(val);
+}
 
 export interface ValidationResult {
   ok: boolean;
@@ -161,6 +172,7 @@ function validateLineUnsafe(line: unknown): ValidationResult {
       continue;
     }
     if (k === 'version' && VERSION_SHAPE.test(val)) continue;
+    if (isIdentifier(k, val)) continue;
     if (ID_KEYS.has(k) && !SAFE_ID.test(val)) errors.push(`${k} has unsafe characters`);
     if (k === 'uid_hash' && !UID_HASH.test(val)) errors.push('uid_hash must be 12 lowercase hex chars');
     if (scrubString(val) !== val) errors.push(`${k} contains a secret-like value`);
@@ -226,6 +238,10 @@ function sanitizeLineUnsafe(input: unknown): LogLine | null {
     }
     // Cap BEFORE any regex work so the cost is bounded by MAX_STRING, whatever the caller passed.
     if (val.length > MAX_STRING) val = val.slice(0, MAX_STRING);
+    if (isIdentifier(k, val)) {
+      out[k] = val;
+      continue;
+    }
     if (ID_KEYS.has(k) && !SAFE_ID.test(val as string)) continue;
     if (k === 'uid_hash' && !UID_HASH.test(val as string)) continue;
     // Redaction can lengthen a string ("?a" -> "[redacted]"), so cap again after scrubbing.

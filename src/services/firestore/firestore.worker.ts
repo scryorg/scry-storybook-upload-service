@@ -1,4 +1,5 @@
 import { log } from '../../lib/log.js';
+import { scrubString } from '../../lib/scry-log/index.js';
 import type { FirestoreService } from './firestore.service.js';
 import type {
   Build,
@@ -60,6 +61,33 @@ interface FirestoreConfig {
  * Cloudflare Worker implementation of FirestoreService using Firestore REST API
  * This implementation uses service account authentication via JWT tokens
  */
+/**
+ * Reduce a Firestore REST error body to what diagnoses a rejected write without carrying data:
+ * Google's `error.status` (e.g. INVALID_ARGUMENT) and the names of the fields it complains about
+ * (`error.details[].fieldViolations[].field`), capped at 200 chars, plus the scrubbed first 500 chars
+ * of the body for Sentry `extra`. Field NAMES only, never values; names are stripped to a safe alphabet.
+ */
+export function describeFirestoreError(errorBody: string): { detail: string; body: string } {
+  const body = scrubString(errorBody.slice(0, 500));
+  let detail = '';
+  try {
+    const parsed = JSON.parse(errorBody) as {
+      error?: { status?: unknown; details?: Array<{ fieldViolations?: Array<{ field?: unknown }> }> };
+    };
+    const status = typeof parsed.error?.status === 'string' ? parsed.error.status.replace(/[^A-Z_]/g, '').slice(0, 40) : '';
+    const fields: string[] = [];
+    for (const d of parsed.error?.details ?? []) {
+      for (const v of d?.fieldViolations ?? []) {
+        if (typeof v?.field === 'string') fields.push(v.field.replace(/[^A-Za-z0-9_.[\]-]/g, '').slice(0, 80));
+      }
+    }
+    detail = [status, fields.filter(Boolean).join(', ')].filter(Boolean).join(': ').slice(0, 200);
+  } catch {
+    // not JSON: no detail, the scrubbed body prefix still goes to Sentry
+  }
+  return { detail, body };
+}
+
 export class FirestoreServiceWorker implements FirestoreService {
   private config: FirestoreConfig;
   private baseUrl: string;
@@ -942,8 +970,18 @@ export class FirestoreServiceWorker implements FirestoreService {
       // only reaching the caller's best-effort .catch() as a swallowed warning (ledger F73 /
       // upload-provenance-updatemask). Never logs the token or the request body, which may carry
       // validationErrors/coverage content but never secrets.
-      log.error('patch failed', { err_code: 'firestore_patch_failed' });
-      throw new Error(`Failed to patch document: ${response.status} ${response.statusText}`);
+      //
+      // log-standardization M2: the 400 body is what named the bad field path in the updateMask
+      // incident, so Google's `error.status` and the field-violation NAMES (never values) go on the
+      // thrown message (which reaches Sentry and `provenanceError`), and the scrubbed body[:500] rides
+      // on the error for Sentry `extra`. The log line keeps a status-bearing code.
+      const { detail, body } = describeFirestoreError(errorBody);
+      log.error('patch failed', { err_code: `firestore_${response.status}`, status: response.status });
+      const failure = new Error(
+        `Failed to patch document: ${response.status} ${response.statusText}${detail ? ` (${detail})` : ''}`
+      ) as Error & { firestoreBody?: string };
+      failure.firestoreBody = body;
+      throw failure;
     }
     return { preconditionFailed: false };
   }

@@ -416,7 +416,7 @@ app.openapi(uploadRoute, async (c) => {
         }
       } catch (formDataError) {
         void formDataError;
-        log.debug('formdata parse failed, trying busboy', reqFields(c, { err_code: 'formdata_parse_failed' }));
+        log.debug('formdata parse failed using busboy', reqFields(c, { err_code: 'formdata_parse_failed' }));
 
         // Fallback to busboy parser for Node.js compatibility
         try {
@@ -697,7 +697,7 @@ app.openapi(coverageUploadRoute, async (c) => {
       } catch (e) {
         // Fallback to busboy parser for Node.js compatibility
         try {
-          log.debug('multipart parse failed, trying busboy', reqFields(c));
+          log.debug('multipart parse failed using busboy', reqFields(c));
           const parsed = await parseMultipartFormData(c.req.raw);
           const file = parsed.files.file || parsed.files.coverage;
 

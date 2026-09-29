@@ -9,9 +9,9 @@
 import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const captured: Array<{ err: unknown; opts?: { tags?: Record<string, string> } }> = [];
+const captured: Array<{ err: unknown; opts?: { tags?: Record<string, string>; extra?: Record<string, unknown> } }> = [];
 vi.mock('@sentry/cloudflare', () => ({
-  captureException: (err: unknown, opts?: { tags?: Record<string, string> }) => {
+  captureException: (err: unknown, opts?: { tags?: Record<string, string>; extra?: Record<string, unknown> }) => {
     captured.push({ err, opts });
   },
   getCurrentScope: () => ({ setTag: () => undefined }),
@@ -255,5 +255,18 @@ describe('guarantee-4 requests succeed when logging is broken', () => {
     const body = await res.json();
     expect(Object.keys(body).sort()).toEqual(Object.keys(beforeBody).sort());
     expect(res.headers.get('x-scry-request-id')).toMatch(ULID);
+  });
+});
+
+describe('M2 Firestore diagnostics reach Sentry', () => {
+  it('reportError puts the scrubbed Firestore body from the error into Sentry extra', async () => {
+    const { reportError } = await import('./lib/log.js');
+    captured.length = 0;
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const err = Object.assign(new Error('Failed to patch document: 400 Bad Request (INVALID_ARGUMENT: updateMask.fieldPaths[0])'), {
+      firestoreBody: '{"error":{"status":"INVALID_ARGUMENT"}}',
+    });
+    reportError(undefined, err, 'could not record provenance', 'provenance_write_failed');
+    expect(captured[0].opts?.extra).toEqual({ firestoreBody: '{"error":{"status":"INVALID_ARGUMENT"}}' });
   });
 });

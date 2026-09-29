@@ -1,7 +1,7 @@
 // In src/entry.worker.ts
 
 import * as Sentry from '@sentry/cloudflare';
-import { scrubBreadcrumb, scrubEvent } from './sentry-scrub.js';
+import { scrubBreadcrumb, scrubEvent, scrubSpan, scrubTransaction } from './sentry-scrub.js';
 import { Hono } from 'hono';
 import { app } from './app';
 import { R2S3StorageService } from './services/storage/storage.worker';
@@ -103,13 +103,13 @@ workerApp.use('*', async (c, next) => {
     if (accessKeyId && accessKeyId.length !== 32) {
       // Usually means the secret was not set via `wrangler secret put` (or a wrangler.toml
       // placeholder overrides it).
-      log.error('r2 access key id has wrong length', reqFieldsOf(c, 'r2_key_bad_length'));
+      log.error('storage access key id has wrong length', reqFieldsOf(c, 'r2_key_bad_length'));
     }
     
     // Log config status (without revealing sensitive values)
 
     if (!accountId || !bucketName || !accessKeyId || !secretAccessKey) {
-      log.error('missing r2 configuration', reqFieldsOf(c, 'r2_config_missing'));
+      log.error('missing storage configuration', reqFieldsOf(c, 'r2_config_missing'));
       throw new Error('Missing required R2 configuration. Ensure R2_ACCOUNT_ID, R2_BUCKET_NAME, R2_S3_ACCESS_KEY_ID, and R2_S3_SECRET_ACCESS_KEY are set.');
     }
     
@@ -204,7 +204,7 @@ const handler: ExportedHandler<Bindings> = {
  */
 async function runOrphanBundleSweep(env: Bindings) {
   if (!env.FIREBASE_PROJECT_ID || !env.FIREBASE_CLIENT_EMAIL || !env.FIREBASE_PRIVATE_KEY) {
-    log.warn('firestore not configured, sweep skipped', { err_code: 'firestore_not_configured' });
+    log.warn('firestore not configured so sweep skipped', { err_code: 'firestore_not_configured' });
     return;
   }
 
@@ -305,6 +305,13 @@ export function sentryOptions(env: Bindings) {
       // Strip credentials last, so nothing added above can slip past it.
       return scrubEvent(event);
     },
+    // Transactions and spans skip beforeSend; without these the customer X-API-Key, IPs and query
+    // strings ride out on every sampled trace (log-standardization B1).
+    beforeSendTransaction(event: Parameters<typeof scrubTransaction>[0]) {
+      if (env.NODE_ENV === 'test') return null;
+      return scrubTransaction(event);
+    },
+    beforeSendSpan: scrubSpan,
   };
 }
 

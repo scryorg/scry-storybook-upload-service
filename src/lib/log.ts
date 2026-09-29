@@ -113,6 +113,10 @@ export function reportError(
   try {
     Sentry.captureException(err, {
       tags: { request_id: fields.request_id ?? 'none', err_code: code },
+      // A scrubbed Firestore error body (firestore.worker patchDocument) rides on the error; beforeSend scrubs `extra`.
+      ...(typeof (err as { firestoreBody?: unknown } | null)?.firestoreBody === 'string'
+        ? { extra: { firestoreBody: (err as { firestoreBody: string }).firestoreBody } }
+        : {}),
     });
   } catch {
     // telemetry must never break the request

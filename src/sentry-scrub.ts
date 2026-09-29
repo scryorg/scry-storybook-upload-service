@@ -39,6 +39,7 @@ export function scrubBreadcrumb<T extends { message?: string; data?: Record<stri
   if (crumb.data) {
     for (const [key, value] of Object.entries(crumb.data)) {
       if (typeof value === 'string') crumb.data[key] = scrubString(value);
+      else if (Array.isArray(value)) crumb.data[key] = value.map((v) => (typeof v === 'string' ? scrubString(v) : v));
     }
   }
   return crumb;
@@ -85,4 +86,123 @@ export function scrubEvent(event: any): any {
   }
 
   return event;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Transactions and spans (log-standardization B1). Sentry runs `beforeSend` on errors only;
+// transaction events go through `beforeSendTransaction` and span JSON through `beforeSendSpan`.
+// Both carry the request (Authorization, X-Api-Key, cookies, client IP) and URL attributes with the
+// query string (`url.query`, `url.full`, a signed preview token), so they get the same treatment.
+// ---------------------------------------------------------------------------------------------
+
+/** Request headers that may stay on a transaction (never a credential or an address). */
+const SAFE_HEADERS = new Set(['content-type', 'content-length', 'accept', 'user-agent', 'host']);
+
+/** Span/trace attribute names that hold a query string, a full URL, a cookie or a client address. */
+const DROP_ATTRIBUTES = new Set([
+  'url.query',
+  'url.fragment',
+  'http.query',
+  'http.fragment',
+  'http.request.body',
+  'client.address',
+  'client.ip',
+  'http.client_ip',
+  'net.peer.ip',
+  'net.sock.peer.addr',
+  'network.peer.address',
+  'user.ip_address',
+  'cf-connecting-ip',
+  'x-forwarded-for',
+  'x-real-ip',
+]);
+
+/** Attribute names holding a URL: keep the path, never the query or fragment. */
+const URL_ATTRIBUTES = new Set(['url.full', 'http.url', 'url', 'request.url', 'http.target', 'url.path']);
+
+function stripQuery(value: string): string {
+  return value.split(/[?#]/)[0];
+}
+
+/** Scrub one attribute bag (span data, trace context data, tags, extra) in place. */
+function scrubAttributes(bag: unknown): void {
+  if (!bag || typeof bag !== 'object') return;
+  const record = bag as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    const lower = key.toLowerCase();
+    if (DROP_ATTRIBUTES.has(lower)) {
+      delete record[key];
+      continue;
+    }
+    if (lower.startsWith('http.request.header.') || lower.startsWith('http.response.header.')) {
+      const header = lower.slice(lower.lastIndexOf('.') + 1);
+      if (!SAFE_HEADERS.has(header)) {
+        delete record[key];
+        continue;
+      }
+    }
+    if (/(^|[._-])(authorization|cookie|api-key|apikey|token|secret|password)([._-]|$)/.test(lower)) {
+      delete record[key];
+      continue;
+    }
+    const value = record[key];
+    if (typeof value === 'string') {
+      record[key] = scrubString(URL_ATTRIBUTES.has(lower) ? stripQuery(value) : value);
+    } else if (Array.isArray(value)) {
+      record[key] = value.map((item) => (typeof item === 'string' ? scrubString(item) : item));
+    }
+  }
+}
+
+/** Drop everything credential-shaped from a request block; keep method, path and safe headers. */
+function scrubRequestBlock(request: unknown): void {
+  if (!request || typeof request !== 'object') return;
+  const r = request as { headers?: Record<string, string>; url?: unknown; [k: string]: unknown };
+  if (r.headers && typeof r.headers === 'object') {
+    for (const name of Object.keys(r.headers)) {
+      if (!SAFE_HEADERS.has(name.toLowerCase())) delete r.headers[name];
+      else if (typeof r.headers[name] === 'string') r.headers[name] = scrubString(r.headers[name]);
+    }
+  }
+  delete r.data;
+  delete r.query_string;
+  delete r.cookies;
+  if (typeof r.url === 'string') r.url = scrubString(stripQuery(r.url));
+}
+
+/**
+ * Strip credentials, query strings and client addresses from a Sentry transaction event before it
+ * leaves the Worker. Takes `any` for the same reason as `scrubEvent`.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- loose on purpose, see scrubEvent
+export function scrubTransaction(event: any): any {
+  scrubRequestBlock(event.request);
+  if (event.user && typeof event.user === 'object') {
+    delete event.user.ip_address;
+    delete event.user.email;
+    delete event.user.username;
+  }
+  if (typeof event.transaction === 'string') event.transaction = scrubString(stripQuery(event.transaction));
+  scrubAttributes(event.contexts?.trace?.data);
+  for (const ctx of Object.values(event.contexts ?? {})) {
+    if (ctx && typeof ctx === 'object' && ctx !== event.contexts.trace) scrubAttributes(ctx);
+  }
+  scrubAttributes(event.tags);
+  scrubAttributes(event.extra);
+  for (const span of event.spans ?? []) scrubSpan(span);
+  for (const crumb of event.breadcrumbs ?? []) scrubBreadcrumb(crumb);
+  // Internal SDK bookkeeping (not serialised into the envelope) holds the raw request; drop it.
+  if (event.sdkProcessingMetadata && typeof event.sdkProcessingMetadata === 'object') {
+    delete event.sdkProcessingMetadata.normalizedRequest;
+    delete event.sdkProcessingMetadata.request;
+  }
+  return event;
+}
+
+/** `beforeSendSpan`: scrub one span's description and attributes. Returns the span. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- loose on purpose, see scrubEvent
+export function scrubSpan<T extends { description?: string; data?: any }>(span: T): T {
+  if (typeof span.description === 'string') span.description = scrubString(stripQuery(span.description));
+  scrubAttributes(span.data);
+  return span;
 }
