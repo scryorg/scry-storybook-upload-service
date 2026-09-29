@@ -232,7 +232,20 @@ describe('ApiKeyServiceWorker', () => {
       expect(mockFetch).toHaveBeenCalledTimes(1);
       const patchCall = mockFetch.mock.calls[0];
       expect(patchCall[0]).toContain('apiKeys/key-123');
+      // F84: one updateMask.fieldPaths per field, never comma-joined
+      expect(patchCall[0]).toContain('updateMask.fieldPaths=status&updateMask.fieldPaths=revokedAt&updateMask.fieldPaths=revokedBy');
+      expect(patchCall[0]).not.toContain(',');
       expect(patchCall[1].method).toBe('PATCH');
+    });
+
+    it('regression-empty-updatemask: patchDocument() with no fields throws instead of sending a mask-less PATCH (F9)', async () => {
+      // No current caller (revokeApiKey, updateLastUsed) ever passes an empty `fields` object, but
+      // patchDocument() is a shared private helper -- an empty updateMask.fieldPaths query is a
+      // Firestore full-document replace, not a no-op, so it must fail closed regardless of caller.
+      await expect(
+        (service as any).patchDocument('projects/my-project/apiKeys/key-123', {}, 'mock-access-token')
+      ).rejects.toThrow(/empty update mask/i);
+      expect(mockFetch).not.toHaveBeenCalled();
     });
   });
 
@@ -264,6 +277,17 @@ describe('ApiKeyServiceWorker', () => {
       // Verify the PATCH request was made with lastUsedAt field
       const patchCall = mockFetch.mock.calls[0];
       expect(patchCall[0]).toContain('lastUsedAt');
+    });
+
+    it('guarantee-2-single-field-unchanged: sends exactly one unquoted updateMask.fieldPaths param, byte-identical to before the fix', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({}) });
+
+      await service.updateLastUsed('my-project', 'key-123');
+
+      const url = mockFetch.mock.calls[0][0] as string;
+      const params = new URL(url).searchParams.getAll('updateMask.fieldPaths');
+      expect(params).toEqual(['lastUsedAt']);
+      expect(url).not.toContain(',');
     });
   });
 });

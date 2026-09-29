@@ -13,6 +13,7 @@ import {
   generateKeyId,
   isValidApiKeyFormat,
 } from './apikey.utils.js';
+import { retryFetch } from '../../utils/firestore-retry.js';
 
 interface ApiKeyWorkerConfig {
   projectId: string;
@@ -281,50 +282,71 @@ export class ApiKeyServiceWorker implements ApiKeyService {
    * Helper methods for Firestore REST API operations
    */
 
+  // Idempotent write: every field here is a fixed value the caller already
+  // computed (never a Firestore increment transform), so resending the same
+  // PATCH on a transient failure is safe. Retried on 429/503/500/network (F85).
   private async setDocument(path: string, fields: any, token: string): Promise<void> {
     const url = `${this.baseUrl}/${path}`;
-    const response = await fetch(url, {
+    const response = await retryFetch(() => fetch(url, {
       method: 'PATCH',
       headers: {
         'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ fields }),
-    });
+    }), { op: 'setDocument' });
 
     if (!response.ok) {
       throw new Error(`Failed to set document: ${response.statusText}`);
     }
   }
 
+  // Idempotent write, same reasoning as setDocument above. Retried on 429/503/500/network (F85).
   private async patchDocument(path: string, fields: any, token: string): Promise<void> {
     const url = `${this.baseUrl}/${path}`;
-    const updateMask = Object.keys(fields).join(',');
-    
-    const response = await fetch(`${url}?updateMask.fieldPaths=${updateMask}`, {
+    const fieldKeys = Object.keys(fields);
+    // F9 (upload-provenance-updatemask security review): a PATCH with NO updateMask.fieldPaths
+    // param at all is a full-document replace per Firestore's REST contract, not a no-op -- fail
+    // closed instead of ever sending that request. Every current caller passes >=1 field.
+    if (fieldKeys.length === 0) {
+      throw new Error(
+        `patchDocument() called with an empty update mask for "${path}" -- refusing to send a ` +
+        'mask-less Firestore PATCH, which Firestore treats as a full-document replace (F9)'
+      );
+    }
+    // One `updateMask.fieldPaths` param per field; a comma-joined value is one invalid path (F73/F84).
+    const params = new URLSearchParams();
+    for (const key of fieldKeys) {
+      params.append('updateMask.fieldPaths', /^[A-Za-z_][A-Za-z0-9_]*$/.test(key) ? key : `\`${key.replace(/`/g, '\\`')}\``);
+    }
+
+    const response = await retryFetch(() => fetch(`${url}?${params.toString()}`, {
       method: 'PATCH',
       headers: {
         'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ fields }),
-    });
+    }), { op: 'patchDocument' });
 
     if (!response.ok) {
       throw new Error(`Failed to patch document: ${response.statusText}`);
     }
   }
 
+  // Idempotent read: retried on 429/503/500/network (F85/F86 — this is the
+  // validateApiKey query that 500'd the whole presign route for 7+ minutes
+  // straight on stage without retrying).
   private async queryDocuments(parent: string, structuredQuery: any, token: string): Promise<any[]> {
     const url = `${this.baseUrl}/${parent}:runQuery`;
-    const response = await fetch(url, {
+    const response = await retryFetch(() => fetch(url, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ structuredQuery }),
-    });
+    }), { op: 'runQuery' });
 
     if (!response.ok) {
       throw new Error(`Failed to query documents: ${response.statusText}`);

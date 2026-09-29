@@ -91,6 +91,70 @@ function logCiTimings(
   }
 }
 
+/**
+ * Best-effort write of commitSha/branch onto the build document, with a visible failure marker
+ * (upload-provenance-updatemask D2, ISSUES.md #61).
+ *
+ * The write itself must never fail an upload that has already succeeded -- a build that indexes
+ * without a SHA reports its freshness as unknown, which beats not indexing. But a best-effort write
+ * that fails 100% of the time (the exact shape of this incident) is indistinguishable from a working
+ * one from every operator-facing signal except a `console.warn` nobody watches. So a rejected write
+ * here also records a small `provenanceError` field on the build document -- the one place a human
+ * or a future healthcheck would already be looking -- via a SEPARATE single-field `updateBuild()`
+ * call, so it has its own chance to succeed even when the commitSha/branch write itself failed.
+ * Cleared (the field removed, never stored as null) the next time a provenance write for this build
+ * succeeds. The marking/clearing calls are themselves best-effort and never throw further.
+ */
+async function recordBuildProvenance(
+  firestore: FirestoreService,
+  project: string,
+  build: { id: string; provenanceError?: unknown },
+  route: 'coverage' | 'metadata',
+  gitContext: { commitSha?: string; branch?: string },
+  context: Record<string, unknown> = {}
+): Promise<void> {
+  const tag = route.toUpperCase();
+  try {
+    await firestore.updateBuild(project, build.id, gitContext);
+    console.log(`[${tag}] Build provenance recorded`, {
+      ...context,
+      buildId: build.id,
+      commitSha: gitContext.commitSha,
+      branch: gitContext.branch,
+    });
+    if (build.provenanceError) {
+      try {
+        await firestore.updateBuild(project, build.id, { provenanceError: null });
+      } catch (clearError) {
+        console.warn(`[${tag}] Could not clear provenanceError marker`, {
+          ...context,
+          buildId: build.id,
+          error: clearError instanceof Error ? clearError.message : String(clearError),
+        });
+      }
+    }
+  } catch (e) {
+    // Never logs a token, header, or the raw response body -- only a short, already-bounded message.
+    const message = (e instanceof Error ? e.message : String(e)).slice(0, 300);
+    console.warn(`[${tag}] Could not record build provenance`, {
+      ...context,
+      buildId: build.id,
+      error: message,
+    });
+    try {
+      await firestore.updateBuild(project, build.id, {
+        provenanceError: { at: new Date().toISOString(), message, route },
+      });
+    } catch (markError) {
+      console.warn(`[${tag}] Could not record provenanceError marker`, {
+        ...context,
+        buildId: build.id,
+        error: markError instanceof Error ? markError.message : String(markError),
+      });
+    }
+  }
+}
+
 const PROJECT_SEGMENT_REGEX = /^[a-zA-Z0-9_-]+$/;
 const VERSION_SEGMENT_REGEX = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
 const FILENAME_SEGMENT_REGEX = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
@@ -739,21 +803,7 @@ app.openapi(coverageUploadRoute, async (c) => {
     // rows simply report their freshness as unknown.
     const gitContext = extractGitContext(coveragePayload);
     if (gitContext.commitSha || gitContext.branch) {
-      try {
-        await firestore.updateBuild(project, build.id, gitContext);
-        console.log('[COVERAGE] Build provenance recorded', {
-          requestId,
-          buildId: build.id,
-          commitSha: gitContext.commitSha,
-          branch: gitContext.branch,
-        });
-      } catch (e) {
-        console.warn('[COVERAGE] Could not record build provenance', {
-          requestId,
-          buildId: build.id,
-          error: e instanceof Error ? e.message : String(e),
-        });
-      }
+      await recordBuildProvenance(firestore, project, build, 'coverage', gitContext, { requestId });
     }
 
     return c.json(
@@ -870,17 +920,10 @@ app.openapi(metadataUploadRoute, async (c) => {
     // writes). Best effort: a build that indexes without a SHA reports its
     // freshness as unknown, which is strictly better than not indexing.
     if (commitSha || branch) {
-      try {
-        await firestore.updateBuild(project, build.id, {
-          ...(commitSha ? { commitSha } : {}),
-          ...(branch ? { branch } : {}),
-        });
-      } catch (e) {
-        console.warn('[METADATA] Could not record build provenance', {
-          buildId: build.id,
-          error: e instanceof Error ? e.message : String(e),
-        });
-      }
+      await recordBuildProvenance(firestore, project, build, 'metadata', {
+        ...(commitSha ? { commitSha } : {}),
+        ...(branch ? { branch } : {}),
+      });
     }
 
     let queued = false;

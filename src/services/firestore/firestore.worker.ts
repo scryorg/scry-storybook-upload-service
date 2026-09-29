@@ -9,6 +9,7 @@ import type {
   Upload,
   CreateUploadData,
 } from './firestore.types.js';
+import { retryFetch } from '../../utils/firestore-retry.js';
 
 interface FirestoreConfig {
   projectId: string;
@@ -379,7 +380,17 @@ export class FirestoreServiceWorker implements FirestoreService {
     if (updates.branch) fields.branch = { stringValue: updates.branch };
     if (updates.ciTimings) fields.ciTimings = this.toFirestoreValue(updates.ciTimings);
 
-    await this.patchDocument(buildPath, fields, token);
+    const maskFieldPaths = Object.keys(fields);
+    if (updates.provenanceError !== undefined) {
+      maskFieldPaths.push('provenanceError');
+      // `null` means "clear it": leave it out of `fields` but keep it in the mask, so Firestore's
+      // documented PATCH semantics remove the field instead of storing a literal null (D2).
+      if (updates.provenanceError !== null) {
+        fields.provenanceError = this.toFirestoreValue(updates.provenanceError);
+      }
+    }
+
+    await this.patchDocument(buildPath, fields, token, maskFieldPaths);
   }
 
   /**
@@ -676,13 +687,14 @@ export class FirestoreServiceWorker implements FirestoreService {
     return value;
   }
 
+  // Idempotent read: retried on 429/503/500/network (F85/F86).
   private async getDocument(path: string, token: string): Promise<any> {
     const url = `${this.baseUrl}/${path}`;
-    const response = await fetch(url, {
+    const response = await retryFetch(() => fetch(url, {
       headers: {
         'Authorization': `Bearer ${token}`,
       }
-    });
+    }), { op: 'getDocument' });
 
     if (response.status === 404) {
       return null;
@@ -695,37 +707,91 @@ export class FirestoreServiceWorker implements FirestoreService {
     return response.json();
   }
 
+  // Idempotent write: every field here is a fixed value the caller already
+  // computed (never a Firestore increment transform — the build/upload
+  // counters are read-then-written as an absolute number), so resending the
+  // same PATCH on a transient failure is safe. Retried on 429/503/500/network (F85).
   private async setDocument(path: string, fields: any, token: string): Promise<void> {
     const url = `${this.baseUrl}/${path}`;
-    const response = await fetch(url, {
+    const response = await retryFetch(() => fetch(url, {
       method: 'PATCH',
       headers: {
         'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ fields })
-    });
+    }), { op: 'setDocument' });
 
     if (!response.ok) {
       throw new Error(`Failed to set document: ${response.statusText}`);
     }
   }
 
-  private async patchDocument(path: string, fields: any, token: string): Promise<void> {
+  /**
+   * `maskFieldPaths` defaults to `Object.keys(fields)` (every existing caller). Pass it explicitly
+   * to clear a field: Firestore's documented PATCH semantics are that a field named in the mask but
+   * absent from the body is removed from the document, so `patchDocument(path, {}, token,
+   * ['provenanceError'])` deletes `provenanceError` rather than writing it as `null`
+   * (upload-provenance-updatemask D2).
+   */
+  private async patchDocument(path: string, fields: any, token: string, maskFieldPaths?: string[]): Promise<void> {
     const url = `${this.baseUrl}/${path}`;
-    const updateMask = Object.keys(fields).join(',');
-    
-    const response = await fetch(`${url}?updateMask.fieldPaths=${updateMask}`, {
+
+    // Firestore's REST API takes one `updateMask.fieldPaths` query param PER field, not a single
+    // comma-joined value (that is parsed as one field path containing a literal comma, which
+    // Firestore rejects with "Invalid property path"). A bare field name (our case: top-level
+    // build-doc fields like `status`, `zipUrl`, `commitSha`) never needs quoting, but a path
+    // segment containing anything other than [A-Za-z0-9_] — or one starting with a digit — must be
+    // wrapped in backticks per Firestore's field-path syntax, so this stays correct if a future
+    // field name ever needs it.
+    const needsBackticks = (segment: string) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(segment);
+    const quoteFieldPath = (fieldPath: string) =>
+      needsBackticks(fieldPath) ? `\`${fieldPath.replace(/`/g, '\\`')}\`` : fieldPath;
+
+    const resolvedMaskFields = maskFieldPaths ?? Object.keys(fields);
+    // F9 (upload-provenance-updatemask security review): a PATCH sent with NO
+    // updateMask.fieldPaths param at all is a full-document replace per Firestore's
+    // documented REST contract, not a no-op -- an empty mask here would silently wipe
+    // every other field on the document. Every current caller always resolves at least
+    // one field; fail closed (throw, never fetch) instead of ever sending that request.
+    if (resolvedMaskFields.length === 0) {
+      throw new Error(
+        `patchDocument() called with an empty update mask for "${path}" -- refusing to send a ` +
+        'mask-less Firestore PATCH, which Firestore treats as a full-document replace (F9)'
+      );
+    }
+
+    const params = new URLSearchParams();
+    for (const key of resolvedMaskFields) {
+      params.append('updateMask.fieldPaths', quoteFieldPath(key));
+    }
+
+    // Idempotent write: every field here is a fixed value the caller already
+    // computed (never a Firestore increment transform), so resending the same
+    // PATCH on a transient failure is safe. Retried on 429/503/500/network (F85).
+    const response = await retryFetch(() => fetch(`${url}?${params.toString()}`, {
       method: 'PATCH',
       headers: {
         'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ fields })
-    });
+    }), { op: 'patchDocument' });
 
     if (!response.ok) {
-      throw new Error(`Failed to patch document: ${response.statusText}`);
+      // Surface the failure so a rejected multi-field update (e.g. recording commitSha+branch
+      // provenance) shows up in logs instead of only reaching the caller's best-effort .catch() as
+      // a swallowed warning (ledger F73 / upload-provenance-updatemask). Never logs the token or the
+      // request body, which may carry coverage content but never secrets.
+      const errorBody = await response.text().catch(() => '');
+      console.error('[FIRESTORE] patchDocument failed', {
+        path,
+        status: response.status,
+        statusText: response.statusText,
+        fieldPaths: resolvedMaskFields,
+        body: errorBody.slice(0, 2000),
+      });
+      throw new Error(`Failed to patch document: ${response.status} ${response.statusText}`);
     }
   }
 
@@ -739,7 +805,8 @@ export class FirestoreServiceWorker implements FirestoreService {
     });
     // Use the parent path in the URL for subcollection queries
     const url = `${this.baseUrl}/${parent}:runQuery`;
-    const response = await fetch(url, {
+    // Idempotent read: retried on 429/503/500/network (F85/F86).
+    const response = await retryFetch(() => fetch(url, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${token}`,
@@ -748,7 +815,7 @@ export class FirestoreServiceWorker implements FirestoreService {
       body: JSON.stringify({
         structuredQuery
       })
-    });
+    }), { op: 'runQuery' });
 
     if (!response.ok) {
       throw new Error(`Failed to query documents: ${response.statusText}`);
@@ -778,9 +845,16 @@ export class FirestoreServiceWorker implements FirestoreService {
       archivedBy: fields.archivedBy?.stringValue,
       coverage: fields.coverage ? (this.fromFirestoreValue(fields.coverage) as any) : undefined,
       processingStatus: fields.processingStatus?.stringValue,
+      // commitSha/branch (P13a) were added to the write side by #25 but never read back here —
+      // every read (getBuild, getBuildByVersion, getProjectBuilds, getLatestBuild) silently dropped
+      // them even once the document had them, independent of the updateMask bug this hotfix fixes
+      // (upload-provenance-updatemask, ISSUES.md #61; sibling found during Stage 3, fixed alongside).
+      ...(fields.commitSha?.stringValue ? { commitSha: fields.commitSha.stringValue } : {}),
+      ...(fields.branch?.stringValue ? { branch: fields.branch.stringValue } : {}),
       ...(fields.uploadedByKeyId?.stringValue ? { uploadedByKeyId: fields.uploadedByKeyId.stringValue } : {}),
       ...(fields.uploadedByKeyProject?.stringValue ? { uploadedByKeyProject: fields.uploadedByKeyProject.stringValue } : {}),
       ...(fields.ciTimings ? { ciTimings: this.fromFirestoreValue(fields.ciTimings) as any } : {}),
+      ...(fields.provenanceError ? { provenanceError: this.fromFirestoreValue(fields.provenanceError) as any } : {}),
     };
   }
 
