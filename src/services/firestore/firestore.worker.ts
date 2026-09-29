@@ -384,7 +384,17 @@ export class FirestoreServiceWorker implements FirestoreService {
     if (updates.ciTimings) fields.ciTimings = this.toFirestoreValue(updates.ciTimings);
     if (updates.validationErrors) fields.validationErrors = this.toFirestoreValue(updates.validationErrors);
 
-    await this.patchDocument(buildPath, fields, token);
+    const maskFieldPaths = Object.keys(fields);
+    if (updates.provenanceError !== undefined) {
+      maskFieldPaths.push('provenanceError');
+      // `null` means "clear it": leave it out of `fields` but keep it in the mask, so Firestore's
+      // documented PATCH semantics remove the field instead of storing a literal null (D2).
+      if (updates.provenanceError !== null) {
+        fields.provenanceError = this.toFirestoreValue(updates.provenanceError);
+      }
+    }
+
+    await this.patchDocument(buildPath, fields, token, maskFieldPaths);
   }
 
   /**
@@ -721,7 +731,14 @@ export class FirestoreServiceWorker implements FirestoreService {
     }
   }
 
-  private async patchDocument(path: string, fields: any, token: string): Promise<void> {
+  /**
+   * `maskFieldPaths` defaults to `Object.keys(fields)` (every existing caller). Pass it explicitly
+   * to clear a field: Firestore's documented PATCH semantics are that a field named in the mask but
+   * absent from the body is removed from the document, so `patchDocument(path, {}, token,
+   * ['provenanceError'])` deletes `provenanceError` rather than writing it as `null`
+   * (upload-provenance-updatemask D2).
+   */
+  private async patchDocument(path: string, fields: any, token: string, maskFieldPaths?: string[]): Promise<void> {
     const url = `${this.baseUrl}/${path}`;
 
     // Firestore's REST API takes one `updateMask.fieldPaths` query param PER field, not a single
@@ -735,13 +752,13 @@ export class FirestoreServiceWorker implements FirestoreService {
     const quoteFieldPath = (fieldPath: string) =>
       needsBackticks(fieldPath) ? `\`${fieldPath.replace(/`/g, '\\`')}\`` : fieldPath;
 
-    const fieldKeys = Object.keys(fields);
+    const resolvedMaskFields = maskFieldPaths ?? Object.keys(fields);
     // F9 (upload-provenance-updatemask security review): a PATCH sent with NO
     // updateMask.fieldPaths param at all is a full-document replace per Firestore's
     // documented REST contract, not a no-op -- an empty mask here would silently wipe
-    // every other field on the document. Every current caller always passes at least
+    // every other field on the document. Every current caller always resolves at least
     // one field; fail closed (throw, never fetch) instead of ever sending that request.
-    if (fieldKeys.length === 0) {
+    if (resolvedMaskFields.length === 0) {
       throw new Error(
         `patchDocument() called with an empty update mask for "${path}" -- refusing to send a ` +
         'mask-less Firestore PATCH, which Firestore treats as a full-document replace (F9)'
@@ -749,7 +766,7 @@ export class FirestoreServiceWorker implements FirestoreService {
     }
 
     const params = new URLSearchParams();
-    for (const key of fieldKeys) {
+    for (const key of resolvedMaskFields) {
       params.append('updateMask.fieldPaths', quoteFieldPath(key));
     }
 
@@ -767,15 +784,16 @@ export class FirestoreServiceWorker implements FirestoreService {
 
     if (!response.ok) {
       // Surface the failure so a rejected multi-field update (e.g. marking a build failed with
-      // validationErrors) shows up in logs instead of only reaching the caller's best-effort
-      // .catch() as a swallowed warning (ledger F73). Never logs the token or the request body,
-      // which may carry validationErrors/coverage content but never secrets.
+      // validationErrors, or recording commitSha+branch provenance) shows up in logs instead of
+      // only reaching the caller's best-effort .catch() as a swallowed warning (ledger F73 /
+      // upload-provenance-updatemask). Never logs the token or the request body, which may carry
+      // validationErrors/coverage content but never secrets.
       const errorBody = await response.text().catch(() => '');
       console.error('[FIRESTORE] patchDocument failed', {
         path,
         status: response.status,
         statusText: response.statusText,
-        fieldPaths: fieldKeys,
+        fieldPaths: resolvedMaskFields,
         body: errorBody.slice(0, 2000),
       });
       throw new Error(`Failed to patch document: ${response.status} ${response.statusText}`);
@@ -832,11 +850,18 @@ export class FirestoreServiceWorker implements FirestoreService {
       archivedBy: fields.archivedBy?.stringValue,
       coverage: fields.coverage ? (this.fromFirestoreValue(fields.coverage) as any) : undefined,
       processingStatus: fields.processingStatus?.stringValue,
+      // commitSha/branch (P13a) were added to the write side by #25 but never read back here —
+      // every read (getBuild, getBuildByVersion, getProjectBuilds, getLatestBuild) silently dropped
+      // them even once the document had them, independent of the updateMask bug this hotfix fixes
+      // (upload-provenance-updatemask, ISSUES.md #61; sibling found during Stage 3, fixed alongside).
+      ...(fields.commitSha?.stringValue ? { commitSha: fields.commitSha.stringValue } : {}),
+      ...(fields.branch?.stringValue ? { branch: fields.branch.stringValue } : {}),
       ...(fields.uploadedByKeyId?.stringValue ? { uploadedByKeyId: fields.uploadedByKeyId.stringValue } : {}),
       ...(fields.uploadedByKeyProject?.stringValue ? { uploadedByKeyProject: fields.uploadedByKeyProject.stringValue } : {}),
       ...(fields.ciTimings ? { ciTimings: this.fromFirestoreValue(fields.ciTimings) as any } : {}),
       ...(fields.source ? { source: this.fromFirestoreValue(fields.source) as any } : {}),
       ...(fields.validationErrors ? { validationErrors: this.fromFirestoreValue(fields.validationErrors) as any } : {}),
+      ...(fields.provenanceError ? { provenanceError: this.fromFirestoreValue(fields.provenanceError) as any } : {}),
     };
   }
 

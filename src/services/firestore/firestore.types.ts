@@ -108,6 +108,24 @@ export interface CoverageExecution {
 }
 
 /**
+ * Records that the best-effort `commitSha`/`branch` provenance write on this
+ * build failed, so a 100%-silent failure mode (upload-provenance-updatemask,
+ * ISSUES.md #61) is visible on the one document a human or a future
+ * healthcheck would already be looking at. `message` is truncated to 300
+ * chars and never carries a token or Authorization header. Cleared (removed
+ * from the document) the next time a provenance write for this build
+ * succeeds.
+ */
+export interface BuildProvenanceError {
+  /** ISO timestamp of the failed write. */
+  at: string;
+  /** Short, secret-free error message (already truncated to <=300 chars). */
+  message: string;
+  /** Which route's provenance write failed. */
+  route: 'coverage' | 'metadata';
+}
+
+/**
  * Represents a build record in Firestore
  */
 export interface Build {
@@ -213,6 +231,12 @@ export interface Build {
    * `processingStatus: 'failed'`; absent otherwise.
    */
   validationErrors?: BuildValidationIssue[];
+
+  /**
+   * Set when the best-effort `commitSha`/`branch` write most recently failed
+   * for this build; absent otherwise (upload-provenance-updatemask).
+   */
+  provenanceError?: BuildProvenanceError;
 }
 
 /**
@@ -345,4 +369,12 @@ export interface UpdateBuildData {
    * `processingStatus: 'failed'` when the bundle is rejected.
    */
   validationErrors?: BuildValidationIssue[];
+
+  /**
+   * Set this to record that the best-effort provenance write failed, or set
+   * it explicitly to `null` to clear a previously-recorded one (the field is
+   * removed from the document, not stored as null) once a later write
+   * succeeds. Omitted entirely: this call does not touch the field either way.
+   */
+  provenanceError?: BuildProvenanceError | null;
 }
