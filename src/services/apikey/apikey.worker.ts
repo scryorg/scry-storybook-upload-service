@@ -14,6 +14,7 @@ import {
   isValidApiKeyFormat,
 } from './apikey.utils.js';
 import { retryFetch } from '../../utils/firestore-retry.js';
+import { exchangeJwtForAccessToken } from '../../utils/google-token.js';
 
 interface ApiKeyWorkerConfig {
   projectId: string;
@@ -397,39 +398,25 @@ export class ApiKeyServiceWorker implements ApiKeyService {
   /**
    * Generate access token using service account credentials
    */
+  private tokenInFlight: Promise<string> | null = null;
+
   private async getAccessToken(): Promise<string> {
     // Check if we have a valid cached token
     if (this.accessToken && Date.now() < this.tokenExpiry) {
       return this.accessToken;
     }
 
-    // Create JWT
-    const jwt = await this.createJWT();
-
-    // Exchange JWT for access token
-    const response = await fetch('https://oauth2.googleapis.com/token', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: new URLSearchParams({
-        grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-        assertion: jwt,
-      }),
+    // One in-flight exchange per isolate: a burst of concurrent requests shares it (F145).
+    this.tokenInFlight ??= (async () => {
+      const jwt = await this.createJWT();
+      const t = await exchangeJwtForAccessToken(jwt);
+      this.accessToken = t.accessToken;
+      this.tokenExpiry = t.expiresAtMs;
+      return t.accessToken;
+    })().finally(() => {
+      this.tokenInFlight = null;
     });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(
-        `Failed to get access token: ${response.status} ${response.statusText} ${errorText}`
-      );
-    }
-
-    const data = await response.json() as { access_token: string; expires_in: number };
-    this.accessToken = data.access_token;
-    this.tokenExpiry = Date.now() + (data.expires_in - 60) * 1000; // Refresh 1 minute before expiry
-
-    return this.accessToken!;
+    return this.tokenInFlight;
   }
 
   /**
