@@ -1,0 +1,8 @@
+{
+  "scf": "1.0",
+  "source": { "kind": "storybook", "platform": "web" },
+  "counts": { "declared": 5, "captured": 5 },
+  "captures": [
+    { "id": "Components/Button--Primary", "image": "images/a.png" }
+  ]
+}

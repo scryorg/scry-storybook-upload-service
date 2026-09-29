@@ -1,0 +1,13 @@
+{
+  "scf": "1.0",
+  "source": { "kind": "upload", "platform": "web" },
+  "x-acme-build": { "pipeline": "nightly", "runId": 4821 },
+  "counts": { "declared": 1, "captured": 1 },
+  "captures": [
+    {
+      "id": "Card--Default",
+      "image": "images/card.png",
+      "x-acme": { "owner": "checkout-team", "jiraTicket": "CHK-104" }
+    }
+  ]
+}

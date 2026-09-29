@@ -1,0 +1,46 @@
+[
+  {
+    "storyId": "components-button--primary",
+    "filepath": "src/components/Button.stories.tsx",
+    "componentFilePath": "src/components/Button.tsx",
+    "componentName": "Button",
+    "testName": "Primary",
+    "storyTitle": "Components/Button",
+    "screenshotPath": "images/button-primary.png",
+    "location": { "startLine": 12, "endLine": 18 },
+    "capture": {
+      "mode": "root",
+      "viewport": { "width": 1280, "height": 720 },
+      "dpr": 2,
+      "target": "data-scry-root",
+      "root_found": true,
+      "sbcov_version": "0.7.0",
+      "imageSize": { "width": 240, "height": 96 }
+    },
+    "commitSha": "4f1c2e9abc",
+    "branch": "main",
+    "repository": "https://github.com/acme/kettle"
+  },
+  {
+    "storyId": "components-button--secondary",
+    "filepath": "src/components/Button.stories.tsx",
+    "componentFilePath": "src/components/Button.tsx",
+    "componentName": "Button",
+    "testName": "Secondary",
+    "storyTitle": "Components/Button",
+    "screenshotPath": "images/button-secondary.png",
+    "location": { "startLine": 20, "endLine": 26 },
+    "capture": {
+      "mode": "root",
+      "viewport": { "width": 1280, "height": 720 },
+      "dpr": 2,
+      "target": "data-scry-root",
+      "root_found": true,
+      "sbcov_version": "0.7.0",
+      "imageSize": { "width": 240, "height": 96 }
+    },
+    "commitSha": "4f1c2e9abc",
+    "branch": "main",
+    "repository": "https://github.com/acme/kettle"
+  }
+]

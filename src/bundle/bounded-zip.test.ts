@@ -108,10 +108,10 @@ describe('readBoundedZip (central-directory-driven)', () => {
     });
   });
 
-  it('measures an image whose real content is too short to be identified or measured as {measured: true, family: null} (ledger F69)', async () => {
+  it('measures an image whose real content is too short to be identified or measured as a measured record that keeps family png with no dimensions (ledger F69/F126)', async () => {
     // `png` here is only the 4-byte PNG magic, no IHDR — measureImage can sniff the family from the
-    // magic bytes but can't read dimensions from a header that short, and (per its own doc comment)
-    // collapses that into the same `null` a totally-unrecognisable prefix would give.
+    // magic bytes but can't read dimensions from a header that short. Ledger F126: the record keeps the
+    // detected family (width/height 0) so validateBundle reports IMAGE_HEADER_UNREADABLE, like the CLI.
     const zip = buildZip([
       { name: 'scf.json', data: Buffer.from('{}') },
       { name: 'images/a.png', data: png },
@@ -119,7 +119,7 @@ describe('readBoundedZip (central-directory-driven)', () => {
     const result = await readFullZip(zip, DEFAULT_BOUNDED_ZIP_LIMITS);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.files.get('images/a.png')).toEqual({ measured: true, family: null, width: 0, height: 0, size: png.length });
+    expect(result.files.get('images/a.png')).toEqual({ measured: true, family: 'png', width: 0, height: 0, size: png.length });
   });
 
   it('rejects a buffer with no end-of-central-directory record', async () => {

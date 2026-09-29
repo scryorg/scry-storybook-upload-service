@@ -8,12 +8,23 @@ const ID_SANITIZE_RE = /[ ,'’()!@#$%^&*+=<>{}[\]|\\;:/?.]+/g;
  *  field is present in metadata.json (the normal case — see search-api-client.ts:208-228). This id
  *  is for capture identity only; the legacy storage key stays `basename(screenshotPath)` (contract §3,
  *  guarantee G1), so byte-identical web rows do not depend on this function. */
+/** Trims leading/trailing `-` without a regex anchored on `$`, which sonarjs flags as
+ *  super-linear: an unanchored quantifier run ending in a literal that never matches the
+ *  string's actual end backtracks once per run position (O(n^2) on adversarial input). */
+function trimDashes(value) {
+    let start = 0;
+    let end = value.length;
+    while (start < end && value[start] === '-')
+        start++;
+    while (end > start && value[end - 1] === '-')
+        end--;
+    return value.slice(start, end);
+}
 export function toStorybookId(title, name) {
-    const sanitize = (value) => value
+    const sanitize = (value) => trimDashes(value
         .toLowerCase()
         .replace(ID_SANITIZE_RE, '-')
-        .replace(/-+/g, '-')
-        .replace(/^-+|-+$/g, '');
+        .replace(/-+/g, '-'));
     const kind = sanitize(title || 'unknown');
     const leaf = name ? sanitize(name) : '';
     return leaf ? `${kind}--${leaf}` : kind;

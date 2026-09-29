@@ -1,0 +1,13 @@
+{
+  "scf": "1.0",
+  "source": {
+    "kind": "selenium",
+    "platform": "web"
+  },
+  "captures": [
+    {
+      "id": "Components/Button--Primary",
+      "image": "images/a.png"
+    }
+  ]
+}

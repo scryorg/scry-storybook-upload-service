@@ -1,0 +1,5 @@
+{
+  "scf": "1.0",
+  "source": { "kind": "crawler", "platform": "web", "tool": { "name": "acme-visual-crawler", "version": "1.2.0" } },
+  "captures": "sidecars"
+}

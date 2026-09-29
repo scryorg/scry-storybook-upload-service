@@ -1,0 +1,12 @@
+{
+  "scf": "1.0",
+  "source": { "kind": "storybook", "platform": "web" },
+  "optIn": { "sourceText": true },
+  "captures": [
+    {
+      "id": "Components/Button--Primary",
+      "image": "images/a.png",
+      "sourceText": { "file": "source/missing.src.txt", "path": "src/components/Button.tsx" }
+    }
+  ]
+}

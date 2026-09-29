@@ -42,6 +42,77 @@ const EXT_FAMILY = { png: 'png', jpg: 'jpeg', jpeg: 'jpeg', webp: 'webp' };
 function issue(code, message, extra) {
     return { code, message, ...extra };
 }
+/** Ledger F125: every enum/const the published schema/scf-1.0.json enforces. The validator MUST
+ *  reject exactly what the schema rejects (G7: schema, CLI and server agree). Keep in lockstep with
+ *  the schema; test/schema-parity.test.ts runs every fixture through both and asserts they agree. */
+const SOURCE_KINDS = new Set([
+    'storybook', 'storybook-rn', 'compose-preview', 'swiftui-preview', 'uikit', 'widgetbook', 'flutter-golden',
+    'playwright', 'cypress', 'maestro', 'xcuitest', 'crawler', 'figma', 'argos', 'percy', 'docs', 'upload',
+]);
+const SOURCE_PLATFORMS = new Set(['web', 'ios', 'android', 'macos', 'windows', 'email', 'other']);
+const CAPTURE_METHODS = new Set([
+    'browser', 'simulator', 'emulator', 'device', 'jvm-render', 'headless-render', 'design-export', 'manual',
+]);
+const CAPTURE_CROPS = new Set(['root', 'viewport', 'fullpage', 'element', 'none']);
+const CAPTURE_KINDS = new Set(['component', 'screen', 'page', 'flow-step', 'region', 'doc-image']);
+const STRUCTURE_ORIGINS = new Set([
+    'dom', 'rn-fiber', 'compose-semantics', 'uiautomator', 'xcui-accessibility', 'flutter-widgets',
+]);
+const SKIP_REASONS = new Set(['error', 'timeout', 'filtered', 'unsupported', 'empty']);
+function enumIssue(field, value, allowed, id) {
+    return issue('ENUM_VALUE_INVALID', `${field} must be one of ${[...allowed].join(', ')}: ${JSON.stringify(value)}`, { id });
+}
+/** Pushes ENUM_VALUE_INVALID when `value` is present (not undefined) and not in `allowed`. `null` is
+ *  present and off-enum, matching JSON Schema. */
+function checkEnum(errors, field, value, allowed, id) {
+    if (value === undefined)
+        return;
+    if (typeof value !== 'string' || !allowed.has(value))
+        errors.push(enumIssue(field, value, allowed, id));
+}
+function checkCaptureBlockEnums(errors, prefix, block, id) {
+    if (block === null || typeof block !== 'object' || Array.isArray(block))
+        return;
+    const b = block;
+    checkEnum(errors, `${prefix}.method`, b.method, CAPTURE_METHODS, id);
+    checkEnum(errors, `${prefix}.crop`, b.crop, CAPTURE_CROPS, id);
+}
+function checkManifestEnums(errors, manifest) {
+    const source = manifest.source;
+    if (source !== null && typeof source === 'object' && !Array.isArray(source)) {
+        const src = source;
+        const kind = src.kind;
+        if (kind !== undefined && (typeof kind !== 'string' || !(SOURCE_KINDS.has(kind) || /^x-./.test(kind)))) {
+            errors.push(issue('ENUM_VALUE_INVALID', `source.kind must be one of ${[...SOURCE_KINDS].join(', ')} or an x-<name> value: ${JSON.stringify(kind)}`));
+        }
+        checkEnum(errors, 'source.platform', src.platform, SOURCE_PLATFORMS);
+    }
+    const defaults = manifest.defaults;
+    if (defaults !== null && typeof defaults === 'object' && !Array.isArray(defaults)) {
+        checkCaptureBlockEnums(errors, 'defaults.capture', defaults.capture);
+    }
+    const skipped = manifest.counts?.skipped;
+    if (Array.isArray(skipped)) {
+        for (const item of skipped) {
+            if (item !== null && typeof item === 'object' && !Array.isArray(item)) {
+                checkEnum(errors, 'counts.skipped[].reason', item.reason, SKIP_REASONS);
+            }
+        }
+    }
+}
+function checkCaptureEnums(errors, capture, id) {
+    if (capture === null || typeof capture !== 'object')
+        return;
+    const c = capture;
+    checkEnum(errors, 'kind', c.kind, CAPTURE_KINDS, id);
+    checkCaptureBlockEnums(errors, 'capture', c.capture, id);
+    const structure = c.structure;
+    if (structure !== null && typeof structure === 'object' && !Array.isArray(structure)) {
+        const st = structure;
+        checkEnum(errors, 'structure.origin', st.origin, STRUCTURE_ORIGINS, id);
+        checkEnum(errors, 'structure.format', st.format, new Set(['scf-tree/1']), id);
+    }
+}
 /** Reads a directory recursively into a BundleFiles map. Node only — never imported by a Worker
  *  build, since callers only reach this path when `input` is a string (a filesystem path). */
 /**
@@ -228,6 +299,11 @@ export function checkSourceTextMember(path, bytes, optedIn) {
  * `input` is either an in-memory bundle (a Map of bundle-relative POSIX path -> bytes — the shape
  * a Worker or the upload service already has after reading a ZIP) or a directory path (Node only).
  */
+// This is the package's single security-sensitive "shared gate" (contract guarantee G7; security-review
+// ledger F18/F24/F25/F27/F50/F60/F69 all depend on its exact error set/order); decomposing it to reach the
+// 15-point cognitive-complexity limit is a genuine behavior-risk rewrite, not an economical fix — tracked
+// as pre-existing debt (F13 Sonar-lint pass) rather than attempted here.
+// eslint-disable-next-line sonarjs/cognitive-complexity -- 187 vs 15; full decomposition deferred, see above
 export async function validateBundle(input) {
     const files = typeof input === 'string' ? await readDir(input) : input;
     const errors = [];
@@ -314,6 +390,7 @@ export async function validateBundle(input) {
     if (typeof manifest.scf !== 'string' || !SUPPORTED_SCF_VERSIONS.has(manifest.scf)) {
         errors.push(issue('SCF_VERSION_UNSUPPORTED', `Unsupported scf version: ${JSON.stringify(manifest.scf)}.`));
     }
+    checkManifestEnums(errors, manifest);
     const rawCaptures = manifest.captures;
     const isSidecarMode = rawCaptures === 'sidecars';
     let captures;
@@ -342,6 +419,7 @@ export async function validateBundle(input) {
     const sourceTextCaptureIds = [];
     for (const capture of captures) {
         const id = typeof capture?.id === 'string' ? capture.id : undefined;
+        checkCaptureEnums(errors, capture, id);
         if (!id || id.length > 512) {
             errors.push(issue('CAPTURE_ID_INVALID', 'Capture id is missing, empty, or over 512 characters.', { id }));
         }
@@ -379,7 +457,15 @@ export async function validateBundle(input) {
                     if (size > MAX_IMAGE_BYTES) {
                         errors.push(issue('IMAGE_TOO_LARGE', `Image is over 20 MB: ${image}`, { id, path: image }));
                     }
-                    if (family && (width > MAX_IMAGE_DIMENSION || height > MAX_IMAGE_DIMENSION)) {
+                    if (family && EXT_FAMILY[ext] === family && (width < 1 || height < 1)) {
+                        // Ledger F126 (G7): family identified but no dimensions recorded (see `measureImageRecord`):
+                        // the same IMAGE_HEADER_UNREADABLE the full-bytes path reports for a truncated header.
+                        errors.push(issue('IMAGE_HEADER_UNREADABLE', `Could not read image dimensions from the header: ${image}`, {
+                            id,
+                            path: image,
+                        }));
+                    }
+                    else if (family && (width > MAX_IMAGE_DIMENSION || height > MAX_IMAGE_DIMENSION)) {
                         errors.push(issue('IMAGE_DIMENSION_TOO_LARGE', `Image is ${width}x${height}px, over the ${MAX_IMAGE_DIMENSION}px limit: ${image}`, { id, path: image }));
                     }
                 }
