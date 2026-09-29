@@ -11,6 +11,8 @@
  * same outcome, so the fix is applied wherever error reporting is enabled.
  */
 
+import { scrubString as sharedScrub } from './lib/scry-log/index.js';
+
 /** Header names whose values must never be sent, compared case-insensitively. */
 const SENSITIVE_HEADERS = ['x-api-key', 'authorization', 'cookie', 'x-cleanup-token'];
 
@@ -25,7 +27,21 @@ const SECRET_PATTERNS: Array<[RegExp, string]> = [
 ];
 
 export function scrubString(value: string): string {
-  return SECRET_PATTERNS.reduce((acc, [pattern, replacement]) => acc.replace(pattern, replacement), value);
+  // Local rules first (they keep the object path of a presigned URL), then the shared scry-log
+  // scrubber (emails, JWT-like strings, provider keys, cookies, ?query=) so no Sentry event carries
+  // what the log lines cannot (log-standardization guarantee-1).
+  return sharedScrub(SECRET_PATTERNS.reduce((acc, [pattern, replacement]) => acc.replace(pattern, replacement), value));
+}
+
+/** Scrub every string in a breadcrumb (message and data) before it is recorded. */
+export function scrubBreadcrumb<T extends { message?: string; data?: Record<string, unknown> }>(crumb: T): T {
+  if (typeof crumb.message === 'string') crumb.message = scrubString(crumb.message);
+  if (crumb.data) {
+    for (const [key, value] of Object.entries(crumb.data)) {
+      if (typeof value === 'string') crumb.data[key] = scrubString(value);
+    }
+  }
+  return crumb;
 }
 
 /**

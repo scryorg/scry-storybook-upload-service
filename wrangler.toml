@@ -110,6 +110,11 @@ preview_bucket_name = "my-storybooks-staging"
 [[env.staging.queues.producers]]
 queue = "scry-build-processing-staging"
 binding = "BUILD_PROCESSING_QUEUE"
+
+# Schema-v1 log lines are shipped to the central R2 store by the scry-logs tail consumer
+# (log-standardization). Staging only; production is added at promotion.
+[[env.staging.tail_consumers]]
+service = "scry-logs-staging"
 # The processing consumer owns retries and DLQ scry-build-processing-staging-dlq.
 
 # Observability and Logging Configuration

@@ -24,7 +24,8 @@ describe('scrubString', () => {
 
   it('redacts project keys and bearer tokens', () => {
     expect(scrubString('key scry_proj_ABC-123_xyz rejected')).toBe('key scry_proj_<redacted> rejected');
-    expect(scrubString('Authorization: Bearer eyJhbGci.J9.sig')).toContain('Bearer <redacted>');
+    // The shared scry-log scrubber now redacts the whole credential line, which is stricter.
+    expect(scrubString('Authorization: Bearer eyJhbGci.J9.sig')).not.toContain('eyJhbGci');
   });
 
   it('leaves ordinary text alone', () => {

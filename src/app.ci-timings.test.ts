@@ -123,6 +123,9 @@ describe('regression-storybook-preview-ci-runtime: CI timings stored with the up
     warnSpy.mockRestore();
   });
 
+  // Schema-v1 lines: one warn line per dropped field.
+  const droppedCount = () =>
+    (logged(warnSpy).match(/"err_code":"ci_timings_field_dropped"/g) ?? []).length;
   const logged = (spy: ReturnType<typeof vi.spyOn>) =>
     spy.mock.calls.map((args: unknown[]) => args.map(String).join(' ')).join('\n');
 
@@ -170,7 +173,7 @@ describe('regression-storybook-preview-ci-runtime: CI timings stored with the up
     const event = (firestore.trackEvent as any).mock.calls[0][1];
     expect(Object.keys(event).filter((k) => k.startsWith('ci'))).toEqual([]);
 
-    expect(logged(logSpy)).toContain('ci_timings_absent=1');
+    expect(logged(logSpy)).toContain('"err_code":"ci_timings_absent"');
   });
 
   it('guarantee-7 absent-not-zero: a partial block stores only the fields sent, never a 0 for the rest', async () => {
@@ -218,7 +221,7 @@ describe('regression-storybook-preview-ci-runtime: CI timings stored with the up
       // everything else survives
       expect(stored.analyzeMs, JSON.stringify(bad)).toBe(PRE_UPLOAD.analyzeMs);
       expect(stored.deployerVersion, JSON.stringify(bad)).toBe('0.8.0');
-      expect(logged(warnSpy), JSON.stringify(bad)).toContain('ci_timings_field_dropped=1');
+      expect(droppedCount(), JSON.stringify(bad)).toBe(1);
     }
   });
 
@@ -230,7 +233,7 @@ describe('regression-storybook-preview-ci-runtime: CI timings stored with the up
     await presign(server, { contentType: 'application/zip', ciTimings: { ...PRE_UPLOAD, ci } });
     const stored = (firestore.createBuild as any).mock.calls[0][1].ciTimings;
     expect(stored.ci).toEqual(ci);
-    expect(logged(warnSpy)).not.toContain('ci_timings_field_dropped');
+    expect(droppedCount()).toBe(0);
   });
 
   it('guarantee-7 structural problems reject the whole record: not stored, counted invalid, build still created', async () => {
@@ -242,7 +245,7 @@ describe('regression-storybook-preview-ci-runtime: CI timings stored with the up
       expect(res.status, JSON.stringify(bad)).toBe(200);
       const data = (firestore.createBuild as any).mock.calls[0][1];
       expect('ciTimings' in data, JSON.stringify(bad)).toBe(false);
-      expect(logged(warnSpy), JSON.stringify(bad)).toContain('ci_timings_invalid=1');
+      expect(logged(warnSpy), JSON.stringify(bad)).toContain('"err_code":"ci_timings_invalid"');
     }
   });
 
@@ -268,7 +271,7 @@ describe('regression-storybook-preview-ci-runtime: CI timings stored with the up
     await presign(server, { contentType: 'application/zip', ciTimings: { ...PRE_UPLOAD, timeLostMs: { timeout: -1, 'Bad Key': 5 } } });
     const stored = (firestore.createBuild as any).mock.calls[0][1].ciTimings;
     expect('timeLostMs' in stored).toBe(false);
-    expect(logged(warnSpy)).toContain('ci_timings_field_dropped=2');
+    expect(droppedCount()).toBe(2);
   });
 
   it('guarantee-7 unknown keys dropped: extra keys are stripped, timeLostMs keeps only short reason keys with sane values', async () => {

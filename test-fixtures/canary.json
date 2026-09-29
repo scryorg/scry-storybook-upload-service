@@ -1,0 +1,24 @@
+{
+  "_note": "Clearly fake values. Every string in `values` must be scrubbed; no `markers` substring may appear in any log output, store object or Sentry event.",
+  "values": {
+    "email": "canary.user+FAKE@example.invalid",
+    "jwt": "eyJhbGciOiJub25lIn0.eyJjYW5hcnkiOiJGQUtFIn0.ZmFrZXNpZ25hdHVyZQ",
+    "sk_key": "sk-canaryFAKE0000000000000000",
+    "google_key": "AIzaCANARYFAKE00000000000000000000",
+    "bearer": "Bearer canaryFAKEtoken0123456789",
+    "cookie": "cookie: session=CANARYSESSIONFAKE; csrf=CANARYCSRFFAKE",
+    "query_url": "https://search.example.invalid/v1/search?query=CANARYQUERYTEXT+red+login+button&limit=5",
+    "query_pair": "query=CANARYQUERYTEXT red-login-button"
+  },
+  "markers": [
+    "canary.user+FAKE",
+    "eyJhbGciOiJub25lIn0",
+    "ZmFrZXNpZ25hdHVyZQ",
+    "sk-canaryFAKE",
+    "AIzaCANARYFAKE",
+    "canaryFAKEtoken",
+    "CANARYSESSIONFAKE",
+    "CANARYCSRFFAKE",
+    "CANARYQUERYTEXT"
+  ]
+}

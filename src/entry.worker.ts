@@ -1,7 +1,7 @@
 // In src/entry.worker.ts
 
 import * as Sentry from '@sentry/cloudflare';
-import { scrubEvent } from './sentry-scrub.js';
+import { scrubBreadcrumb, scrubEvent } from './sentry-scrub.js';
 import { Hono } from 'hono';
 import { app } from './app';
 import { R2S3StorageService } from './services/storage/storage.worker';
@@ -17,6 +17,9 @@ import {
   type OrphanSweepStore,
 } from './bundle/orphan-sweep.js';
 import type { StorageService } from './services/storage/storage.service.js';
+import { mintRequestId } from './lib/request-id.js';
+import { requestIdMiddleware, errorHandler } from './middleware/request-id.js';
+import { configureLog, log, type LogBindings } from './lib/log.js';
 
 /**
  * Defines the specific Cloudflare Bindings expected by this Worker.
@@ -45,6 +48,8 @@ type Bindings = StampBindings & {
   SENTRY_TRACES_SAMPLE_RATE?: string;
   SENTRY_ENVIRONMENT?: string;
   SENTRY_RELEASE?: string;
+  /** '1' turns debug log lines on. */
+  SCRY_LOG_DEBUG?: string;
 
   // Build processing queue
   BUILD_PROCESSING_QUEUE?: Queue;
@@ -56,7 +61,17 @@ type Bindings = StampBindings & {
 };
 
 // Create a new Hono instance specifically for the Worker, extending the shared AppEnv.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function reqFieldsOf(c: any, code: string) {
+  return { request_id: c.get('requestId') as string | undefined, err_code: code };
+}
+
 const workerApp = new Hono<AppEnv & { Bindings: Bindings }>();
+
+// Request id, request line and Sentry capture for everything, including the storage/credential
+// setup below (an error thrown there must still carry x-scry-request-id).
+workerApp.use('*', requestIdMiddleware);
+workerApp.onError(errorHandler);
 
 /**
  * This top-level middleware is executed for every request.
@@ -86,29 +101,15 @@ workerApp.use('*', async (c, next) => {
     
     // R2 access key IDs should be exactly 32 characters
     if (accessKeyId && accessKeyId.length !== 32) {
-      console.error(`[CONFIG ERROR] R2_S3_ACCESS_KEY_ID has length ${accessKeyId.length}, should be 32. ` +
-        `This usually means the secret was not properly set via 'wrangler secret put R2_S3_ACCESS_KEY_ID'. ` +
-        `Check if placeholder values in wrangler.toml are overriding secrets.`);
+      // Usually means the secret was not set via `wrangler secret put` (or a wrangler.toml
+      // placeholder overrides it).
+      log.error('r2 access key id has wrong length', reqFieldsOf(c, 'r2_key_bad_length'));
     }
     
     // Log config status (without revealing sensitive values)
-    console.log('[INFO] R2 Config Status:', {
-      hasAccountId: !!accountId,
-      accountIdLength: accountId?.length,
-      hasAccessKeyId: !!accessKeyId,
-      accessKeyIdLength: accessKeyId?.length,
-      hasSecretAccessKey: !!secretAccessKey,
-      hasBucketName: !!bucketName,
-      hasBucketBinding: !!c.env.STORYBOOK_BUCKET,
-    });
 
     if (!accountId || !bucketName || !accessKeyId || !secretAccessKey) {
-      console.error('[CONFIG ERROR] Missing required R2 configuration for presigned URLs.', {
-        hasAccountId: !!accountId,
-        hasBucketName: !!bucketName,
-        hasAccessKeyId: !!accessKeyId,
-        hasSecretAccessKey: !!secretAccessKey,
-      });
+      log.error('missing r2 configuration', reqFieldsOf(c, 'r2_config_missing'));
       throw new Error('Missing required R2 configuration. Ensure R2_ACCOUNT_ID, R2_BUCKET_NAME, R2_S3_ACCESS_KEY_ID, and R2_S3_SECRET_ACCESS_KEY are set.');
     }
     
@@ -179,7 +180,17 @@ const handler: ExportedHandler<Bindings> = {
   // invocation to time out and nothing queued to retry, just a Firestore document that looks
   // "just created" forever. Only something running on its own schedule can notice that.
   async scheduled(_controller: ScheduledController, env: Bindings): Promise<void> {
-    await runOrphanBundleSweep(env);
+    // One job line per cron run (log-standardization); the id is minted here since no request exists.
+    configureLog(env as LogBindings);
+    const started = Date.now();
+    const jobId = mintRequestId();
+    try {
+      await runOrphanBundleSweep(env);
+      log.request({ msg: 'job', request_id: jobId, route: 'cron:orphan-sweep', status: 200, ms: Date.now() - started });
+    } catch (error) {
+      log.request({ msg: 'job', request_id: jobId, route: 'cron:orphan-sweep', status: 500, ms: Date.now() - started, err_code: 'orphan_sweep_failed' });
+      throw error;
+    }
   },
 };
 
@@ -193,7 +204,7 @@ const handler: ExportedHandler<Bindings> = {
  */
 async function runOrphanBundleSweep(env: Bindings) {
   if (!env.FIREBASE_PROJECT_ID || !env.FIREBASE_CLIENT_EMAIL || !env.FIREBASE_PRIVATE_KEY) {
-    console.warn('[ORPHAN] Firestore not configured; skipping orphan-bundle sweep');
+    log.warn('firestore not configured, sweep skipped', { err_code: 'firestore_not_configured' });
     return;
   }
 
@@ -235,7 +246,7 @@ async function runOrphanBundleSweep(env: Bindings) {
   } catch (error) {
     // A sweep that cannot run is itself a silent failure — report it and rethrow so the platform
     // records the cron invocation as failed (mirrors the sibling stall-detector's same rule).
-    console.error('[ORPHAN] Sweep failed:', error);
+    log.error('orphan sweep failed', { err_code: 'orphan_sweep_failed' });
     Sentry.captureException(error, { tags: { path: 'cron', kind: 'orphan-bundle-sweep' } });
     throw error;
   }
@@ -258,7 +269,7 @@ export function sentryOptions(env: Bindings) {
     // Override with SENTRY_TRACES_SAMPLE_RATE if volume grows.
     tracesSampleRate: env.SENTRY_TRACES_SAMPLE_RATE
       ? Number(env.SENTRY_TRACES_SAMPLE_RATE)
-      : 1.0,
+      : 0.1,
     // SDK debug logging off on every tier: NODE_ENV is unset on the Workers, so
     // the old `NODE_ENV !== 'production'` turned it on in production and stage.
     debug: false,
@@ -280,6 +291,10 @@ export function sentryOptions(env: Bindings) {
         service: 'storybook-upload-service',
         runtime: 'cloudflare-workers',
       },
+    },
+    // Breadcrumbs (fetch URLs, console) are scrubbed as they are recorded, not only at send time.
+    beforeBreadcrumb(breadcrumb: Sentry.Breadcrumb) {
+      return scrubBreadcrumb(breadcrumb);
     },
     // Before sending an event, you can modify or drop it
     beforeSend(event: Sentry.ErrorEvent, _hint: Sentry.EventHint) {
