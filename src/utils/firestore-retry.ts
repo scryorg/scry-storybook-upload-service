@@ -1,3 +1,4 @@
+import { log } from '../lib/log.js';
 /**
  * Retry wrapper for idempotent Firestore REST calls (ledger F85/F86: a burst of
  * native+web builds landed on one stage project within ~30 min and Firestore
@@ -137,14 +138,7 @@ export async function retryFetch(doFetch: () => Promise<Response>, opts: RetryFe
 
     const retryAfterMs = response ? parseRetryAfterMs(safeHeader(response, 'retry-after'), capMs) : null;
     const delayMs = retryAfterMs ?? backoffMs(attempt, baseMs, capMs, random);
-    console.warn('[FIRESTORE] retrying after a transient error', {
-      op: opts.op,
-      attempt: attempt + 1,
-      of: attempts,
-      status,
-      delayMs,
-      error: error instanceof Error ? error.message : error ? String(error) : undefined,
-    });
+    log.warn('firestore retrying after transient error', { err_code: 'firestore_transient' });
     // F11: drain/cancel the body of the response we're about to discard and retry. An unread body
     // left dangling on Cloudflare Workers can count toward the runtime's 6-simultaneous-connection
     // limit and get the whole response cancelled mid-retry -- undermining the retry during exactly

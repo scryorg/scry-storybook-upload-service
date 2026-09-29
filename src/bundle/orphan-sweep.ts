@@ -1,3 +1,4 @@
+import { log } from '../lib/log.js';
 import type { OrphanBundleCandidate } from '../services/firestore/firestore.types.js';
 
 export type { OrphanBundleCandidate };
@@ -152,15 +153,13 @@ export async function sweepOrphanBundleBuilds(
     candidates = await store.findCandidates(cutoff, maxDocsPerRun);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    console.error('[ORPHAN] Could not query orphan-bundle candidates:', message);
+    log.error('could not query orphan candidates', { err_code: 'orphan_query_failed' });
     result.errors.push({ error: message });
     return result;
   }
 
   result.docsScanned = candidates.length;
-  console.log(
-    `[ORPHAN] Scanning ${candidates.length} bundle-pending build(s) created before ${cutoff.toISOString()}`
-  );
+  log.info('orphan sweep scanned');
 
   for (const candidate of candidates) {
     // See the doc comment above — the store's query already enforces this; kept as a guard.
@@ -202,21 +201,15 @@ export async function sweepOrphanBundleBuilds(
       }
 
       result.markedFailed.push({ projectId: candidate.projectId, buildId: candidate.buildId });
-      console.log(
-        `[ORPHAN] ${candidate.projectId}/${candidate.buildId}: marked failed ` +
-          `(${UPLOAD_NEVER_COMPLETED_MESSAGE}, created ${candidate.createdAt.toISOString()})`
-      );
+      log.info('orphan build marked failed', { project: candidate.projectId, build_id: candidate.buildId });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      console.error(`[ORPHAN] Could not resolve ${candidate.projectId}/${candidate.buildId}:`, message);
+      log.error('could not resolve orphan build', { err_code: 'orphan_resolve_failed', project: candidate.projectId, build_id: candidate.buildId });
       result.errors.push({ projectId: candidate.projectId, buildId: candidate.buildId, error: message });
     }
   }
 
-  console.log(
-    `[ORPHAN] Scanned ${result.docsScanned} doc(s): ${result.markedFailed.length} marked failed, ` +
-      `${result.skipped.length} skipped, ${result.errors.length} error(s)`
-  );
+  log.info('orphan sweep complete');
 
   return result;
 }

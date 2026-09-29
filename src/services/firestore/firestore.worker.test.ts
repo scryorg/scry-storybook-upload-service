@@ -510,10 +510,13 @@ describe('FirestoreServiceWorker', () => {
     ).rejects.toThrow('Failed to patch document: 400 Bad Request');
 
     expect(errorSpy).toHaveBeenCalledTimes(1);
-    const [message, meta] = errorSpy.mock.calls[0];
-    expect(message).toContain('patchDocument failed');
-    const logged = JSON.stringify(meta);
-    expect(logged).toContain('Invalid property path');
+    // log-standardization: the line is a schema-v1 one with a fixed error code. The upstream body is
+    // no longer written to the log (it can quote project data); the thrown error above carries the
+    // status, and callers send it to Sentry / the build's provenanceError marker.
+    const line = JSON.parse(String(errorSpy.mock.calls[0][0]));
+    expect(line).toMatchObject({ level: 'error', msg: 'patch failed', err_code: 'firestore_patch_failed' });
+    const logged = JSON.stringify(errorSpy.mock.calls[0]);
+    expect(logged).not.toContain('Invalid property path');
     expect(logged).not.toContain('test-token');
     expect(logged).not.toContain('Bearer');
   });
