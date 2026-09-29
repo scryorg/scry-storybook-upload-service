@@ -105,8 +105,8 @@ beforeEach(() => {
 
 describe('golden line', () => {
   it('a request line validates against schema v1 and carries only allow-listed fields', async () => {
-    const { server } = setup();
-    const res = await server.request('/presigned-url/proj/v1/storybook.zip', JSON_POST({ contentType: 'application/zip' }));
+    const { server } = setup({ keys: true });
+    const res = await server.request('/presigned-url/proj/v1/storybook.zip', JSON_POST({ contentType: 'application/zip' }, { 'X-API-Key': 'scry_proj_proj_secret' }));
     expect(res.status).toBe(200);
     const [line] = requestLines();
     expect(validateLine(line)).toEqual({ ok: true, errors: [] });

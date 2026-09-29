@@ -201,11 +201,10 @@ describe('upload-project-key-scope detection: who uploaded, and every auth outco
       keyProject: 'victim',
       routeProject: 'victim',
       method: 'POST',
-      path: '/upload/victim/v1/metadata',
     });
   });
 
-  it('a warn line on every 403 mismatch, naming both projects', async () => {
+  it('a warn line on every 403 mismatch, naming no unverified project or path', async () => {
     const { server } = setup();
     const warn = console.warn as unknown as ReturnType<typeof vi.fn>;
     const res = await server.request('/presigned-url/victim/v1/storybook.zip', {
@@ -219,9 +218,11 @@ describe('upload-project-key-scope detection: who uploaded, and every auth outco
     expect(JSON.parse(warned[0])).toMatchObject({
       event: 'upload_auth',
       outcome: 'project_mismatch',
-      keyProject: 'attacker',
-      routeProject: 'victim',
     });
+    // F47: neither project is verified on a mismatch, so neither is logged; nor is the raw path.
+    expect(warned[0]).not.toContain('victim');
+    expect(warned[0]).not.toContain('attacker');
+    expect(warned[0]).not.toContain('/presigned-url');
   });
 
   it('the key value never appears in any log line, on success or on mismatch, on any route', async () => {

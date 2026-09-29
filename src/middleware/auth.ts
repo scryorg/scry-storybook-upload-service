@@ -83,11 +83,23 @@ export interface AuthVariables {
  */
 function logAuth(
   level: 'log' | 'warn',
-  fields: { outcome: string; keyId?: string; keyProject: string | null; routeProject?: string; method: string; path: string }
+  fields: { outcome: string; keyId?: string; keyProject?: string | null; routeProject?: string; method: string; path?: string }
 ): void {
   const line = JSON.stringify({ event: 'upload_auth', ...fields });
   if (level === 'warn') console.warn(line);
   else console.log(line);
+}
+
+/**
+ * Record the project for the request line and every later line of this request. Called ONLY once
+ * the API key validated for that project (the key exists under it and is not revoked), never from
+ * the raw path or c.req.param: a client-chosen path segment must not reach the log store
+ * (guarantee G1, UAT F47, same class as the CDN F41).
+ */
+const VERIFIED_PROJECT = /^[A-Za-z0-9_-]{1,128}$/;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function markVerifiedProject(c: Context<any>, projectId: string): void {
+  if (VERIFIED_PROJECT.test(projectId)) c.set('projectId', projectId);
 }
 
 /**
@@ -154,14 +166,9 @@ export function apiKeyAuth(options: ApiKeyAuthOptions = {}) {
 
     // Validate project match if configured
     if (config.validateProjectMatch && routeProjectId && keyProjectId !== routeProjectId) {
-      log.warn('api key project mismatch', reqFields(c as never, { err_code: 'project_mismatch', project: routeProjectId }));
-      logAuth('warn', {
-        outcome: 'project_mismatch',
-        keyProject: keyProjectId,
-        routeProject: routeProjectId,
-        method: c.req.method,
-        path: c.req.path,
-      });
+      // Neither project is verified here (both come from the request), so neither is logged.
+      log.warn('api key project mismatch', reqFields(c as never, { err_code: 'project_mismatch' }));
+      logAuth('warn', { outcome: 'project_mismatch', method: c.req.method });
       return c.json(
         {
           error: 'Project mismatch',
@@ -181,7 +188,7 @@ export function apiKeyAuth(options: ApiKeyAuthOptions = {}) {
     try {
       result = await apiKeyService.validateApiKey(projectId, apiKey);
     } catch (error) {
-      reportError(c as never, error, 'api key validation backend failed', 'apikey_backend_unavailable', { project: projectId });
+      reportError(c as never, error, 'api key validation backend failed', 'apikey_backend_unavailable', {});
       c.header('Retry-After', '2');
       return c.json(
         { error: 'Authentication temporarily unavailable', message: 'Could not validate the API key right now; retry shortly' },
@@ -190,7 +197,7 @@ export function apiKeyAuth(options: ApiKeyAuthOptions = {}) {
     }
 
     if (!result.valid) {
-      log.warn('api key rejected', reqFields(c as never, { err_code: 'apikey_invalid', project: projectId }));
+      log.warn('api key rejected', reqFields(c as never, { err_code: 'apikey_invalid' }));
       return c.json(
         {
           error: 'Invalid API key',
@@ -199,6 +206,9 @@ export function apiKeyAuth(options: ApiKeyAuthOptions = {}) {
         401
       );
     }
+
+    // Authorized: only now may the project reach a log line.
+    markVerifiedProject(c, projectId);
 
     // Set authenticated context
     c.set('authenticatedApiKey', {
@@ -213,15 +223,14 @@ export function apiKeyAuth(options: ApiKeyAuthOptions = {}) {
       outcome: 'ok',
       keyId: result.apiKey!.id,
       keyProject: keyProjectId,
-      routeProject: routeProjectId,
+      routeProject: projectId,
       method: c.req.method,
-      path: c.req.path,
     });
 
     // Update lastUsedAt timestamp (fire-and-forget to avoid latency)
     if (config.trackUsage && result.apiKey) {
       apiKeyService.updateLastUsed(projectId, result.apiKey.id).catch(() => {
-        log.warn('could not update key last used', reqFields(c as never, { err_code: 'apikey_touch_failed', project: projectId }));
+        log.warn('could not update key last used', reqFields(c as never, { err_code: 'apikey_touch_failed' }));
       });
     }
 
