@@ -66,6 +66,10 @@ export function scrubEvent(event: any): any {
   if (request) {
     delete request.data;
     delete request.query_string;
+    // A URL can carry a query (a presigned signature, a token); keep the path, which names the route.
+    const r = request as { url?: unknown; cookies?: unknown };
+    if (typeof r.url === 'string') r.url = r.url.split(/[?#]/)[0];
+    delete r.cookies;
   }
 
   if (typeof event.message === 'string') event.message = scrubString(event.message);

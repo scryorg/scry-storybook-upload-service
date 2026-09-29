@@ -232,7 +232,7 @@ describe('guarantee-1 canary corpus absent', () => {
       message: `${v.email} ${v.bearer} ${v.query_url}`,
       exception: { values: [{ value: `${v.jwt} ${v.sk_key} ${v.google_key}` }] },
       extra: { note: v.cookie, q: v.query_pair },
-      request: { headers: { 'X-API-Key': v.sk_key, cookie: v.cookie }, data: v.email, query_string: v.query_pair },
+      request: { url: `https://svc.example/route?${v.query_pair}&scry_preview=${v.jwt}`, cookies: { s: v.cookie }, headers: { 'X-API-Key': v.sk_key, cookie: v.cookie }, data: v.email, query_string: v.query_pair },
     });
     const crumb = scrubBreadcrumb({ message: v.email, data: { url: v.query_url, auth: v.bearer } });
     expect(hasMarker(JSON.stringify(event))).toEqual([]);

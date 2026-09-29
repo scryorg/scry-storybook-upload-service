@@ -186,9 +186,9 @@ const handler: ExportedHandler<Bindings> = {
     const jobId = mintRequestId();
     try {
       await runOrphanBundleSweep(env);
-      log.request({ msg: 'job', request_id: jobId, route: 'cron:orphan-sweep', status: 200, ms: Date.now() - started });
+      log.request({ msg: 'job', request_id: jobId, route: '/cron/orphan-sweep', status: 200, ms: Date.now() - started });
     } catch (error) {
-      log.request({ msg: 'job', request_id: jobId, route: 'cron:orphan-sweep', status: 500, ms: Date.now() - started, err_code: 'orphan_sweep_failed' });
+      log.request({ msg: 'job', request_id: jobId, route: '/cron/orphan-sweep', status: 500, ms: Date.now() - started, err_code: 'orphan_sweep_failed' });
       throw error;
     }
   },

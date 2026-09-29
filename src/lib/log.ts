@@ -46,14 +46,19 @@ export function configureLog(bindings?: LogBindings): Logger {
   return current;
 }
 
+/** The configured logger, or a default one before the first configureLog(). Never reconfigures. */
+function active(): Logger {
+  return current ?? configureLog();
+}
+
 /** The process logger. Delegates so a later configureLog() takes effect. */
 export const log: Logger = {
-  info: (m, f) => configureLog().info(m, f),
-  warn: (m, f) => configureLog().warn(m, f),
-  error: (m, f) => configureLog().error(m, f),
-  debug: (m, f) => configureLog().debug(m, f),
-  request: (f) => configureLog().request(f),
-  flush: () => configureLog().flush(),
+  info: (m, f) => active().info(m, f),
+  warn: (m, f) => active().warn(m, f),
+  error: (m, f) => active().error(m, f),
+  debug: (m, f) => active().debug(m, f),
+  request: (f) => active().request(f),
+  flush: () => active().flush(),
 };
 
 /** Fields every line for this request should carry. Never throws. */
