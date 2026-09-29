@@ -510,12 +510,89 @@ describe('FirestoreServiceWorker', () => {
     ).rejects.toThrow('Failed to patch document: 400 Bad Request');
 
     expect(errorSpy).toHaveBeenCalledTimes(1);
-    const [message, meta] = errorSpy.mock.calls[0];
-    expect(message).toContain('patchDocument failed');
-    const logged = JSON.stringify(meta);
-    expect(logged).toContain('Invalid property path');
+    // log-standardization: the line is a schema-v1 one with a fixed error code. The upstream body is
+    // no longer written to the log (it can quote project data); the thrown error above carries the
+    // status, and callers send it to Sentry / the build's provenanceError marker.
+    const line = JSON.parse(String(errorSpy.mock.calls[0][0]));
+    expect(line).toMatchObject({ level: 'error', msg: 'patch failed', err_code: 'firestore_400', status: 400 });
+    const logged = JSON.stringify(errorSpy.mock.calls[0]);
+    expect(logged).not.toContain('Invalid property path');
     expect(logged).not.toContain('test-token');
     expect(logged).not.toContain('Bearer');
+  });
+
+  it('a rejected patch names Google status and field NAMES (not values) and keeps the scrubbed body for Sentry (M2)', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const body = JSON.stringify({
+      error: {
+        code: 400,
+        status: 'INVALID_ARGUMENT',
+        message: 'Invalid property path "a,b" for user@example.com',
+        details: [
+          {
+            '@type': 'type.googleapis.com/google.rpc.BadRequest',
+            fieldViolations: [{ field: 'updateMask.fieldPaths[0]', description: 'secret value 4111111111111111' }],
+          },
+        ],
+      },
+    });
+    // @ts-expect-error - test override
+    globalThis.fetch = vi.fn(async () => ({ ok: false, status: 400, statusText: 'Bad Request', text: async () => body })) as unknown as typeof fetch;
+
+    const svc = createSvc();
+    const err = (await svc.updateBuild('my-project', 'build-9', { processingStatus: 'failed' }).catch((e) => e)) as Error & {
+      firestoreBody?: string;
+    };
+    expect(err.message).toBe('Failed to patch document: 400 Bad Request (INVALID_ARGUMENT: updateMask.fieldPaths[0])');
+    expect(err.message).not.toContain('4111');
+    // The body kept for Sentry extra is bounded and scrubbed (no email, no card number).
+    expect(typeof err.firestoreBody).toBe('string');
+    expect(err.firestoreBody!.length).toBeLessThanOrEqual(500);
+    expect(err.firestoreBody).not.toContain('user@example.com');
+    expect(err.firestoreBody).not.toContain('4111111111111111');
+  });
+
+  it('keeps the Sentry body only for 4xx and scrubs secret-shaped field names in the detail (D3)', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const mk = (status: number) =>
+      JSON.stringify({
+        error: {
+          code: status,
+          status: 'INVALID_ARGUMENT',
+          message: 'x'.repeat(200) + ' ' + 'y'.repeat(2000),
+          details: [{ fieldViolations: [{ field: 'fields.branch_sk-live-abc123DEF456ghi789' }] }],
+          hint: 'fields.branch_sk-live-abc123DEF456ghi789',
+        },
+      });
+    // @ts-expect-error - test override
+    globalThis.fetch = vi.fn(async () => ({ ok: false, status: 400, statusText: 'Bad Request', text: async () => mk(400) })) as unknown as typeof fetch;
+    const e400 = (await createSvc().updateBuild('my-project', 'b', { processingStatus: 'failed' }).catch((e) => e)) as Error & {
+      firestoreBody?: string;
+    };
+    expect(e400.message).not.toContain('abc123DEF456ghi789');
+    expect(e400.firestoreBody!.length).toBeLessThanOrEqual(500);
+    expect(e400.firestoreBody).not.toContain('abc123DEF456ghi789');
+    // @ts-expect-error - test override
+    globalThis.fetch = vi.fn(async () => ({ ok: false, status: 403, statusText: 'Forbidden', text: async () => mk(403) })) as unknown as typeof fetch;
+    const e403 = (await createSvc().updateBuild('my-project', 'b', { processingStatus: 'failed' }).catch((e) => e)) as Error & {
+      firestoreBody?: string;
+    };
+    expect(e403.firestoreBody).toBeDefined(); // 4xx keeps it
+    // @ts-expect-error - test override
+    globalThis.fetch = vi.fn(async () => ({ ok: false, status: 500, statusText: 'Server Error', text: async () => mk(500) })) as unknown as typeof fetch;
+    const e500 = (await createSvc().updateBuild('my-project', 'b', { processingStatus: 'failed' }).catch((e) => e)) as Error & {
+      firestoreBody?: string;
+    };
+    expect(e500.firestoreBody).toBeUndefined();
+  });
+
+  it('a non-JSON error body adds no detail and still throws the plain status message (M2)', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    // @ts-expect-error - test override
+    globalThis.fetch = vi.fn(async () => ({ ok: false, status: 400, statusText: 'Bad Request', text: async () => '<html>nope</html>' })) as unknown as typeof fetch;
+    await expect(createSvc().updateBuild('my-project', 'build-9', { processingStatus: 'failed' })).rejects.toThrow(
+      /^Failed to patch document: 400 Bad Request$/
+    );
   });
 
   it('archiveBuild() PATCHes archived status and audit fields', async () => {

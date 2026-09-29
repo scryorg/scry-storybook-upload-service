@@ -1,3 +1,4 @@
+import { log } from '../lib/log.js';
 /**
  * Retry wrapper for idempotent Firestore REST calls (ledger F85/F86: a burst of
  * native+web builds landed on one stage project within ~30 min and Firestore
@@ -42,13 +43,6 @@ export const DEFAULT_CAP_MS = 4_000;
 
 /** Firestore statuses this helper retries. Deliberately narrow: only what F85/F86 saw as transient. */
 const RETRYABLE_STATUSES: ReadonlySet<number> = new Set([429, 500, 503]);
-
-/** A loggable message for a caught value of unknown shape: an Error's `.message`, a truthy
- *  non-Error coerced to a string, or `undefined` for a falsy one (e.g. `undefined`/`null` thrown). */
-function errorMessageForLog(error: unknown): string | undefined {
-  if (error instanceof Error) return error.message;
-  return error ? String(error) : undefined;
-}
 
 /**
  * `status` is `null` only for a thrown/network failure (no response was ever
@@ -119,6 +113,12 @@ function computeRetryDelayMs(
   return retryAfterMs ?? backoffMs(attempt, baseMs, capMs, random);
 }
 
+/** Log fields for one retry: a code plus the status when there is a real one (a network throw has none). */
+function retryLogFields(status: number | null): { err_code: string; status?: number } {
+  if (status === null) return { err_code: 'firestore_transient_network' };
+  return Number.isFinite(status) ? { err_code: 'firestore_transient', status } : { err_code: 'firestore_transient' };
+}
+
 /**
  * Call `doFetch()` and retry the same request on a transient failure. Returns
  * the last `Response` unchanged on a non-retryable status or once attempts are
@@ -155,14 +155,8 @@ export async function retryFetch(doFetch: () => Promise<Response>, opts: RetryFe
     }
 
     const delayMs = computeRetryDelayMs(response, attempt, baseMs, capMs, random);
-    console.warn('[FIRESTORE] retrying after a transient error', {
-      op: opts.op,
-      attempt: attempt + 1,
-      of: attempts,
-      status,
-      delayMs,
-      error: errorMessageForLog(error),
-    });
+    // Status-bearing (log-standardization M2): 429 vs 503 vs a network throw is the whole diagnosis.
+    log.warn('firestore retrying after transient error', retryLogFields(status));
     // F11: drain/cancel the body of the response we're about to discard and retry. An unread body
     // left dangling on Cloudflare Workers can count toward the runtime's 6-simultaneous-connection
     // limit and get the whole response cancelled mid-retry -- undermining the retry during exactly

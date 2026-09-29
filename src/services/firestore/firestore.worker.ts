@@ -1,3 +1,5 @@
+import { log } from '../../lib/log.js';
+import { scrubString } from '../../lib/scry-log/index.js';
 import type { FirestoreService } from './firestore.service.js';
 import type {
   Build,
@@ -107,6 +109,42 @@ interface FirestoreRunQueryResponseItem {
  * Cloudflare Worker implementation of FirestoreService using Firestore REST API
  * This implementation uses service account authentication via JWT tokens
  */
+/**
+ * Reduce a Firestore REST error body to what diagnoses a rejected write without carrying data:
+ * Google's `error.status` (e.g. INVALID_ARGUMENT) and the names of the fields it complains about
+ * (`error.details[].fieldViolations[].field`), capped at 200 chars, plus the scrubbed first 500 chars
+ * of the body for Sentry `extra`. Field NAMES only, never values; names are stripped to a safe alphabet.
+ */
+export function describeFirestoreError(errorBody: string): { detail: string; body: string } {
+  // Whole-string scrub, then per-token (`_` and `.` are word characters that hide `sk-...` from boundary-anchored rules).
+  const body = scrubString(errorBody.slice(0, 500))
+    .replace(/[^\s._"'[\]{},:]+/g, (token) => scrubString(token))
+    .slice(0, 500);
+  let detail = '';
+  try {
+    const parsed = JSON.parse(errorBody) as {
+      error?: { status?: unknown; details?: Array<{ fieldViolations?: Array<{ field?: unknown }> }> };
+    };
+    const status = typeof parsed.error?.status === 'string' ? parsed.error.status.replace(/[^A-Z_]/g, '').slice(0, 40) : '';
+    const fields: string[] = [];
+    for (const d of parsed.error?.details ?? []) {
+      for (const v of d?.fieldViolations ?? []) {
+        if (typeof v?.field === 'string') {
+          // Scrub each path segment on its own: `_` is a word character, so a key such as
+          // `branch_sk-live-abc123...` would otherwise hide the secret from the boundary-anchored rules.
+          const name = v.field.replace(/[^A-Za-z0-9_.[\]-]/g, '').slice(0, 80);
+          fields.push(name.replace(/[^._[\]]+/g, (segment) => scrubString(segment)));
+        }
+      }
+    }
+    // Field names can embed customer strings (nested coverage keys), so the detail is scrubbed too.
+    detail = scrubString([status, fields.filter(Boolean).join(', ')].filter(Boolean).join(': ').slice(0, 200));
+  } catch {
+    // not JSON: no detail, the scrubbed body prefix still goes to Sentry
+  }
+  return { detail, body };
+}
+
 export class FirestoreServiceWorker implements FirestoreService {
   private config: FirestoreConfig;
   private baseUrl: string;
@@ -147,8 +185,8 @@ export class FirestoreServiceWorker implements FirestoreService {
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ fields }),
       });
-    } catch (e) {
-      console.warn('[EVENTS] Could not record event:', name, e);
+    } catch {
+      log.warn('could not record event', { err_code: 'event_record_failed' });
     }
   }
 
@@ -156,19 +194,13 @@ export class FirestoreServiceWorker implements FirestoreService {
     projectId: string,
     data: CreateBuildData
   ): Promise<Build> {
-    console.log('[FIRESTORE] createBuild start', {
-      firestoreProjectId: this.config.projectId,
-      projectId,
-      versionId: data.versionId,
-      zipUrl: data.zipUrl,
-      hasCoverage: Boolean(data.coverage),
-    });
+    log.debug('create build step');
     const token = await this.getAccessToken();
     
     // Get current build number
     const counterPath = `projects/${projectId}/counters/builds`;
     let buildNumber = 1;
-    console.log('[FIRESTORE] createBuild counter path', { counterPath });
+    log.debug('create build step');
     
     try {
       const counterDoc = await this.getDocument(counterPath, token);
@@ -180,10 +212,7 @@ export class FirestoreServiceWorker implements FirestoreService {
     }
 
     // Update counter
-    console.log('[FIRESTORE] createBuild update counter', {
-      counterPath,
-      buildNumber,
-    });
+    log.debug('create build step');
     await this.setDocument(counterPath, {
       currentBuildNumber: { integerValue: buildNumber.toString() }
     }, token);
@@ -192,10 +221,7 @@ export class FirestoreServiceWorker implements FirestoreService {
     const buildId = this.generateId();
     const buildPath = `projects/${projectId}/builds/${buildId}`;
     const now = new Date();
-    console.log('[FIRESTORE] createBuild build path', {
-      buildPath,
-      buildId,
-    });
+    log.debug('create build step');
     
     const buildDoc = {
       projectId: { stringValue: projectId },
@@ -227,17 +253,9 @@ export class FirestoreServiceWorker implements FirestoreService {
       ...(data.source ? { bundlePending: { booleanValue: true } } : {}),
     };
 
-    console.log('[FIRESTORE] createBuild writing build doc', {
-      buildPath,
-      versionId: data.versionId,
-      buildNumber,
-    });
+    log.debug('create build step');
     await this.setDocument(buildPath, buildDoc, token);
-    console.log('[FIRESTORE] createBuild build doc written', {
-      buildPath,
-      buildId,
-      buildNumber,
-    });
+    log.debug('create build step');
 
     return {
       id: buildId,
@@ -453,22 +471,11 @@ export class FirestoreServiceWorker implements FirestoreService {
     projectId: string,
     versionId: string
   ): Promise<Build | null> {
-    console.log('[FIRESTORE] getBuildByVersion start', {
-      firestoreProjectId: this.config.projectId,
-      projectId,
-      versionId,
-    });
+    log.debug('get build by version step');
 
-    console.log('[FIRESTORE] getBuildByVersion requesting access token', {
-      projectId,
-      versionId,
-    });
+    log.debug('get build by version step');
     const token = await this.getAccessToken();
-    console.log('[FIRESTORE] getBuildByVersion access token acquired', {
-      projectId,
-      versionId,
-      hasToken: Boolean(token),
-    });
+    log.debug('get build by version step');
 
     const structuredQuery: FirestoreStructuredQuery = {
       from: [{ collectionId: 'builds' }],
@@ -483,45 +490,20 @@ export class FirestoreServiceWorker implements FirestoreService {
       limit: 50,
     };
 
-    console.log('[FIRESTORE] getBuildByVersion structuredQuery', {
-      projectId,
-      versionId,
-      structuredQuery,
-    });
+    log.debug('get build by version step');
 
     const parentPath = `projects/${projectId}`;
-    console.log('[FIRESTORE] getBuildByVersion running query', {
-      projectId,
-      versionId,
-      parentPath,
-    });
+    log.debug('get build by version step');
     const docs = await this.queryDocuments(parentPath, structuredQuery, token);
-    console.log('[FIRESTORE] getBuildByVersion results', {
-      firestoreProjectId: this.config.projectId,
-      projectId,
-      versionId,
-      count: docs.length,
-      docIds: docs.slice(0, 5).map((doc) => doc.name.split('/').pop()),
-      docVersionIds: docs.slice(0, 5).map((doc) => doc.fields?.versionId?.stringValue),
-    });
+    log.debug('get build by version step');
     if (docs.length === 0) {
       const fallbackQuery = {
         from: [{ collectionId: 'builds' }],
         limit: 5,
       };
-      console.log('[FIRESTORE] getBuildByVersion fallback query (no filter)', {
-        projectId,
-        versionId,
-        fallbackQuery,
-      });
-      const fallbackDocs = await this.queryDocuments(parentPath, fallbackQuery, token);
-      console.log('[FIRESTORE] getBuildByVersion fallback results', {
-        projectId,
-        versionId,
-        count: fallbackDocs.length,
-        docIds: fallbackDocs.map((doc) => doc.name.split('/').pop()),
-        docVersionIds: fallbackDocs.map((doc) => doc.fields?.versionId?.stringValue),
-      });
+      log.debug('get build by version step');
+      await this.queryDocuments(parentPath, fallbackQuery, token);
+      log.debug('get build by version step');
       return null;
     }
 
@@ -530,13 +512,7 @@ export class FirestoreServiceWorker implements FirestoreService {
     for (const doc of docs) {
       const current = this.convertDocToBuild(doc.name.split('/').pop()!, doc.fields);
       const best = this.convertDocToBuild(bestDoc.name.split('/').pop()!, bestDoc.fields);
-      console.log('[FIRESTORE] getBuildByVersion candidate', {
-        currentId: current.id,
-        currentBuildNumber: current.buildNumber,
-        currentVersionId: current.versionId,
-        bestId: best.id,
-        bestBuildNumber: best.buildNumber,
-      });
+      log.debug('get build by version step');
       if ((current.buildNumber ?? 0) > (best.buildNumber ?? 0)) {
         bestDoc = doc;
       }
@@ -728,8 +704,8 @@ export class FirestoreServiceWorker implements FirestoreService {
       if (counterDoc && counterDoc.fields?.currentUploadNumber?.integerValue) {
         uploadNumber = parseInt(counterDoc.fields.currentUploadNumber.integerValue) + 1;
       }
-    } catch (error) {
-      console.error(`Failed to read upload counter for project ${projectId}:`, error);
+    } catch {
+      log.warn('could not read upload counter', { err_code: 'upload_counter_read_failed' });
     }
 
     // Update counter
@@ -777,8 +753,8 @@ export class FirestoreServiceWorker implements FirestoreService {
       const doc = await this.getDocument(uploadPath, token);
       if (!doc) return null;
       return this.convertDocToUpload(uploadId, doc.fields);
-    } catch (error) {
-      console.error(`Failed to get upload ${uploadId} for project ${projectId}:`, error);
+    } catch {
+      log.warn('could not get upload', { err_code: 'upload_get_failed' });
       return null;
     }
   }
@@ -1045,11 +1021,7 @@ export class FirestoreServiceWorker implements FirestoreService {
         // Not a failure to surface as an error (F92): the document changed since the caller's read,
         // which is exactly the condition `ifUpdateTime` exists to catch. The caller decides what a
         // stale write means for it (the orphan sweep counts this as skipped, never retried).
-        console.warn('[FIRESTORE] patchDocument precondition failed (document changed since read)', {
-          path,
-          status: response.status,
-          fieldPaths: resolvedMaskFields,
-        });
+        log.warn('patch precondition failed', { err_code: 'firestore_precondition_failed' });
         return { preconditionFailed: true };
       }
       // Surface the failure so a rejected multi-field update (e.g. marking a build failed with
@@ -1057,26 +1029,26 @@ export class FirestoreServiceWorker implements FirestoreService {
       // only reaching the caller's best-effort .catch() as a swallowed warning (ledger F73 /
       // upload-provenance-updatemask). Never logs the token or the request body, which may carry
       // validationErrors/coverage content but never secrets.
-      console.error('[FIRESTORE] patchDocument failed', {
-        path,
-        status: response.status,
-        statusText: response.statusText,
-        fieldPaths: resolvedMaskFields,
-        body: errorBody.slice(0, 2000),
-      });
-      throw new Error(`Failed to patch document: ${response.status} ${response.statusText}`);
+      //
+      // log-standardization M2: the 400 body is what named the bad field path in the updateMask
+      // incident, so Google's `error.status` and the field-violation NAMES (never values) go on the
+      // thrown message (which reaches Sentry and `provenanceError`), and the scrubbed body[:500] rides
+      // on the error for Sentry `extra`. The log line keeps a status-bearing code.
+      const { detail, body } = describeFirestoreError(errorBody);
+      log.error('patch failed', { err_code: `firestore_${response.status}`, status: response.status });
+      const detailSuffix = detail ? ` (${detail})` : '';
+      const failure = new Error(
+        `Failed to patch document: ${response.status} ${response.statusText}${detailSuffix}`
+      ) as Error & { firestoreBody?: string };
+      // Only a 4xx body (a rejected request: bad field path) is worth sending to Sentry; a 5xx body is upstream noise.
+      if (response.status >= 400 && response.status < 500) failure.firestoreBody = body;
+      throw failure;
     }
     return { preconditionFailed: false };
   }
 
   private async queryDocuments(parent: string, structuredQuery: FirestoreStructuredQuery, token: string): Promise<FirestoreDocument[]> {
-    const parentName = `projects/${this.config.projectId}/databases/(default)/documents/${parent}`;
-    console.log('[FIRESTORE] queryDocuments start', {
-      firestoreProjectId: this.config.projectId,
-      parent,
-      parentName,
-      structuredQuery,
-    });
+    log.debug('query documents step');
     // Use the parent path in the URL for subcollection queries. An empty parent means a query
     // rooted at the documents collection itself — a top-level collection query, or a true
     // collection-group query (`allDescendants: true`, e.g. `findOrphanBundleCandidates`, ledger
@@ -1100,12 +1072,7 @@ export class FirestoreServiceWorker implements FirestoreService {
     }
 
     const results = await response.json() as FirestoreRunQueryResponseItem[];
-    console.log('[FIRESTORE] queryDocuments results', {
-      firestoreProjectId: this.config.projectId,
-      parent,
-      parentName,
-      count: results.filter((r) => r.document).length,
-    });
+    log.debug('query documents step');
     return results.flatMap((r) => (r.document ? [r.document] : []));
   }
 
@@ -1143,17 +1110,10 @@ export class FirestoreServiceWorker implements FirestoreService {
    * Generate access token using service account credentials
    */
   private async getAccessToken(): Promise<string> {
-    console.log('[FIRESTORE] getAccessToken start', {
-      hasCachedToken: Boolean(this.accessToken),
-      tokenExpiry: this.tokenExpiry,
-      now: Date.now(),
-    });
+    log.debug('access token step');
     // Check if we have a valid cached token
     if (this.accessToken && Date.now() < this.tokenExpiry) {
-      console.log('[FIRESTORE] getAccessToken using cached token', {
-        tokenExpiry: this.tokenExpiry,
-        now: Date.now(),
-      });
+      log.debug('access token step');
       return this.accessToken;
     }
 
@@ -1180,9 +1140,7 @@ export class FirestoreServiceWorker implements FirestoreService {
     }
 
     const data = await response.json() as { access_token: string; expires_in: number };
-    console.log('[FIRESTORE] getAccessToken fetched new token', {
-      expiresIn: data.expires_in,
-    });
+    log.debug('access token step');
     this.accessToken = data.access_token;
     this.tokenExpiry = Date.now() + (data.expires_in - 60) * 1000; // Refresh 1 minute before expiry
 

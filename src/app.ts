@@ -1,12 +1,14 @@
 // In src/app.ts
 
+import type { Context } from 'hono';
 import { deployStamp, type StampBindings } from './deploy-stamp.js';
 import { currentTraceContext } from './trace-context.js';
 import { OpenAPIHono } from '@hono/zod-openapi';
 import { createRoute } from '@hono/zod-openapi';
 import { z } from 'zod';
 import { swaggerUI } from '@hono/swagger-ui';
-import { logger } from 'hono/logger';
+import { requestIdMiddleware, errorHandler } from './middleware/request-id.js';
+import { log, logWarn, reportError, reqFields } from './lib/log.js';
 import type { StorageService, StorageObjectMeta } from './services/storage/storage.service.js';
 import type { FirestoreService } from './services/firestore/firestore.service.js';
 import type {
@@ -39,8 +41,12 @@ export type AppEnv = {
 
 const app = new OpenAPIHono<AppEnv>();
 
-// Add request logging middleware
-app.use('*', logger());
+// Request id + one structured request line per request (log-standardization). Mounted first so
+// every response, including auth failures, carries x-scry-request-id.
+app.use('*', requestIdMiddleware);
+
+// Unhandled errors reach Sentry with the request id and answer in the service's usual error shape.
+app.onError(errorHandler);
 
 // Add API key authentication middleware to protected routes
 // This middleware validates the X-API-Key header against Firestore-stored keys.
@@ -75,22 +81,20 @@ function uploadedBy(key: AuthVariables['authenticatedApiKey']): Pick<CreateBuild
 function logCiTimings(
   route: string,
   ids: { project: string; version: string; buildNumber?: number },
-  parsed: CiTimingsParse
+  parsed: CiTimingsParse,
+  c?: Context<AppEnv>
 ): void {
-  const where = `route=${route} project=${ids.project} version=${ids.version} build=${ids.buildNumber ?? 'none'}`;
+  const fields = reqFields(c, { route: `/${route}`, project: ids.project });
   if (parsed.status === 'ok') {
-    console.log(`[INFO] ci_timings ${where} ci_timings=stored fields=${Object.keys(parsed.ciTimings).join(',')}`);
-    if (parsed.dropped.length > 0) {
-      console.warn(
-        `[WARN] ci_timings ${where} ci_timings_field_dropped=${parsed.dropped.length} out of bounds, not stored; rest stored: ${parsed.dropped.join(', ')}`
-      );
+    log.info('ci timings stored', fields);
+    // One line per dropped field, so the count of lines is the ci_timings_field_dropped counter.
+    for (let i = 0; i < parsed.dropped.length; i++) {
+      log.warn('ci timings field dropped', { ...fields, err_code: 'ci_timings_field_dropped' });
     }
   } else if (parsed.status === 'absent') {
-    console.log(`[INFO] ci_timings ${where} ci_timings=absent ci_timings_absent=1`);
+    log.info('ci timings absent', { ...fields, err_code: 'ci_timings_absent' });
   } else {
-    console.warn(
-      `[WARN] ci_timings ${where} ci_timings=invalid ci_timings_invalid=1 not stored; build unaffected: ${parsed.issues.join('; ')}`
-    );
+    log.warn('ci timings invalid', { ...fields, err_code: 'ci_timings_invalid' });
   }
 }
 
@@ -114,46 +118,30 @@ async function recordBuildProvenance(
   build: { id: string; provenanceError?: unknown },
   route: 'coverage' | 'metadata',
   gitContext: { commitSha?: string; branch?: string },
-  context: Record<string, unknown> = {}
+  c?: Context<AppEnv>
 ): Promise<void> {
-  const tag = route.toUpperCase();
+  const fields = reqFields(c, { route: `/${route}`, project, build_id: build.id });
   try {
     await firestore.updateBuild(project, build.id, gitContext);
-    console.log(`[${tag}] Build provenance recorded`, {
-      ...context,
-      buildId: build.id,
-      commitSha: gitContext.commitSha,
-      branch: gitContext.branch,
-    });
+    log.info('build provenance recorded', fields);
     if (build.provenanceError) {
       try {
         await firestore.updateBuild(project, build.id, { provenanceError: null });
-      } catch (clearError) {
-        console.warn(`[${tag}] Could not clear provenanceError marker`, {
-          ...context,
-          buildId: build.id,
-          error: clearError instanceof Error ? clearError.message : String(clearError),
-        });
+      } catch {
+        log.warn('could not clear provenance marker', { ...fields, err_code: 'provenance_clear_failed' });
       }
     }
   } catch (e) {
-    // Never logs a token, header, or the raw response body -- only a short, already-bounded message.
+    // Only a short, already-bounded message goes on the build document (never a token, header or
+    // raw response body); the log line carries a fixed code and the exception goes to Sentry.
     const message = (e instanceof Error ? e.message : String(e)).slice(0, 300);
-    console.warn(`[${tag}] Could not record build provenance`, {
-      ...context,
-      buildId: build.id,
-      error: message,
-    });
+    reportError(c, e, 'could not record provenance', 'provenance_write_failed', fields);
     try {
       await firestore.updateBuild(project, build.id, {
         provenanceError: { at: new Date().toISOString(), message, route },
       });
-    } catch (markError) {
-      console.warn(`[${tag}] Could not record provenanceError marker`, {
-        ...context,
-        buildId: build.id,
-        error: markError instanceof Error ? markError.message : String(markError),
-      });
+    } catch {
+      log.warn('could not record provenance marker', { ...fields, err_code: 'provenance_marker_failed' });
     }
   }
 }
@@ -368,7 +356,7 @@ app.openapi(uploadRoute, async (c) => {
     const storage = c.var.storage;
     const firestore = c.var.firestore;
     const { project, version } = c.req.valid('param');
-    console.log(`[INFO] Upload request received: project=${project}, version=${version}`);
+    log.debug('upload request received', reqFields(c));
 
     // Validate project and version
     if (!project || project.trim() === '') {
@@ -401,7 +389,6 @@ app.openapi(uploadRoute, async (c) => {
     let ciTimingsRaw: string | undefined;
 
     const contentType = c.req.header('content-type') || '';
-    console.log(`[INFO] Upload content-type: ${contentType || 'unknown'}`);
 
     if (contentType.includes('multipart/form-data')) {
       // Handle multipart form data
@@ -433,11 +420,8 @@ app.openapi(uploadRoute, async (c) => {
             return c.json({ error: 'Invalid coverage JSON' }, 400);
           }
         }
-      } catch (formDataError) {
-        console.log(
-          'Hono FormData parsing failed, trying busboy fallback:',
-          formDataError instanceof Error ? formDataError.message : String(formDataError)
-        );
+      } catch {
+        log.debug('formdata parse failed using busboy', reqFields(c, { err_code: 'formdata_parse_failed' }));
 
         // Fallback to busboy parser for Node.js compatibility
         try {
@@ -466,8 +450,8 @@ app.openapi(uploadRoute, async (c) => {
               return c.json({ error: 'Invalid coverage JSON' }, 400);
             }
           }
-        } catch (busboyError) {
-          console.error('Busboy parsing failed:', busboyError);
+        } catch {
+          logWarn(c, 'busboy parsing failed', 'multipart_parse_failed');
           return c.json(
             {
               error:
@@ -486,7 +470,7 @@ app.openapi(uploadRoute, async (c) => {
           const coverageResult = await storage.upload(coverageKey, coverageBody, 'application/json');
           coverageUrl = coverageResult.url;
         } catch (coverageUploadError) {
-          console.error('Coverage upload error:', coverageUploadError);
+          reportError(c, coverageUploadError, 'coverage upload failed', 'coverage_upload_failed');
           return c.json({ error: 'Failed to upload coverage report' }, 500);
         }
       }
@@ -502,14 +486,13 @@ app.openapi(uploadRoute, async (c) => {
         const mimeType = contentType || 'application/zip';
         file = new File([body], filename, { type: mimeType });
         
-        console.log(`Received raw binary upload: ${body.byteLength} bytes, type: ${mimeType}`);
-      } catch (bodyError) {
-        console.error('Raw body parsing failed:', bodyError);
+        log.debug('raw binary upload received', reqFields(c));
+      } catch {
+        logWarn(c, 'raw body parsing failed', 'raw_body_parse_failed');
         return c.json({ error: 'Failed to parse raw file upload' }, 400);
       }
     }
 
-    console.log(`[INFO] Upload parsed: fileSize=${file.size}, hasCoverage=${Boolean(coveragePayload)}`);
 
     // Check file size limit (5MB)
     if (file.size > maxSize) {
@@ -520,7 +503,7 @@ app.openapi(uploadRoute, async (c) => {
     const body = file.stream();
 
     const result = await storage.upload(key, body, fileContentType);
-    console.log(`[INFO] Upload stored: key=${key}, url=${result.url}`);
+    log.debug('upload stored', reqFields(c));
 
     // Create Firestore build record if Firestore is configured
     let buildId: string | undefined;
@@ -555,12 +538,12 @@ app.openapi(uploadRoute, async (c) => {
           ...extractGitContext(coveragePayload),
         };
 
-        console.log(`[INFO] Creating build: project=${project}, version=${version}, zipUrl=${result.url}, hasCoverage=${Boolean(buildData.coverage)}`);
         const build = await firestore.createBuild(project, buildData);
         buildId = build.id;
         buildNumber = build.buildNumber;
-        console.log(`[INFO] Build created: id=${buildId}, number=${buildNumber}`);
-        logCiTimings('upload', { project, version, buildNumber }, ciParsed);
+        c.set('buildId', build.id);
+        log.info('build created', reqFields(c));
+        logCiTimings('upload', { project, version, buildNumber }, ciParsed, c);
 
         // Opens the funnel (playbook §5.5): uploaded -> processed -> indexed ->
         // searched. Not awaited, and trackEvent swallows its own errors — an
@@ -583,7 +566,7 @@ app.openapi(uploadRoute, async (c) => {
         // it just no longer tells the queue there is metadata-shaped content to process.
       } catch (firestoreError) {
         // Log error but don't fail the upload
-        console.error('Firestore error (upload succeeded):', firestoreError);
+        reportError(c, firestoreError, 'firestore write failed after upload', 'firestore_after_upload_failed');
       }
     }
 
@@ -602,7 +585,7 @@ app.openapi(uploadRoute, async (c) => {
       201
     );
   } catch (error) {
-    console.error('Upload error:', error);
+    reportError(c, error, 'upload failed', 'upload_failed');
     return c.json({
       error: `Upload failed: ${error instanceof Error ? error.message : 'Unknown error'}`
     }, 500);
@@ -685,30 +668,22 @@ app.openapi(coverageUploadRoute, async (c) => {
     const storage = c.var.storage;
     const firestore = c.var.firestore;
     const { project, version } = c.req.valid('param');
-    const requestId = c.req.header('cf-ray') || 'unknown';
     const contentTypeHeader = c.req.header('content-type') || '';
 
-    console.log('[COVERAGE] Request received', {
-      requestId,
-      project,
-      version,
-      contentType: contentTypeHeader,
-      hasFirestore: !!firestore,
-    });
+    log.debug('coverage request received', reqFields(c));
 
     if (!firestore) {
-      console.error('[COVERAGE] Firestore not configured', { requestId });
+      log.error('firestore not configured', reqFields(c, { err_code: 'firestore_not_configured' }));
       return c.json({ error: 'Firestore not configured' }, 500);
     }
 
     // Find the build for this version
-    console.log('[COVERAGE] Looking up build', { requestId, project, version });
     const build = await firestore.getBuildByVersion(project, version);
     if (!build) {
-      console.warn('[COVERAGE] Build not found', { requestId, project, version });
+      logWarn(c, 'build not found', 'build_not_found');
       return c.json({ error: 'Build not found for this version' }, 404);
     }
-    console.log('[COVERAGE] Build found', { requestId, buildId: build.id, buildNumber: build.buildNumber });
+    c.set('buildId', build.id);
 
     // Handle both JSON body and multipart form data
     const contentType = contentTypeHeader;
@@ -717,90 +692,65 @@ app.openapi(coverageUploadRoute, async (c) => {
     if (contentType.includes('multipart/form-data')) {
       // Handle multipart - coverage JSON file upload
       try {
-        console.log('[COVERAGE] Parsing multipart form data (Hono)', { requestId });
         const formData = await c.req.formData();
         const file = (formData.get('file') as File | null) || (formData.get('coverage') as File | null);
 
         if (!file) {
-          console.warn('[COVERAGE] No coverage file provided in multipart', { requestId });
+          logWarn(c, 'no coverage file provided', 'coverage_file_missing');
           return c.json({ error: 'No coverage file provided' }, 400);
         }
 
         const fileContent = await file.text();
-        console.log('[COVERAGE] Multipart file parsed', {
-          requestId,
-          filename: file.name,
-          size: file.size,
-          type: file.type,
-        });
         coveragePayload = JSON.parse(fileContent);
       } catch {
         // Native multipart parsing failed (e.g. not actually multipart, or Hono's
         // FormData parser choked on it) -- fall back to busboy below rather than
         // surfacing this specific error, since the busboy path may still succeed.
         try {
-          console.log('[COVERAGE] Multipart parse failed, trying busboy fallback', { requestId });
+          log.debug('multipart parse failed using busboy', reqFields(c));
           const parsed = await parseMultipartFormData(c.req.raw);
           const file = parsed.files.file || parsed.files.coverage;
 
           if (!file) {
-            console.warn('[COVERAGE] No coverage file provided in busboy', { requestId });
+            logWarn(c, 'no coverage file provided', 'coverage_file_missing');
             return c.json({ error: 'No coverage file provided' }, 400);
           }
 
           const fileContent = await file.text();
-          console.log('[COVERAGE] Busboy file parsed', {
-            requestId,
-            filename: file.name,
-            size: file.size,
-            type: file.type,
-          });
           coveragePayload = JSON.parse(fileContent);
         } catch {
-          console.error('[COVERAGE] Invalid coverage JSON after multipart parsing', { requestId });
+          logWarn(c, 'invalid coverage json', 'coverage_json_invalid');
           return c.json({ error: 'Invalid coverage JSON' }, 400);
         }
       }
     } else {
       try {
-        console.log('[COVERAGE] Parsing JSON body', { requestId });
         coveragePayload = await c.req.json();
       } catch {
-        console.error('[COVERAGE] Invalid JSON body', { requestId });
+        logWarn(c, 'invalid coverage json', 'coverage_json_invalid');
         return c.json({ error: 'Invalid coverage JSON' }, 400);
       }
     }
 
-    console.log('[COVERAGE] Coverage payload received', {
-      requestId,
-      payloadType: typeof coveragePayload,
-      payloadKeys: coveragePayload && typeof coveragePayload === 'object' ? Object.keys(coveragePayload as Record<string, unknown>) : [],
-    });
 
     // Always upload raw JSON to R2
     const coverageKey = `${project}/${version}/coverage-report.json`;
     const coverageBody = new Blob([JSON.stringify(coveragePayload)]).stream();
-    console.log('[COVERAGE] Uploading coverage JSON to storage', { requestId, coverageKey });
     const coverageResult = await storage.upload(coverageKey, coverageBody, 'application/json');
-    console.log('[COVERAGE] Coverage JSON uploaded', { requestId, coverageUrl: coverageResult.url });
 
     let coverage: BuildCoverage;
     try {
       coverage = normalizeCoverageInput(coveragePayload, {
         reportUrl: coverageResult.url,
       }) as BuildCoverage;
-    } catch (e) {
-      console.error('[COVERAGE] Coverage normalization failed', {
-        requestId,
-        error: e instanceof Error ? e.message : String(e),
-      });
+    } catch {
+      logWarn(c, 'coverage normalization failed', 'coverage_normalize_failed');
       return c.json({ error: 'Invalid coverage data' }, 400);
     }
 
     // Update build with coverage data
-    console.log('[COVERAGE] Updating build coverage', { requestId, buildId: build.id });
     await firestore.updateBuildCoverage(project, build.id, coverage);
-    console.log('[COVERAGE] Build coverage updated', { requestId, buildId: build.id });
+    log.info('build coverage updated', reqFields(c));
 
     // And with where the build came from. Separate from the coverage write
     // because provenance is not coverage data and outlives it: the build
@@ -809,7 +759,7 @@ app.openapi(coverageUploadRoute, async (c) => {
     // rows simply report their freshness as unknown.
     const gitContext = extractGitContext(coveragePayload);
     if (gitContext.commitSha || gitContext.branch) {
-      await recordBuildProvenance(firestore, project, build, 'coverage', gitContext, { requestId });
+      await recordBuildProvenance(firestore, project, build, 'coverage', gitContext, c);
     }
 
     return c.json(
@@ -822,7 +772,7 @@ app.openapi(coverageUploadRoute, async (c) => {
       201
     );
   } catch (error) {
-    console.error('Coverage upload error:', error);
+    reportError(c, error, 'coverage upload failed', 'coverage_upload_failed');
     return c.json(
       {
         error: `Coverage upload failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
@@ -898,6 +848,7 @@ app.openapi(metadataUploadRoute, async (c) => {
     const storage = c.var.storage;
     const firestore = c.var.firestore;
     const queue = c.var.processingQueue;
+    const requestId = c.var.requestId;
 
     const body = await c.req.arrayBuffer();
     if (!body || body.byteLength === 0) {
@@ -929,7 +880,7 @@ app.openapi(metadataUploadRoute, async (c) => {
       await recordBuildProvenance(firestore, project, build, 'metadata', {
         ...(commitSha ? { commitSha } : {}),
         ...(branch ? { branch } : {}),
-      });
+      }, c);
     }
 
     let queued = false;
@@ -941,8 +892,10 @@ app.openapi(metadataUploadRoute, async (c) => {
         zipKey,
         timestamp: Date.now(),
         trace: currentTraceContext(),
+        requestId,
       });
       queued = true;
+      log.info('build queued', reqFields(c, { build_id: build.id }));
     }
 
     const queuedStatus: BuildProcessingStatus = 'queued';
@@ -963,7 +916,7 @@ app.openapi(metadataUploadRoute, async (c) => {
       201
     );
   } catch (error) {
-    console.error('Metadata upload error:', error);
+    reportError(c, error, 'metadata upload failed', 'metadata_upload_failed');
     return c.json(
       { error: `Metadata upload failed: ${error instanceof Error ? error.message : 'Unknown error'}` },
       500
@@ -1056,9 +1009,7 @@ app.openapi(ciTimingsRoute, async (c) => {
       : body;
   const parsed = parseCiTimings(record);
   if (parsed.status === 'invalid') {
-    console.warn(
-      `[WARN] ci_timings route=ci-timings project=${project} version=${version} buildId=${buildId} ci_timings_invalid=1: ${parsed.issues.join('; ')}`
-    );
+    logWarn(c, 'ci timings invalid', 'ci_timings_invalid', { build_id: buildId });
     return c.json({ error: `Invalid ciTimings: ${parsed.issues.join('; ')}` }, 400);
   }
   if (parsed.status === 'absent') {
@@ -1079,7 +1030,8 @@ app.openapi(ciTimingsRoute, async (c) => {
 
     const merged = mergeCiTimings(build.ciTimings, parsed.ciTimings);
     await firestore.updateBuild(project, build.id, { ciTimings: merged });
-    logCiTimings('ci-timings', { project, version, buildNumber: build.buildNumber }, parsed);
+    c.set('buildId', build.id);
+    logCiTimings('ci-timings', { project, version, buildNumber: build.buildNumber }, parsed, c);
 
     return c.json(
       {
@@ -1092,7 +1044,7 @@ app.openapi(ciTimingsRoute, async (c) => {
       200
     );
   } catch (error) {
-    console.error('CI timings error:', error);
+    reportError(c, error, 'ci timings failed', 'ci_timings_failed');
     return c.json(
       { error: `CI timings failed: ${error instanceof Error ? error.message : 'Unknown error'}` },
       500
@@ -1244,10 +1196,6 @@ app.openapi(presignedBundleUrlRoute, async (c) => {
       return c.json({ error: 'Firestore not configured' }, 500);
     }
 
-    console.log(
-      `[INFO] Presigned bundle URL request: project=${project}, version=${version}, source=${rawSource}`
-    );
-
     const source: BuildSource = { kind: parsedSource.kind, platform: parsedSource.platform };
 
     // The build is created first (unlike the generic presigned-url route above, which historically
@@ -1266,9 +1214,8 @@ app.openapi(presignedBundleUrlRoute, async (c) => {
     const key = `${project}/${version}/builds/${build.buildNumber}/bundle.zip`;
     const data = await storage.getPresignedUploadUrl(key, 'application/zip');
 
-    console.log(
-      `[INFO] Bundle build created: id=${build.id}, number=${build.buildNumber}, key=${key}, source=${rawSource}`
-    );
+    c.set('buildId', build.id);
+    log.info('bundle build created', reqFields(c));
 
     return c.json(
       {
@@ -1280,7 +1227,7 @@ app.openapi(presignedBundleUrlRoute, async (c) => {
       200
     );
   } catch (error) {
-    console.error('Presigned bundle URL error:', error);
+    reportError(c, error, 'presigned bundle url failed', 'presigned_bundle_failed');
     return c.json(
       { error: `Presigned bundle URL failed: ${error instanceof Error ? error.message : 'Unknown error'}` },
       500
@@ -1361,6 +1308,7 @@ const bundleCompleteRoute = createRoute({
 // uploaded object and mark the build failed, logging either half's failure rather than throwing --
 // a rejection response must still reach the caller even if this cleanup half-fails.
 async function cleanupRejectedBundle(
+  c: Context<AppEnv>,
   storage: StorageService,
   firestore: FirestoreService,
   project: string,
@@ -1368,19 +1316,13 @@ async function cleanupRejectedBundle(
   zipKey: string,
   issues: BuildValidationIssue[]
 ): Promise<void> {
-  await storage.delete(zipKey).catch((e) => {
-    console.warn('[BUNDLE] Could not delete rejected object', {
-      zipKey,
-      error: e instanceof Error ? e.message : String(e),
-    });
+  await storage.delete(zipKey).catch(() => {
+    logWarn(c, 'could not delete rejected object', 'bundle_delete_failed');
   });
   await firestore
     .updateBuild(project, buildId, { processingStatus: 'failed', validationErrors: issues })
-    .catch((e) => {
-      console.warn('[BUNDLE] Could not mark build failed', {
-        buildId,
-        error: e instanceof Error ? e.message : String(e),
-      });
+    .catch(() => {
+      logWarn(c, 'could not mark build failed', 'bundle_mark_failed');
     });
 }
 
@@ -1411,6 +1353,8 @@ app.openapi(bundleCompleteRoute, async (c) => {
     const storage = c.var.storage;
     const firestore = c.var.firestore;
     const queue = c.var.processingQueue;
+    const requestId = c.var.requestId;
+    c.set('buildId', buildId);
 
     if (!firestore) {
       return c.json({ error: 'Firestore not configured' }, 500);
@@ -1435,7 +1379,8 @@ app.openapi(bundleCompleteRoute, async (c) => {
     // cleanup half-fails; the object then just outlives its failed build, same as any other
     // best-effort write in this file (e.g. the metadata route's provenance backfill).
     const reject = async (issues: BuildValidationIssue[]) => {
-      await cleanupRejectedBundle(storage, firestore, project, buildId, zipKey, issues);
+      await cleanupRejectedBundle(c, storage, firestore, project, buildId, zipKey, issues);
+      log.warn('bundle rejected', reqFields(c, { err_code: 'bundle_rejected' }));
       return c.json({ success: false, error: 'Bundle rejected', errors: issues }, 422);
     };
 
@@ -1491,8 +1436,10 @@ app.openapi(bundleCompleteRoute, async (c) => {
         format: 'scf',
         timestamp: Date.now(),
         trace: currentTraceContext(),
+        requestId,
       });
       queued = true;
+      log.info('build queued', reqFields(c));
     }
 
     const queuedStatus: BuildProcessingStatus = 'queued';
@@ -1514,7 +1461,7 @@ app.openapi(bundleCompleteRoute, async (c) => {
       200
     );
   } catch (error) {
-    console.error('Bundle complete error:', error);
+    reportError(c, error, 'bundle complete failed', 'bundle_complete_failed');
     return c.json(
       { error: `Bundle complete failed: ${error instanceof Error ? error.message : 'Unknown error'}` },
       500
@@ -1587,8 +1534,6 @@ app.openapi(presignedUrlRoute, async (c) => {
     // If no JSON body, use default content type
   }
 
-  console.log(`[INFO] Presigned URL request: project=${project}, version=${version}, filename=${filename}, contentType=${contentType}`);
-
   const key = `${project}/${version}/${filename}`;
 
   const data = await storage.getPresignedUploadUrl(key, contentType);
@@ -1596,7 +1541,6 @@ app.openapi(presignedUrlRoute, async (c) => {
   // Only create Firestore build record for ZIP files (primary build artifact)
   // Coverage and other supplementary files should not create new builds
   const isZipFile = filename.toLowerCase().endsWith('.zip');
-  console.log(`[INFO] Presigned URL build tracking: firestore=${Boolean(firestore)}, isZip=${isZipFile}`);
   let buildId: string | undefined;
   let buildNumber: number | undefined;
   
@@ -1608,7 +1552,6 @@ app.openapi(presignedUrlRoute, async (c) => {
       const ciParsed = parseCiTimings(ciTimingsInput);
       const ciTimings: CiTimings | undefined = ciParsed.status === 'ok' ? ciParsed.ciTimings : undefined;
 
-      console.log(`[INFO] Creating build for presigned upload: project=${project}, version=${version}, zipUrl=${zipUrl}`);
       const build = await firestore.createBuild(project, {
         versionId: version,
         zipUrl: zipUrl,
@@ -1618,8 +1561,9 @@ app.openapi(presignedUrlRoute, async (c) => {
       buildId = build.id;
       buildNumber = build.buildNumber;
       
-      console.log(`[INFO] Build record created for presigned upload: ID=${buildId}, Number=${buildNumber}`);
-      logCiTimings('presigned-url', { project, version, buildNumber }, ciParsed);
+      c.set('buildId', build.id);
+      log.info('build created', reqFields(c));
+      logCiTimings('presigned-url', { project, version, buildNumber }, ciParsed, c);
 
       // Opens the funnel (playbook §5.5). This is the route the deployer
       // actually uses — the emitter was first added only to POST /upload, a
@@ -1636,7 +1580,7 @@ app.openapi(presignedUrlRoute, async (c) => {
       });
     } catch (firestoreError) {
       // Log error but don't fail the presigned URL generation
-      console.error('Firestore error (presigned URL succeeded):', firestoreError);
+      reportError(c, firestoreError, 'firestore write failed after presign', 'firestore_after_presign_failed');
     }
   }
 
@@ -1802,7 +1746,7 @@ app.openapi(imageUploadInitRoute, async (c) => {
       201
     );
   } catch (error) {
-    console.error('Image upload init error:', error);
+    reportError(c, error, 'image upload init failed', 'image_init_failed');
     return c.json(
       { error: `Upload initialization failed: ${error instanceof Error ? error.message : 'Unknown error'}` },
       500
@@ -1853,6 +1797,7 @@ app.openapi(imageUploadCompleteRoute, async (c) => {
     const { project } = c.req.valid('param');
     const firestore = c.var.firestore;
     const queue = c.var.processingQueue;
+    const requestId = c.var.requestId;
 
     if (!firestore) {
       return c.json({ error: 'Firestore not configured' }, 500);
@@ -1873,8 +1818,10 @@ app.openapi(imageUploadCompleteRoute, async (c) => {
         zipKey,
         timestamp: Date.now(),
         trace: currentTraceContext(),
+        requestId,
       });
       queued = true;
+      log.info('upload queued', reqFields(c));
     }
 
     return c.json({
@@ -1883,7 +1830,7 @@ app.openapi(imageUploadCompleteRoute, async (c) => {
       queued,
     }, 200);
   } catch (error) {
-    console.error('Image upload complete error:', error);
+    reportError(c, error, 'image upload complete failed', 'image_complete_failed');
     return c.json(
       { error: `Upload completion failed: ${error instanceof Error ? error.message : 'Unknown error'}` },
       500

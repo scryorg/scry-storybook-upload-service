@@ -1,3 +1,4 @@
+import { log, reqFields } from '../lib/log.js';
 import { Context, Next } from 'hono';
 import type { ApiKeyService } from '../services/apikey/apikey.service.js';
 import { extractProjectIdFromKey } from '../services/apikey/apikey.utils.js';
@@ -115,7 +116,7 @@ export function apiKeyAuth(options: ApiKeyAuthOptions = {}) {
 
     // Check if API key service is configured
     if (!apiKeyService) {
-      console.warn('[AUTH] API key service not configured - skipping authentication');
+      log.warn('api key service not configured', reqFields(c as never, { err_code: 'apikey_service_missing' }));
       return next();
     }
 
@@ -153,6 +154,7 @@ export function apiKeyAuth(options: ApiKeyAuthOptions = {}) {
 
     // Validate project match if configured
     if (config.validateProjectMatch && routeProjectId && keyProjectId !== routeProjectId) {
+      log.warn('api key project mismatch', reqFields(c as never, { err_code: 'project_mismatch', project: routeProjectId }));
       logAuth('warn', {
         outcome: 'project_mismatch',
         keyProject: keyProjectId,
@@ -176,6 +178,7 @@ export function apiKeyAuth(options: ApiKeyAuthOptions = {}) {
     const result = await apiKeyService.validateApiKey(projectId, apiKey);
 
     if (!result.valid) {
+      log.warn('api key rejected', reqFields(c as never, { err_code: 'apikey_invalid', project: projectId }));
       return c.json(
         {
           error: 'Invalid API key',
@@ -205,8 +208,8 @@ export function apiKeyAuth(options: ApiKeyAuthOptions = {}) {
 
     // Update lastUsedAt timestamp (fire-and-forget to avoid latency)
     if (config.trackUsage && result.apiKey) {
-      apiKeyService.updateLastUsed(projectId, result.apiKey.id).catch((error) => {
-        console.error('[AUTH] Failed to update lastUsedAt:', error);
+      apiKeyService.updateLastUsed(projectId, result.apiKey.id).catch(() => {
+        log.warn('could not update key last used', reqFields(c as never, { err_code: 'apikey_touch_failed', project: projectId }));
       });
     }
 

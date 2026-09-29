@@ -41,6 +41,8 @@ export default tseslint.config(
       // Vendored @scrymore/scf build — copied dist/, not authored in this repo.
       // See src/vendor/scf/VERSION for the upstream source sha.
       'src/vendor/scf/**',
+      // Vendored scry-log (scry-management/lib/scry-log, synced by sync.sh --check in CI): fix upstream, never here.
+      'src/lib/scry-log/**',
     ],
   },
   ...tseslint.configs.recommended,

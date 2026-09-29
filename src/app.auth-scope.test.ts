@@ -214,7 +214,7 @@ describe('upload-project-key-scope detection: who uploaded, and every auth outco
       headers: { 'Content-Type': 'application/json', 'X-API-Key': ATTACKER_KEY },
     });
     expect(res.status).toBe(403);
-    const warned = warn.mock.calls.map((a: unknown[]) => String(a[0])).filter((l: string) => l.includes('project_mismatch'));
+    const warned = warn.mock.calls.map((a: unknown[]) => String(a[0])).filter((l: string) => l.includes('"event":"upload_auth"') && l.includes('project_mismatch'));
     expect(warned).toHaveLength(1);
     expect(JSON.parse(warned[0])).toMatchObject({
       event: 'upload_auth',
