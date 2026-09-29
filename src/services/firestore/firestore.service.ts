@@ -28,27 +28,40 @@ export interface FirestoreService {
   trackEvent?(name: string, props?: Record<string, string | number | boolean | undefined>): Promise<void>;
 
   /**
-   * Lists project ids at the top level. Used by the orphan-bundle sweep (`bundle/orphan-sweep.ts`,
-   * ledger F80), which has to walk every project — builds live in each project's own `builds`
-   * subcollection and there is no collection-group index to query them all in one call. Optional so
+   * Bundle builds still awaiting their `/bundle/complete` call, created before `cutoff`, for the
+   * orphan-bundle sweep (ledger F80, cost/coverage fix F91). ONE collection-group query across every
+   * project, filtered on `bundlePending == true` (see `firestore.worker.ts` for the full field
+   * lifecycle) — replaces the original `listProjectIds` + per-project scan, which cost reads
+   * proportional to project count and total build history rather than the orphan rate. Optional so
    * the Node implementation is not forced to grow one; only the deployed Worker runs the cron that
    * needs it (same reasoning as `trackEvent` above).
    */
-  listProjectIds?(limit?: number): Promise<string[]>;
+  findOrphanBundleCandidates?(cutoff: Date, limit?: number): Promise<OrphanBundleCandidate[]>;
 
   /**
-   * Bundle builds created before `cutoff`, for the orphan-bundle sweep (ledger F80). A single
-   * inequality on `createdAt` with a matching `orderBy` — the one query shape Firestore serves from
-   * its automatic per-collection index, so this needs no manual index to work (unlike a filter that
-   * also constrained `source`/`processingStatus` presence, which would demand a composite index).
-   * The sweep itself decides which of the returned docs are genuine orphans. Optional for the same
-   * reason as `listProjectIds` above.
+   * Fresh re-read of one candidate's `processingStatus` presence + `updateTime`, immediately before
+   * the orphan sweep would mark it failed (ledger F92). `null` means the document no longer exists.
+   * Optional for the same reason as `findOrphanBundleCandidates` above.
    */
-  findOrphanBundleCandidates?(
+  getBuildOrphanState?(
     projectId: string,
-    cutoff: Date,
-    limit?: number
-  ): Promise<OrphanBundleCandidate[]>;
+    buildId: string
+  ): Promise<{ hasProcessingStatus: boolean; updateTime: string } | null>;
+
+  /**
+   * Mark a bundle build's upload as never completed (ledger F80), guarded by the `updateTime`
+   * `getBuildOrphanState` returned (ledger F92) — a Firestore `currentDocument.updateTime`
+   * precondition that makes the write atomic with that read. `'precondition-failed'` means the
+   * document changed since (a genuine, concurrent `/bundle/complete` most likely); the caller must
+   * treat that as skipped, never retry it with the same fields. Optional for the same reason as
+   * `findOrphanBundleCandidates` above.
+   */
+  markBuildFailedIfUnchanged?(
+    projectId: string,
+    buildId: string,
+    processingError: string,
+    expectedUpdateTime: string
+  ): Promise<'marked' | 'precondition-failed'>;
 
   createBuild(
     projectId: string,

@@ -10,7 +10,12 @@ import { FirestoreServiceWorker } from './services/firestore/firestore.worker';
 import { ApiKeyServiceWorker } from './services/apikey/apikey.worker';
 import type { AppEnv } from './app';
 import type { StampBindings } from './deploy-stamp.js';
-import { sweepOrphanBundleBuilds, bundleZipKey, type OrphanSweepStore } from './bundle/orphan-sweep.js';
+import {
+  sweepOrphanBundleBuilds,
+  bundleZipKey,
+  UPLOAD_NEVER_COMPLETED_MESSAGE,
+  type OrphanSweepStore,
+} from './bundle/orphan-sweep.js';
 import type { StorageService } from './services/storage/storage.service.js';
 
 /**
@@ -210,16 +215,20 @@ async function runOrphanBundleSweep(env: Bindings) {
           bucketName: env.R2_BUCKET_NAME,
         });
 
+    // Ledger F91: one collection-group query (no more per-project listProjectIds loop). Ledger F92:
+    // getFreshState + markUploadNeverCompletedIfUnchanged re-read and conditionally write, guarded
+    // by Firestore's own updateTime precondition, instead of a blind unconditional PATCH.
     const store: OrphanSweepStore = {
-      listProjectIds: (limit) => firestore.listProjectIds(limit),
-      findCandidates: (projectId, cutoff, limit) =>
-        firestore.findOrphanBundleCandidates(projectId, cutoff, limit),
+      findCandidates: (cutoff, limit) => firestore.findOrphanBundleCandidates(cutoff, limit),
       bundleObjectExists: async (candidate) => (await storage.head(bundleZipKey(candidate))) !== null,
-      markUploadNeverCompleted: (candidate) =>
-        firestore.updateBuild(candidate.projectId, candidate.buildId, {
-          processingStatus: 'failed',
-          processingError: 'upload never completed',
-        }),
+      getFreshState: (candidate) => firestore.getBuildOrphanState(candidate.projectId, candidate.buildId),
+      markUploadNeverCompletedIfUnchanged: (candidate, expectedUpdateTime) =>
+        firestore.markBuildFailedIfUnchanged(
+          candidate.projectId,
+          candidate.buildId,
+          UPLOAD_NEVER_COMPLETED_MESSAGE,
+          expectedUpdateTime
+        ),
     };
 
     await sweepOrphanBundleBuilds(store);
