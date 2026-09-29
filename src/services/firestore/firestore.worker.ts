@@ -68,7 +68,10 @@ interface FirestoreConfig {
  * of the body for Sentry `extra`. Field NAMES only, never values; names are stripped to a safe alphabet.
  */
 export function describeFirestoreError(errorBody: string): { detail: string; body: string } {
-  const body = scrubString(errorBody.slice(0, 500));
+  // Whole-string scrub, then per-token (`_` and `.` are word characters that hide `sk-...` from boundary-anchored rules).
+  const body = scrubString(errorBody.slice(0, 500))
+    .replace(/[^\s._"'[\]{},:]+/g, (token) => scrubString(token))
+    .slice(0, 500);
   let detail = '';
   try {
     const parsed = JSON.parse(errorBody) as {
@@ -78,10 +81,16 @@ export function describeFirestoreError(errorBody: string): { detail: string; bod
     const fields: string[] = [];
     for (const d of parsed.error?.details ?? []) {
       for (const v of d?.fieldViolations ?? []) {
-        if (typeof v?.field === 'string') fields.push(v.field.replace(/[^A-Za-z0-9_.[\]-]/g, '').slice(0, 80));
+        if (typeof v?.field === 'string') {
+          // Scrub each path segment on its own: `_` is a word character, so a key such as
+          // `branch_sk-live-abc123...` would otherwise hide the secret from the boundary-anchored rules.
+          const name = v.field.replace(/[^A-Za-z0-9_.[\]-]/g, '').slice(0, 80);
+          fields.push(name.replace(/[^._[\]]+/g, (segment) => scrubString(segment)));
+        }
       }
     }
-    detail = [status, fields.filter(Boolean).join(', ')].filter(Boolean).join(': ').slice(0, 200);
+    // Field names can embed customer strings (nested coverage keys), so the detail is scrubbed too.
+    detail = scrubString([status, fields.filter(Boolean).join(', ')].filter(Boolean).join(': ').slice(0, 200));
   } catch {
     // not JSON: no detail, the scrubbed body prefix still goes to Sentry
   }
@@ -980,7 +989,8 @@ export class FirestoreServiceWorker implements FirestoreService {
       const failure = new Error(
         `Failed to patch document: ${response.status} ${response.statusText}${detail ? ` (${detail})` : ''}`
       ) as Error & { firestoreBody?: string };
-      failure.firestoreBody = body;
+      // Only a 4xx body (a rejected request: bad field path) is worth sending to Sentry; a 5xx body is upstream noise.
+      if (response.status >= 400 && response.status < 500) failure.firestoreBody = body;
       throw failure;
     }
     return { preconditionFailed: false };

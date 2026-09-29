@@ -552,6 +552,40 @@ describe('FirestoreServiceWorker', () => {
     expect(err.firestoreBody).not.toContain('4111111111111111');
   });
 
+  it('keeps the Sentry body only for 4xx and scrubs secret-shaped field names in the detail (D3)', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const mk = (status: number) =>
+      JSON.stringify({
+        error: {
+          code: status,
+          status: 'INVALID_ARGUMENT',
+          message: 'x'.repeat(200) + ' ' + 'y'.repeat(2000),
+          details: [{ fieldViolations: [{ field: 'fields.branch_sk-live-abc123DEF456ghi789' }] }],
+          hint: 'fields.branch_sk-live-abc123DEF456ghi789',
+        },
+      });
+    // @ts-expect-error - test override
+    globalThis.fetch = vi.fn(async () => ({ ok: false, status: 400, statusText: 'Bad Request', text: async () => mk(400) })) as any;
+    const e400 = (await createSvc().updateBuild('my-project', 'b', { processingStatus: 'failed' }).catch((e) => e)) as Error & {
+      firestoreBody?: string;
+    };
+    expect(e400.message).not.toContain('abc123DEF456ghi789');
+    expect(e400.firestoreBody!.length).toBeLessThanOrEqual(500);
+    expect(e400.firestoreBody).not.toContain('abc123DEF456ghi789');
+    // @ts-expect-error - test override
+    globalThis.fetch = vi.fn(async () => ({ ok: false, status: 403, statusText: 'Forbidden', text: async () => mk(403) })) as any;
+    const e403 = (await createSvc().updateBuild('my-project', 'b', { processingStatus: 'failed' }).catch((e) => e)) as Error & {
+      firestoreBody?: string;
+    };
+    expect(e403.firestoreBody).toBeDefined(); // 4xx keeps it
+    // @ts-expect-error - test override
+    globalThis.fetch = vi.fn(async () => ({ ok: false, status: 500, statusText: 'Server Error', text: async () => mk(500) })) as any;
+    const e500 = (await createSvc().updateBuild('my-project', 'b', { processingStatus: 'failed' }).catch((e) => e)) as Error & {
+      firestoreBody?: string;
+    };
+    expect(e500.firestoreBody).toBeUndefined();
+  });
+
   it('a non-JSON error body adds no detail and still throws the plain status message (M2)', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     // @ts-expect-error - test override
