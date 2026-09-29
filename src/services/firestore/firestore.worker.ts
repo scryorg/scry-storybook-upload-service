@@ -8,6 +8,7 @@ import type {
   UpdateBuildData,
   Upload,
   CreateUploadData,
+  OrphanBundleCandidate,
 } from './firestore.types.js';
 import { retryFetch } from '../../utils/firestore-retry.js';
 
@@ -218,6 +219,74 @@ export class FirestoreServiceWorker implements FirestoreService {
   }
 
   /**
+   * Lists project ids at the top level (ledger F80: the orphan-bundle sweep has to walk every
+   * project, since builds live in each project's own `builds` subcollection and there is no
+   * collection-group index to query them all at once). Keys-only (`select: __name__`): the sweep
+   * needs ids, not every project document in the estate.
+   */
+  async listProjectIds(limit = 500): Promise<string[]> {
+    const token = await this.getAccessToken();
+    const docs = await this.queryDocuments(
+      '',
+      {
+        from: [{ collectionId: 'projects' }],
+        select: { fields: [{ fieldPath: '__name__' }] },
+        limit,
+      },
+      token
+    );
+    return docs.map((doc) => String(doc.name).split('/').pop()!).filter(Boolean);
+  }
+
+  /**
+   * Bundle builds created before `cutoff`, for the orphan-bundle sweep (ledger F80).
+   *
+   * A single inequality on `createdAt` with a matching `orderBy` — the one query shape Firestore
+   * serves from its automatic per-collection index. Filtering here on `source`/`processingStatus`
+   * presence too would need a composite index nobody has created, and a query that needs console
+   * setup to work is a query that silently returns nothing — so those checks happen client-side in
+   * the sweep instead, against the raw fields returned below.
+   *
+   * Newest-first (createdAt DESCENDING) among builds already older than `cutoff`: a project with
+   * more resolved bundle builds older than `cutoff` than `limit` should still surface builds that
+   * just crossed the age threshold this run, rather than have them crowded out by ones long since
+   * resolved and years old.
+   */
+  async findOrphanBundleCandidates(
+    projectId: string,
+    cutoff: Date,
+    limit = 50
+  ): Promise<OrphanBundleCandidate[]> {
+    const token = await this.getAccessToken();
+    const structuredQuery = {
+      from: [{ collectionId: 'builds' }],
+      where: {
+        fieldFilter: {
+          field: { fieldPath: 'createdAt' },
+          op: 'LESS_THAN',
+          value: { timestampValue: cutoff.toISOString() },
+        },
+      },
+      orderBy: [{ field: { fieldPath: 'createdAt' }, direction: 'DESCENDING' }],
+      limit,
+    };
+
+    const docs = await this.queryDocuments(`projects/${projectId}`, structuredQuery, token);
+    return docs.map((doc) => {
+      const fields = doc.fields ?? {};
+      return {
+        buildId: String(doc.name).split('/').pop()!,
+        projectId,
+        versionId: fields.versionId?.stringValue || '',
+        buildNumber: parseInt(fields.buildNumber?.integerValue || '0', 10),
+        createdAt: new Date(fields.createdAt?.timestampValue || new Date().toISOString()),
+        hasSource: fields.source !== undefined,
+        hasProcessingStatus: fields.processingStatus !== undefined,
+      };
+    });
+  }
+
+  /**
    * Finds a build by its version ID.
    *
    * Note: We intentionally avoid `orderBy(buildNumber)` here to prevent requiring
@@ -383,6 +452,7 @@ export class FirestoreServiceWorker implements FirestoreService {
     if (updates.branch) fields.branch = { stringValue: updates.branch };
     if (updates.ciTimings) fields.ciTimings = this.toFirestoreValue(updates.ciTimings);
     if (updates.validationErrors) fields.validationErrors = this.toFirestoreValue(updates.validationErrors);
+    if (updates.processingError) fields.processingError = { stringValue: updates.processingError };
 
     await this.patchDocument(buildPath, fields, token);
   }
@@ -790,8 +860,10 @@ export class FirestoreServiceWorker implements FirestoreService {
       parentName,
       structuredQuery,
     });
-    // Use the parent path in the URL for subcollection queries
-    const url = `${this.baseUrl}/${parent}:runQuery`;
+    // Use the parent path in the URL for subcollection queries. An empty parent means a top-level
+    // collection query (e.g. `listProjectIds`, ledger F80) — the runQuery call then targets the
+    // documents root itself, not `.../documents/:runQuery` (a trailing slash Firestore rejects).
+    const url = parent ? `${this.baseUrl}/${parent}:runQuery` : `${this.baseUrl}:runQuery`;
     // Idempotent read: retried on 429/503/500/network (F85/F86).
     const response = await retryFetch(() => fetch(url, {
       method: 'POST',
@@ -837,6 +909,7 @@ export class FirestoreServiceWorker implements FirestoreService {
       ...(fields.ciTimings ? { ciTimings: this.fromFirestoreValue(fields.ciTimings) as any } : {}),
       ...(fields.source ? { source: this.fromFirestoreValue(fields.source) as any } : {}),
       ...(fields.validationErrors ? { validationErrors: this.fromFirestoreValue(fields.validationErrors) as any } : {}),
+      ...(fields.processingError?.stringValue ? { processingError: fields.processingError.stringValue } : {}),
     };
   }
 

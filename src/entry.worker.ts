@@ -10,6 +10,8 @@ import { FirestoreServiceWorker } from './services/firestore/firestore.worker';
 import { ApiKeyServiceWorker } from './services/apikey/apikey.worker';
 import type { AppEnv } from './app';
 import type { StampBindings } from './deploy-stamp.js';
+import { sweepOrphanBundleBuilds, bundleZipKey, type OrphanSweepStore } from './bundle/orphan-sweep.js';
+import type { StorageService } from './services/storage/storage.service.js';
 
 /**
  * Defines the specific Cloudflare Bindings expected by this Worker.
@@ -166,7 +168,69 @@ const handler: ExportedHandler<Bindings> = {
   async fetch(request: Request, env: Bindings, ctx: ExecutionContext): Promise<Response> {
     return workerApp.fetch(request, env, ctx);
   },
+
+  // Cron (wrangler.toml `[triggers]`, ledger F80). A bundle build whose `/bundle/complete` call
+  // never arrives is never touched again by anything else in this service — there is no in-flight
+  // invocation to time out and nothing queued to retry, just a Firestore document that looks
+  // "just created" forever. Only something running on its own schedule can notice that.
+  async scheduled(_controller: ScheduledController, env: Bindings): Promise<void> {
+    await runOrphanBundleSweep(env);
+  },
 };
+
+/**
+ * Sweep for bundle builds whose upload never completed and mark them `failed` (ledger F80).
+ *
+ * Same storage-service selection as the request middleware above (mock in test mode, the real
+ * hybrid R2/S3 service otherwise) — the sweep only ever calls `head()`, which the native R2 binding
+ * serves directly, so the S3-signing credentials it also takes are unused here but harmless to pass
+ * through unset.
+ */
+async function runOrphanBundleSweep(env: Bindings) {
+  if (!env.FIREBASE_PROJECT_ID || !env.FIREBASE_CLIENT_EMAIL || !env.FIREBASE_PRIVATE_KEY) {
+    console.warn('[ORPHAN] Firestore not configured; skipping orphan-bundle sweep');
+    return;
+  }
+
+  try {
+    const firestore = new FirestoreServiceWorker({
+      projectId: env.FIREBASE_PROJECT_ID,
+      clientEmail: env.FIREBASE_CLIENT_EMAIL,
+      privateKey: env.FIREBASE_PRIVATE_KEY,
+      serviceAccountId: env.FIRESTORE_SERVICE_ACCOUNT_ID || 'upload-service',
+    });
+
+    const isTestMode = env.NODE_ENV === 'test';
+    const storage: StorageService = isTestMode
+      ? new MockStorageService()
+      : new R2S3StorageService(env.STORYBOOK_BUCKET, {
+          accountId: env.R2_ACCOUNT_ID,
+          accessKeyId: env.R2_S3_ACCESS_KEY_ID,
+          secretAccessKey: env.R2_S3_SECRET_ACCESS_KEY,
+          bucketName: env.R2_BUCKET_NAME,
+        });
+
+    const store: OrphanSweepStore = {
+      listProjectIds: (limit) => firestore.listProjectIds(limit),
+      findCandidates: (projectId, cutoff, limit) =>
+        firestore.findOrphanBundleCandidates(projectId, cutoff, limit),
+      bundleObjectExists: async (candidate) => (await storage.head(bundleZipKey(candidate))) !== null,
+      markUploadNeverCompleted: (candidate) =>
+        firestore.updateBuild(candidate.projectId, candidate.buildId, {
+          processingStatus: 'failed',
+          processingError: 'upload never completed',
+        }),
+    };
+
+    await sweepOrphanBundleBuilds(store);
+  } catch (error) {
+    // A sweep that cannot run is itself a silent failure — report it and rethrow so the platform
+    // records the cron invocation as failed (mirrors the sibling stall-detector's same rule).
+    console.error('[ORPHAN] Sweep failed:', error);
+    Sentry.captureException(error, { tags: { path: 'cron', kind: 'orphan-bundle-sweep' } });
+    throw error;
+  }
+}
 
 /** Sentry options, exported for tests (the tier → environment mapping). */
 export function sentryOptions(env: Bindings) {

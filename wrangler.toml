@@ -64,6 +64,19 @@ name = "storybook-deployment-service"
 R2_BUCKET_NAME = "my-storybooks-production"
 SCRY_ENV = "production"
 
+# Orphan-bundle sweep (ledger F80): a bundle build's presigned-url call creates its Firestore
+# document immediately, before any bytes move; if the client's later `/bundle/complete` call never
+# arrives (crash mid-upload, dropped network, abandoned CLI run) nothing else ever revisits that
+# document again. Every 15 minutes against a 60-minute age threshold (src/bundle/orphan-sweep.ts)
+# gives worst-case detection within about 75 minutes, proportionate to the threshold — the sibling
+# stall-detector in scry-build-processing-service runs every 5 minutes, but against a 20-minute
+# threshold for work that is actually in flight, not a hard age check like this one.
+# Declared per environment, not once at the top level: per this file's own convention above,
+# bindings and vars are not inherited by named environments here, and a cron silently missing from
+# one environment is exactly the kind of drift that convention exists to avoid.
+[env.production.triggers]
+crons = ["*/15 * * * *"]
+
 [[env.production.r2_buckets]]
 binding = "STORYBOOK_BUCKET"
 bucket_name = "my-storybooks-production"
@@ -80,6 +93,10 @@ name = "storybook-deployment-service-preview"
 [env.staging.vars]
 R2_BUCKET_NAME = "my-storybooks-staging"
 SCRY_ENV = "staging"
+
+# Orphan-bundle sweep (ledger F80) — see the matching comment under [env.production.triggers].
+[env.staging.triggers]
+crons = ["*/15 * * * *"]
 
 [[env.staging.r2_buckets]]
 binding = "STORYBOOK_BUCKET"
