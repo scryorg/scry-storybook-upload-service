@@ -43,6 +43,13 @@ export const DEFAULT_CAP_MS = 4_000;
 /** Firestore statuses this helper retries. Deliberately narrow: only what F85/F86 saw as transient. */
 const RETRYABLE_STATUSES: ReadonlySet<number> = new Set([429, 500, 503]);
 
+/** A loggable message for a caught value of unknown shape: an Error's `.message`, a truthy
+ *  non-Error coerced to a string, or `undefined` for a falsy one (e.g. `undefined`/`null` thrown). */
+function errorMessageForLog(error: unknown): string | undefined {
+  if (error instanceof Error) return error.message;
+  return error ? String(error) : undefined;
+}
+
 /**
  * `status` is `null` only for a thrown/network failure (no response was ever
  * received) — that is always retried. A response that came back with some
@@ -100,6 +107,18 @@ function safeHeader(response: Response, name: string): string | null {
   }
 }
 
+/** `Retry-After` when the response carries one and parses; otherwise jittered exponential backoff. */
+function computeRetryDelayMs(
+  response: Response | undefined,
+  attempt: number,
+  baseMs: number,
+  capMs: number,
+  random: () => number
+): number {
+  const retryAfterMs = response ? parseRetryAfterMs(safeHeader(response, 'retry-after'), capMs) : null;
+  return retryAfterMs ?? backoffMs(attempt, baseMs, capMs, random);
+}
+
 /**
  * Call `doFetch()` and retry the same request on a transient failure. Returns
  * the last `Response` unchanged on a non-retryable status or once attempts are
@@ -135,15 +154,14 @@ export async function retryFetch(doFetch: () => Promise<Response>, opts: RetryFe
       throw error;
     }
 
-    const retryAfterMs = response ? parseRetryAfterMs(safeHeader(response, 'retry-after'), capMs) : null;
-    const delayMs = retryAfterMs ?? backoffMs(attempt, baseMs, capMs, random);
+    const delayMs = computeRetryDelayMs(response, attempt, baseMs, capMs, random);
     console.warn('[FIRESTORE] retrying after a transient error', {
       op: opts.op,
       attempt: attempt + 1,
       of: attempts,
       status,
       delayMs,
-      error: error instanceof Error ? error.message : error ? String(error) : undefined,
+      error: errorMessageForLog(error),
     });
     // F11: drain/cancel the body of the response we're about to discard and retry. An unread body
     // left dangling on Cloudflare Workers can count toward the runtime's 6-simultaneous-connection

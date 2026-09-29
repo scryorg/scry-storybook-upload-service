@@ -81,7 +81,7 @@ describe('readCentralDirectory', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.entries.map((e) => e.name)).toEqual(entries.map((e) => e.name));
-    expect(calls.length).toBe(2);
+    expect(calls).toHaveLength(2);
     expect(calls[0].length).toBeLessThanOrEqual(200); // the small tail window
     expect(calls[1].offset).toBe(result.centralDirectoryOffset); // the targeted second read
   });

@@ -16,12 +16,12 @@ import type { StorageService } from './services/storage/storage.service.js';
 
 function setup() {
   const storage: StorageService = {
-    upload: vi.fn(async (key: string) => ({ url: `https://r2.example/${key}`, key })) as any,
-    getPresignedUploadUrl: vi.fn(async (key: string) => ({ url: `https://signed.example/${key}?s=1`, key })) as any,
-    head: vi.fn() as any,
-    getObjectStream: vi.fn() as any,
-    getObjectRange: vi.fn() as any,    delete: vi.fn() as any,
-    deleteByPrefix: vi.fn() as any,
+    upload: vi.fn(async (key: string) => ({ url: `https://r2.example/${key}`, key })),
+    getPresignedUploadUrl: vi.fn(async (key: string) => ({ url: `https://signed.example/${key}?s=1`, key })),
+    head: vi.fn(),
+    getObjectStream: vi.fn(),
+    getObjectRange: vi.fn(),    delete: vi.fn(),
+    deleteByPrefix: vi.fn(),
   };
   const build = {
     id: 'b1', projectId: 'victim', versionId: 'v1', buildNumber: 1, zipUrl: 'z',
@@ -68,7 +68,7 @@ function setup() {
 const ZIP = { headers: { 'Content-Type': 'application/zip' }, body: new Uint8Array([1, 2, 3]) };
 const JSON_BODY = (b: unknown) => ({ headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) });
 
-const ROUTES: Array<{ name: string; method: string; path: string; init: { headers: Record<string, string>; body?: any } }> = [
+const ROUTES: Array<{ name: string; method: string; path: string; init: { headers: Record<string, string>; body?: Uint8Array | string } }> = [
   { name: 'POST /upload/:project/:version', method: 'POST', path: '/upload/victim/v1', init: ZIP },
   { name: 'GET /upload/:project/:version', method: 'GET', path: '/upload/victim/v1', init: { headers: {} } },
   { name: 'POST /upload/:project/:version/coverage', method: 'POST', path: '/upload/victim/v1/coverage', init: JSON_BODY({}) },
@@ -166,7 +166,7 @@ describe('upload-project-key-scope detection: who uploaded, and every auth outco
       headers: { 'Content-Type': 'application/json', 'X-API-Key': KEY },
     });
     expect(res.status).toBe(200);
-    const data = (firestore.createBuild as any).mock.calls[0][1];
+    const data = (firestore.createBuild).mock.calls[0][1];
     expect(data.uploadedByKeyId).toBe('k1');
     expect(data.uploadedByKeyProject).toBe('victim');
     expect(JSON.stringify(data)).not.toContain('SECRET');
@@ -180,7 +180,7 @@ describe('upload-project-key-scope detection: who uploaded, and every auth outco
       headers: { 'Content-Type': 'application/zip', 'X-API-Key': KEY },
     });
     expect(res.status).toBe(201);
-    const data = (firestore.createBuild as any).mock.calls[0][1];
+    const data = (firestore.createBuild).mock.calls[0][1];
     expect(data.uploadedByKeyId).toBe('k1');
     expect(data.uploadedByKeyProject).toBe('victim');
   });

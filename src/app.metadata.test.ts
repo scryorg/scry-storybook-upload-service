@@ -52,12 +52,12 @@ describe('app metadata route', () => {
     const upload = vi.fn(async (key: string) => ({ url: `https://storage.test/${key}`, path: key }));
     const send = vi.fn(async () => undefined);
     const storage: StorageService = {
-      upload: upload as any,
-      getPresignedUploadUrl: vi.fn() as any,
-      head: vi.fn() as any,
-      getObjectStream: vi.fn() as any,
-      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
-      deleteByPrefix: vi.fn() as any,
+      upload: upload,
+      getPresignedUploadUrl: vi.fn(),
+      head: vi.fn(),
+      getObjectStream: vi.fn(),
+      getObjectRange: vi.fn(),      delete: vi.fn(),
+      deleteByPrefix: vi.fn(),
     };
 
     const latestBuild: Build = {
@@ -114,12 +114,12 @@ describe('app metadata route', () => {
   it('records commitSha and branch on the build when the CLI sends them', async () => {
     const upload = vi.fn(async (key: string) => ({ url: `https://storage.test/${key}`, path: key }));
     const storage: StorageService = {
-      upload: upload as any,
-      getPresignedUploadUrl: vi.fn() as any,
-      head: vi.fn() as any,
-      getObjectStream: vi.fn() as any,
-      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
-      deleteByPrefix: vi.fn() as any,
+      upload: upload,
+      getPresignedUploadUrl: vi.fn(),
+      head: vi.fn(),
+      getObjectStream: vi.fn(),
+      getObjectRange: vi.fn(),      delete: vi.fn(),
+      deleteByPrefix: vi.fn(),
     };
 
     const latestBuild: Build = {
@@ -156,12 +156,12 @@ describe('app metadata route', () => {
     const upload = vi.fn(async (key: string) => ({ url: `https://storage.test/${key}`, path: key }));
     const send = vi.fn(async () => undefined);
     const storage: StorageService = {
-      upload: upload as any,
-      getPresignedUploadUrl: vi.fn() as any,
-      head: vi.fn() as any,
-      getObjectStream: vi.fn() as any,
-      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
-      deleteByPrefix: vi.fn() as any,
+      upload: upload,
+      getPresignedUploadUrl: vi.fn(),
+      head: vi.fn(),
+      getObjectStream: vi.fn(),
+      getObjectRange: vi.fn(),      delete: vi.fn(),
+      deleteByPrefix: vi.fn(),
     };
 
     const latestBuild: Build = {
@@ -193,12 +193,12 @@ describe('app metadata route', () => {
   it('still succeeds when recording provenance fails', async () => {
     const upload = vi.fn(async (key: string) => ({ url: `https://storage.test/${key}`, path: key }));
     const storage: StorageService = {
-      upload: upload as any,
-      getPresignedUploadUrl: vi.fn() as any,
-      head: vi.fn() as any,
-      getObjectStream: vi.fn() as any,
-      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
-      deleteByPrefix: vi.fn() as any,
+      upload: upload,
+      getPresignedUploadUrl: vi.fn(),
+      head: vi.fn(),
+      getObjectStream: vi.fn(),
+      getObjectRange: vi.fn(),      delete: vi.fn(),
+      deleteByPrefix: vi.fn(),
     };
 
     const latestBuild: Build = {
@@ -230,12 +230,12 @@ describe('app metadata route', () => {
 
   it('rejects a commitSha that is not a git object name', async () => {
     const storage: StorageService = {
-      upload: vi.fn() as any,
-      getPresignedUploadUrl: vi.fn() as any,
-      head: vi.fn() as any,
-      getObjectStream: vi.fn() as any,
-      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
-      deleteByPrefix: vi.fn() as any,
+      upload: vi.fn(),
+      getPresignedUploadUrl: vi.fn(),
+      head: vi.fn(),
+      getObjectStream: vi.fn(),
+      getObjectRange: vi.fn(),      delete: vi.fn(),
+      deleteByPrefix: vi.fn(),
     };
     const firestore = createFirestoreMock();
     const server = createTestServer({ storage, firestore });
@@ -251,12 +251,12 @@ describe('app metadata route', () => {
 
   it('returns 400 when version parameter contains unsafe characters', async () => {
     const storage: StorageService = {
-      upload: vi.fn() as any,
-      getPresignedUploadUrl: vi.fn() as any,
-      head: vi.fn() as any,
-      getObjectStream: vi.fn() as any,
-      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
-      deleteByPrefix: vi.fn() as any,
+      upload: vi.fn(),
+      getPresignedUploadUrl: vi.fn(),
+      head: vi.fn(),
+      getObjectStream: vi.fn(),
+      getObjectRange: vi.fn(),      delete: vi.fn(),
+      deleteByPrefix: vi.fn(),
     };
     const firestore = createFirestoreMock();
     const server = createTestServer({ storage, firestore });
@@ -271,12 +271,12 @@ describe('app metadata route', () => {
 
   it('returns 400 when metadata ZIP body is empty', async () => {
     const storage: StorageService = {
-      upload: vi.fn() as any,
-      getPresignedUploadUrl: vi.fn() as any,
-      head: vi.fn() as any,
-      getObjectStream: vi.fn() as any,
-      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
-      deleteByPrefix: vi.fn() as any,
+      upload: vi.fn(),
+      getPresignedUploadUrl: vi.fn(),
+      head: vi.fn(),
+      getObjectStream: vi.fn(),
+      getObjectRange: vi.fn(),      delete: vi.fn(),
+      deleteByPrefix: vi.fn(),
     };
     const firestore = createFirestoreMock();
     const server = createTestServer({ storage, firestore });
@@ -294,12 +294,12 @@ describe('app metadata route', () => {
 
   it('returns 400 when no build exists for project/version', async () => {
     const storage: StorageService = {
-      upload: vi.fn() as any,
-      getPresignedUploadUrl: vi.fn() as any,
-      head: vi.fn() as any,
-      getObjectStream: vi.fn() as any,
-      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
-      deleteByPrefix: vi.fn() as any,
+      upload: vi.fn(),
+      getPresignedUploadUrl: vi.fn(),
+      head: vi.fn(),
+      getObjectStream: vi.fn(),
+      getObjectRange: vi.fn(),      delete: vi.fn(),
+      deleteByPrefix: vi.fn(),
     };
     const firestore = createFirestoreMock({
       getLatestBuild: vi.fn(async () => null),
@@ -320,12 +320,12 @@ describe('app metadata route', () => {
   it('works without queue binding and returns queued=false', async () => {
     const upload = vi.fn(async (key: string) => ({ url: `https://storage.test/${key}`, path: key }));
     const storage: StorageService = {
-      upload: upload as any,
-      getPresignedUploadUrl: vi.fn() as any,
-      head: vi.fn() as any,
-      getObjectStream: vi.fn() as any,
-      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
-      deleteByPrefix: vi.fn() as any,
+      upload: upload,
+      getPresignedUploadUrl: vi.fn(),
+      head: vi.fn(),
+      getObjectStream: vi.fn(),
+      getObjectRange: vi.fn(),      delete: vi.fn(),
+      deleteByPrefix: vi.fn(),
     };
     const latestBuild: Build = {
         id: 'build-123',
@@ -356,21 +356,21 @@ describe('app metadata route', () => {
 
   it('requires auth when API key service is configured', async () => {
     const storage: StorageService = {
-      upload: vi.fn() as any,
-      getPresignedUploadUrl: vi.fn() as any,
-      head: vi.fn() as any,
-      getObjectStream: vi.fn() as any,
-      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
-      deleteByPrefix: vi.fn() as any,
+      upload: vi.fn(),
+      getPresignedUploadUrl: vi.fn(),
+      head: vi.fn(),
+      getObjectStream: vi.fn(),
+      getObjectRange: vi.fn(),      delete: vi.fn(),
+      deleteByPrefix: vi.fn(),
     };
     const firestore = createFirestoreMock();
     const apiKeyService: ApiKeyService = {
-      createApiKey: vi.fn() as any,
-      validateApiKey: vi.fn() as any,
-      listApiKeys: vi.fn() as any,
-      revokeApiKey: vi.fn() as any,
-      deleteApiKey: vi.fn() as any,
-      updateLastUsed: vi.fn() as any,
+      createApiKey: vi.fn(),
+      validateApiKey: vi.fn(),
+      listApiKeys: vi.fn(),
+      revokeApiKey: vi.fn(),
+      deleteApiKey: vi.fn(),
+      updateLastUsed: vi.fn(),
     };
 
     const server = createTestServer({ storage, firestore, apiKeyService });

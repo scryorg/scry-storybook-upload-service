@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_BOUNDED_ZIP_LIMITS, type BoundedZipLimits } from './bounded-zip.js';
-import { buildZip, deflateEntry, streamOf, chunkedStreamOf, readFullZip, readFullZipFromStream } from './__tests__/test-helpers.js';
+import { buildZip, deflateEntry, chunkedStreamOf, readFullZip, readFullZipFromStream } from './__tests__/test-helpers.js';
 import { archiverZipFromBuffers, archiverZipFromDirectory, archiverZipMixedInputs } from './__tests__/archiver-helpers.js';
 
 const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]); // just the magic bytes
@@ -449,7 +449,6 @@ describe('readBoundedZip (central-directory-driven)', () => {
         }
 
         const peakGrowthMb = (peakHeap - baselineHeap) / (1024 * 1024);
-        // eslint-disable-next-line no-console
         console.log(
           `[bounded-zip 150MB test] baseline heap ${(baselineHeap / 1024 / 1024).toFixed(1)} MB, ` +
             `peak heap ${(peakHeap / 1024 / 1024).toFixed(1)} MB, growth ${peakGrowthMb.toFixed(1)} MB ` +
@@ -572,7 +571,6 @@ describe('readBoundedZip (central-directory-driven)', () => {
         if (result.ok) return;
         expect(result.issues.map((i) => i.code)).toEqual(['BUNDLE_SIDECARS_TOO_LARGE']);
 
-        // eslint-disable-next-line no-console
         console.log(
           `[F60 95x11MB repro] external growth ${externalDeltaMb.toFixed(1)} MB, heapUsed growth ` +
             `${heapUsedDeltaMb.toFixed(1)} MB (rss growth ${rssDeltaMb.toFixed(1)} MB, logged only — see ` +
@@ -621,7 +619,6 @@ describe('readBoundedZip (central-directory-driven)', () => {
           expect(result.files.get(`structure/${i}.json`)).toMatchObject({ checked: true });
         }
 
-        // eslint-disable-next-line no-console
         console.log(
           `[F60 225x2MB+images repro] external growth ${externalDeltaMb.toFixed(1)} MB, heapUsed growth ` +
             `${heapUsedDeltaMb.toFixed(1)} MB (rss growth ${rssDeltaMb.toFixed(1)} MB, logged only) for a bundle ` +
@@ -676,7 +673,6 @@ describe('readBoundedZip (central-directory-driven)', () => {
           });
         }
 
-        // eslint-disable-next-line no-console
         console.log(
           `[F69 ${imageCount}x64KiB-images repro] external growth ${externalDeltaMb.toFixed(1)} MB, heapUsed growth ` +
             `${heapUsedDeltaMb.toFixed(1)} MB (rss growth ${rssDeltaMb.toFixed(1)} MB, logged only) for a bundle ` +

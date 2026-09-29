@@ -21,6 +21,12 @@ const REPO = 'scryorg/scry-capture-format';
 const VERSION_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src', 'vendor', 'scf', 'VERSION');
 
 function gh(args) {
+  // sonarjs/no-os-command-from-path: this is a local dev/CI convenience script (see the file's own
+  // doc comment — never part of the deployed service), invoked in an environment that already
+  // requires an authenticated `gh` CLI on PATH for this exact check to run at all. Hardcoding an
+  // absolute path here would be environment-specific and break portability across dev boxes/CI
+  // runners for no real safety gain in this context.
+  // eslint-disable-next-line sonarjs/no-os-command-from-path
   return execFileSync('gh', args, { encoding: 'utf8' }).trim();
 }
 
