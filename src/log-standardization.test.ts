@@ -167,7 +167,6 @@ describe('guarantee-3 id echoed and logged per response class', () => {
     const { server, queue } = setup();
     const res = await server.request('/upload-images/proj/complete', JSON_POST({ uploadId: 'u1', zipKey: 'proj/uploads/1/images.zip' }));
     // Firestore double has no upload methods, so this may fail after the enqueue point; only assert when it sent.
-    void res;
     for (const call of queue.send.mock.calls as unknown as Array<[Record<string, unknown>]>) {
       expect(call[0].requestId).toBe(res.headers.get('x-scry-request-id'));
     }

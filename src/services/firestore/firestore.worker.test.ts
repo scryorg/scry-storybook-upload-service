@@ -537,7 +537,7 @@ describe('FirestoreServiceWorker', () => {
       },
     });
     // @ts-expect-error - test override
-    globalThis.fetch = vi.fn(async () => ({ ok: false, status: 400, statusText: 'Bad Request', text: async () => body })) as any;
+    globalThis.fetch = vi.fn(async () => ({ ok: false, status: 400, statusText: 'Bad Request', text: async () => body })) as unknown as typeof fetch;
 
     const svc = createSvc();
     const err = (await svc.updateBuild('my-project', 'build-9', { processingStatus: 'failed' }).catch((e) => e)) as Error & {
@@ -565,7 +565,7 @@ describe('FirestoreServiceWorker', () => {
         },
       });
     // @ts-expect-error - test override
-    globalThis.fetch = vi.fn(async () => ({ ok: false, status: 400, statusText: 'Bad Request', text: async () => mk(400) })) as any;
+    globalThis.fetch = vi.fn(async () => ({ ok: false, status: 400, statusText: 'Bad Request', text: async () => mk(400) })) as unknown as typeof fetch;
     const e400 = (await createSvc().updateBuild('my-project', 'b', { processingStatus: 'failed' }).catch((e) => e)) as Error & {
       firestoreBody?: string;
     };
@@ -573,13 +573,13 @@ describe('FirestoreServiceWorker', () => {
     expect(e400.firestoreBody!.length).toBeLessThanOrEqual(500);
     expect(e400.firestoreBody).not.toContain('abc123DEF456ghi789');
     // @ts-expect-error - test override
-    globalThis.fetch = vi.fn(async () => ({ ok: false, status: 403, statusText: 'Forbidden', text: async () => mk(403) })) as any;
+    globalThis.fetch = vi.fn(async () => ({ ok: false, status: 403, statusText: 'Forbidden', text: async () => mk(403) })) as unknown as typeof fetch;
     const e403 = (await createSvc().updateBuild('my-project', 'b', { processingStatus: 'failed' }).catch((e) => e)) as Error & {
       firestoreBody?: string;
     };
     expect(e403.firestoreBody).toBeDefined(); // 4xx keeps it
     // @ts-expect-error - test override
-    globalThis.fetch = vi.fn(async () => ({ ok: false, status: 500, statusText: 'Server Error', text: async () => mk(500) })) as any;
+    globalThis.fetch = vi.fn(async () => ({ ok: false, status: 500, statusText: 'Server Error', text: async () => mk(500) })) as unknown as typeof fetch;
     const e500 = (await createSvc().updateBuild('my-project', 'b', { processingStatus: 'failed' }).catch((e) => e)) as Error & {
       firestoreBody?: string;
     };
@@ -589,7 +589,7 @@ describe('FirestoreServiceWorker', () => {
   it('a non-JSON error body adds no detail and still throws the plain status message (M2)', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     // @ts-expect-error - test override
-    globalThis.fetch = vi.fn(async () => ({ ok: false, status: 400, statusText: 'Bad Request', text: async () => '<html>nope</html>' })) as any;
+    globalThis.fetch = vi.fn(async () => ({ ok: false, status: 400, statusText: 'Bad Request', text: async () => '<html>nope</html>' })) as unknown as typeof fetch;
     await expect(createSvc().updateBuild('my-project', 'build-9', { processingStatus: 'failed' })).rejects.toThrow(
       /^Failed to patch document: 400 Bad Request$/
     );

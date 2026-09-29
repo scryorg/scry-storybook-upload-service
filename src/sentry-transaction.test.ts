@@ -1,3 +1,4 @@
+/* eslint-disable sonarjs/no-hardcoded-ip -- literal IPs/URLs are the scrubber's test inputs */
 import { describe, expect, it } from 'vitest';
 import * as Sentry from '@sentry/cloudflare';
 import { sentryOptions } from './entry.worker.js';

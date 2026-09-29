@@ -1,3 +1,4 @@
+/* eslint-disable sonarjs/no-hardcoded-ip, sonarjs/no-clear-text-protocols -- literal IPs/URLs are the scrubber's test inputs */
 import { describe, expect, it } from 'vitest';
 import { MAX_SCRUB_CHARS, scrubBreadcrumb, scrubEvent, scrubSpan, scrubString, scrubTransaction } from './sentry-scrub.js';
 

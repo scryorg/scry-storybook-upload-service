@@ -1,6 +1,6 @@
 // In src/app.ts
 
-import { Hono, type Context } from 'hono';
+import type { Context } from 'hono';
 import { deployStamp, type StampBindings } from './deploy-stamp.js';
 import { currentTraceContext } from './trace-context.js';
 import { OpenAPIHono } from '@hono/zod-openapi';
@@ -8,7 +8,7 @@ import { createRoute } from '@hono/zod-openapi';
 import { z } from 'zod';
 import { swaggerUI } from '@hono/swagger-ui';
 import { requestIdMiddleware, errorHandler } from './middleware/request-id.js';
-import { log, logInfo, logWarn, reportError, reqFields } from './lib/log.js';
+import { log, logWarn, reportError, reqFields } from './lib/log.js';
 import type { StorageService, StorageObjectMeta } from './services/storage/storage.service.js';
 import type { FirestoreService } from './services/firestore/firestore.service.js';
 import type {
@@ -82,7 +82,7 @@ function logCiTimings(
   route: string,
   ids: { project: string; version: string; buildNumber?: number },
   parsed: CiTimingsParse,
-  c?: Context<any>
+  c?: Context<AppEnv>
 ): void {
   const fields = reqFields(c, { route: `/${route}`, project: ids.project });
   if (parsed.status === 'ok') {
@@ -118,7 +118,7 @@ async function recordBuildProvenance(
   build: { id: string; provenanceError?: unknown },
   route: 'coverage' | 'metadata',
   gitContext: { commitSha?: string; branch?: string },
-  c?: Context<any>
+  c?: Context<AppEnv>
 ): Promise<void> {
   const fields = reqFields(c, { route: `/${route}`, project, build_id: build.id });
   try {
@@ -420,8 +420,7 @@ app.openapi(uploadRoute, async (c) => {
             return c.json({ error: 'Invalid coverage JSON' }, 400);
           }
         }
-      } catch (formDataError) {
-        void formDataError;
+      } catch {
         log.debug('formdata parse failed using busboy', reqFields(c, { err_code: 'formdata_parse_failed' }));
 
         // Fallback to busboy parser for Node.js compatibility
@@ -451,9 +450,8 @@ app.openapi(uploadRoute, async (c) => {
               return c.json({ error: 'Invalid coverage JSON' }, 400);
             }
           }
-        } catch (busboyError) {
+        } catch {
           logWarn(c, 'busboy parsing failed', 'multipart_parse_failed');
-          void busboyError;
           return c.json(
             {
               error:
@@ -489,9 +487,8 @@ app.openapi(uploadRoute, async (c) => {
         file = new File([body], filename, { type: mimeType });
         
         log.debug('raw binary upload received', reqFields(c));
-      } catch (bodyError) {
+      } catch {
         logWarn(c, 'raw body parsing failed', 'raw_body_parse_failed');
-        void bodyError;
         return c.json({ error: 'Failed to parse raw file upload' }, 400);
       }
     }
@@ -746,8 +743,7 @@ app.openapi(coverageUploadRoute, async (c) => {
       coverage = normalizeCoverageInput(coveragePayload, {
         reportUrl: coverageResult.url,
       }) as BuildCoverage;
-    } catch (e) {
-      void e;
+    } catch {
       logWarn(c, 'coverage normalization failed', 'coverage_normalize_failed');
       return c.json({ error: 'Invalid coverage data' }, 400);
     }
@@ -1312,7 +1308,7 @@ const bundleCompleteRoute = createRoute({
 // uploaded object and mark the build failed, logging either half's failure rather than throwing --
 // a rejection response must still reach the caller even if this cleanup half-fails.
 async function cleanupRejectedBundle(
-  c: Context<any>,
+  c: Context<AppEnv>,
   storage: StorageService,
   firestore: FirestoreService,
   project: string,

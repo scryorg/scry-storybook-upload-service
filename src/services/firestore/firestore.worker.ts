@@ -185,7 +185,7 @@ export class FirestoreServiceWorker implements FirestoreService {
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ fields }),
       });
-    } catch (e) {
+    } catch {
       log.warn('could not record event', { err_code: 'event_record_failed' });
     }
   }
@@ -502,7 +502,7 @@ export class FirestoreServiceWorker implements FirestoreService {
         limit: 5,
       };
       log.debug('get build by version step');
-      const fallbackDocs = await this.queryDocuments(parentPath, fallbackQuery, token);
+      await this.queryDocuments(parentPath, fallbackQuery, token);
       log.debug('get build by version step');
       return null;
     }
@@ -704,7 +704,7 @@ export class FirestoreServiceWorker implements FirestoreService {
       if (counterDoc && counterDoc.fields?.currentUploadNumber?.integerValue) {
         uploadNumber = parseInt(counterDoc.fields.currentUploadNumber.integerValue) + 1;
       }
-    } catch (error) {
+    } catch {
       log.warn('could not read upload counter', { err_code: 'upload_counter_read_failed' });
     }
 
@@ -753,7 +753,7 @@ export class FirestoreServiceWorker implements FirestoreService {
       const doc = await this.getDocument(uploadPath, token);
       if (!doc) return null;
       return this.convertDocToUpload(uploadId, doc.fields);
-    } catch (error) {
+    } catch {
       log.warn('could not get upload', { err_code: 'upload_get_failed' });
       return null;
     }
@@ -1036,8 +1036,9 @@ export class FirestoreServiceWorker implements FirestoreService {
       // on the error for Sentry `extra`. The log line keeps a status-bearing code.
       const { detail, body } = describeFirestoreError(errorBody);
       log.error('patch failed', { err_code: `firestore_${response.status}`, status: response.status });
+      const detailSuffix = detail ? ` (${detail})` : '';
       const failure = new Error(
-        `Failed to patch document: ${response.status} ${response.statusText}${detail ? ` (${detail})` : ''}`
+        `Failed to patch document: ${response.status} ${response.statusText}${detailSuffix}`
       ) as Error & { firestoreBody?: string };
       // Only a 4xx body (a rejected request: bad field path) is worth sending to Sentry; a 5xx body is upstream noise.
       if (response.status >= 400 && response.status < 500) failure.firestoreBody = body;
@@ -1047,7 +1048,6 @@ export class FirestoreServiceWorker implements FirestoreService {
   }
 
   private async queryDocuments(parent: string, structuredQuery: FirestoreStructuredQuery, token: string): Promise<FirestoreDocument[]> {
-    const parentName = `projects/${this.config.projectId}/databases/(default)/documents/${parent}`;
     log.debug('query documents step');
     // Use the parent path in the URL for subcollection queries. An empty parent means a query
     // rooted at the documents collection itself — a top-level collection query, or a true

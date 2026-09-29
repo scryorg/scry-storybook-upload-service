@@ -113,6 +113,12 @@ function computeRetryDelayMs(
   return retryAfterMs ?? backoffMs(attempt, baseMs, capMs, random);
 }
 
+/** Log fields for one retry: a code plus the status when there is a real one (a network throw has none). */
+function retryLogFields(status: number | null): { err_code: string; status?: number } {
+  if (status === null) return { err_code: 'firestore_transient_network' };
+  return Number.isFinite(status) ? { err_code: 'firestore_transient', status } : { err_code: 'firestore_transient' };
+}
+
 /**
  * Call `doFetch()` and retry the same request on a transient failure. Returns
  * the last `Response` unchanged on a non-retryable status or once attempts are
@@ -150,10 +156,7 @@ export async function retryFetch(doFetch: () => Promise<Response>, opts: RetryFe
 
     const delayMs = computeRetryDelayMs(response, attempt, baseMs, capMs, random);
     // Status-bearing (log-standardization M2): 429 vs 503 vs a network throw is the whole diagnosis.
-    log.warn('firestore retrying after transient error', {
-      err_code: status === null ? 'firestore_transient_network' : 'firestore_transient',
-      ...(status !== null && Number.isFinite(status) ? { status } : {}),
-    });
+    log.warn('firestore retrying after transient error', retryLogFields(status));
     // F11: drain/cancel the body of the response we're about to discard and retry. An unread body
     // left dangling on Cloudflare Workers can count toward the runtime's 6-simultaneous-connection
     // limit and get the whole response cancelled mid-retry -- undermining the retry during exactly
