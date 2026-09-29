@@ -4,6 +4,7 @@ import { app, type AppEnv } from './app.js';
 
 import type { StorageService } from './services/storage/storage.service.js';
 import type { FirestoreService } from './services/firestore/firestore.service.js';
+import type { CreateBuildData } from './services/firestore/firestore.types.js';
 
 function createTestServer(options: { storage: StorageService; firestore?: FirestoreService }) {
   const wrapper = new Hono<AppEnv>();
@@ -25,15 +26,15 @@ describe('coverage endpoints', () => {
     const uploadMock = vi.fn(async (key: string) => ({ url: `https://storage.test/${key}`, path: key }));
 
     const storage: StorageService = {
-      upload: uploadMock as any,
-      getPresignedUploadUrl: vi.fn() as any,
-      head: vi.fn() as any,
-      getObjectStream: vi.fn() as any,
-      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
-      deleteByPrefix: vi.fn() as any,
+      upload: uploadMock,
+      getPresignedUploadUrl: vi.fn(),
+      head: vi.fn(),
+      getObjectStream: vi.fn(),
+      getObjectRange: vi.fn(),      delete: vi.fn(),
+      deleteByPrefix: vi.fn(),
     };
 
-    const createBuildMock = vi.fn(async (_projectId: string, data: any) => ({
+    const createBuildMock = vi.fn(async (_projectId: string, data: CreateBuildData) => ({
       id: 'build-1',
       projectId: 'my-project',
       versionId: data.versionId,
@@ -46,15 +47,15 @@ describe('coverage endpoints', () => {
     }));
 
     const firestore: FirestoreService = {
-      createBuild: createBuildMock as any,
-      getBuild: vi.fn() as any,
-      getProjectBuilds: vi.fn() as any,
-      getBuildByVersion: vi.fn() as any,
-      getLatestBuild: vi.fn() as any,
-      updateBuild: vi.fn() as any,
-      updateBuildCoverage: vi.fn() as any,
-      archiveBuild: vi.fn() as any,
-      deleteBuild: vi.fn() as any,
+      createBuild: createBuildMock,
+      getBuild: vi.fn(),
+      getProjectBuilds: vi.fn(),
+      getBuildByVersion: vi.fn(),
+      getLatestBuild: vi.fn(),
+      updateBuild: vi.fn(),
+      updateBuildCoverage: vi.fn(),
+      archiveBuild: vi.fn(),
+      deleteBuild: vi.fn(),
     };
 
     const server = createTestServer({ storage, firestore });
@@ -104,30 +105,30 @@ describe('coverage endpoints', () => {
     expect(uploadMock).toHaveBeenCalledWith('my-project/v1.0.0/storybook.zip', expect.anything(), 'application/zip');
 
     // coverage is normalized into Firestore build payload
-    const buildData = (createBuildMock.mock.calls[0] as any)[1];
+    const buildData = (createBuildMock.mock.calls[0])[1];
     expect(buildData.coverage.reportUrl).toBe('https://storage.test/my-project/v1.0.0/coverage-report.json');
     expect(buildData.coverage.summary.totalComponents).toBe(50);
-    expect(buildData.coverage.summary.componentCoverage).toBe(0.91);
+    expect(buildData.coverage.summary.componentCoverage).toBeCloseTo(0.91);
   });
 
   it('POST /upload/:project/:version/coverage uploads JSON and updates Firestore coverage', async () => {
     const uploadMock = vi.fn(async (key: string) => ({ url: `https://storage.test/${key}`, path: key }));
 
     const storage: StorageService = {
-      upload: uploadMock as any,
-      getPresignedUploadUrl: vi.fn() as any,
-      head: vi.fn() as any,
-      getObjectStream: vi.fn() as any,
-      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
-      deleteByPrefix: vi.fn() as any,
+      upload: uploadMock,
+      getPresignedUploadUrl: vi.fn(),
+      head: vi.fn(),
+      getObjectStream: vi.fn(),
+      getObjectRange: vi.fn(),      delete: vi.fn(),
+      deleteByPrefix: vi.fn(),
     };
 
     const updateBuildCoverageMock = vi.fn(async () => undefined);
 
     const firestore: FirestoreService = {
-      createBuild: vi.fn() as any,
-      getBuild: vi.fn() as any,
-      getProjectBuilds: vi.fn() as any,
+      createBuild: vi.fn(),
+      getBuild: vi.fn(),
+      getProjectBuilds: vi.fn(),
       getBuildByVersion: vi.fn(async () => ({
         id: 'build-1',
         projectId: 'my-project',
@@ -137,12 +138,12 @@ describe('coverage endpoints', () => {
         status: 'active',
         createdAt: new Date(),
         createdBy: 'test',
-      })) as any,
-      getLatestBuild: vi.fn() as any,
-      updateBuild: vi.fn() as any,
-      updateBuildCoverage: updateBuildCoverageMock as any,
-      archiveBuild: vi.fn() as any,
-      deleteBuild: vi.fn() as any,
+      })),
+      getLatestBuild: vi.fn(),
+      updateBuild: vi.fn(),
+      updateBuildCoverage: updateBuildCoverageMock,
+      archiveBuild: vi.fn(),
+      deleteBuild: vi.fn(),
     };
 
     const server = createTestServer({ storage, firestore });
@@ -192,19 +193,19 @@ describe('coverage endpoints', () => {
   it('POST /upload/:project/:version/coverage records the report\'s commit on the build', async () => {
     const uploadMock = vi.fn(async (key: string) => ({ url: `https://storage.test/${key}`, path: key }));
     const storage: StorageService = {
-      upload: uploadMock as any,
-      getPresignedUploadUrl: vi.fn() as any,
-      head: vi.fn() as any,
-      getObjectStream: vi.fn() as any,
-      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
-      deleteByPrefix: vi.fn() as any,
+      upload: uploadMock,
+      getPresignedUploadUrl: vi.fn(),
+      head: vi.fn(),
+      getObjectStream: vi.fn(),
+      getObjectRange: vi.fn(),      delete: vi.fn(),
+      deleteByPrefix: vi.fn(),
     };
 
     const updateBuildMock = vi.fn(async () => undefined);
     const firestore: FirestoreService = {
-      createBuild: vi.fn() as any,
-      getBuild: vi.fn() as any,
-      getProjectBuilds: vi.fn() as any,
+      createBuild: vi.fn(),
+      getBuild: vi.fn(),
+      getProjectBuilds: vi.fn(),
       getBuildByVersion: vi.fn(async () => ({
         id: 'build-1',
         projectId: 'my-project',
@@ -214,12 +215,12 @@ describe('coverage endpoints', () => {
         status: 'active',
         createdAt: new Date(),
         createdBy: 'test',
-      })) as any,
-      getLatestBuild: vi.fn() as any,
-      updateBuild: updateBuildMock as any,
-      updateBuildCoverage: vi.fn(async () => undefined) as any,
-      archiveBuild: vi.fn() as any,
-      deleteBuild: vi.fn() as any,
+      })),
+      getLatestBuild: vi.fn(),
+      updateBuild: updateBuildMock,
+      updateBuildCoverage: vi.fn(async () => undefined),
+      archiveBuild: vi.fn(),
+      deleteBuild: vi.fn(),
     };
 
     const server = createTestServer({ storage, firestore });
@@ -262,19 +263,19 @@ describe('coverage endpoints', () => {
   it('POST /upload/:project/:version/coverage writes no provenance for a git-less report', async () => {
     const uploadMock = vi.fn(async (key: string) => ({ url: `https://storage.test/${key}`, path: key }));
     const storage: StorageService = {
-      upload: uploadMock as any,
-      getPresignedUploadUrl: vi.fn() as any,
-      head: vi.fn() as any,
-      getObjectStream: vi.fn() as any,
-      getObjectRange: vi.fn() as any,      delete: vi.fn() as any,
-      deleteByPrefix: vi.fn() as any,
+      upload: uploadMock,
+      getPresignedUploadUrl: vi.fn(),
+      head: vi.fn(),
+      getObjectStream: vi.fn(),
+      getObjectRange: vi.fn(),      delete: vi.fn(),
+      deleteByPrefix: vi.fn(),
     };
 
     const updateBuildMock = vi.fn(async () => undefined);
     const firestore: FirestoreService = {
-      createBuild: vi.fn() as any,
-      getBuild: vi.fn() as any,
-      getProjectBuilds: vi.fn() as any,
+      createBuild: vi.fn(),
+      getBuild: vi.fn(),
+      getProjectBuilds: vi.fn(),
       getBuildByVersion: vi.fn(async () => ({
         id: 'build-1',
         projectId: 'my-project',
@@ -284,12 +285,12 @@ describe('coverage endpoints', () => {
         status: 'active',
         createdAt: new Date(),
         createdBy: 'test',
-      })) as any,
-      getLatestBuild: vi.fn() as any,
-      updateBuild: updateBuildMock as any,
-      updateBuildCoverage: vi.fn(async () => undefined) as any,
-      archiveBuild: vi.fn() as any,
-      deleteBuild: vi.fn() as any,
+      })),
+      getLatestBuild: vi.fn(),
+      updateBuild: updateBuildMock,
+      updateBuildCoverage: vi.fn(async () => undefined),
+      archiveBuild: vi.fn(),
+      deleteBuild: vi.fn(),
     };
 
     const server = createTestServer({ storage, firestore });

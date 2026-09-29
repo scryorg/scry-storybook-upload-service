@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ApiKeyServiceWorker } from './apikey.worker.js';
-import * as utils from './apikey.utils.js';
 
 // Mock the fetch function
 const mockFetch = vi.fn();
@@ -10,8 +9,11 @@ global.fetch = mockFetch;
 const mockSign = vi.fn().mockResolvedValue(new ArrayBuffer(256));
 const mockDigest = vi.fn();
 const mockImportKey = vi.fn().mockResolvedValue({});
+// This IS the test's fake implementation of the RNG API (`global.crypto.getRandomValues` below) --
+// deterministic-quality randomness is fine here, there is no security property under test.
 const mockGetRandomValues = vi.fn((array: Uint8Array) => {
   for (let i = 0; i < array.length; i++) {
+    // eslint-disable-next-line sonarjs/pseudo-random
     array[i] = Math.floor(Math.random() * 256);
   }
   return array;
@@ -51,7 +53,7 @@ describe('ApiKeyServiceWorker', () => {
     service = new ApiKeyServiceWorker(config);
     
     // Mock the getAccessToken method directly to avoid JWT/crypto issues in tests
-    (service as any).getAccessToken = vi.fn().mockResolvedValue('mock-access-token');
+    (service).getAccessToken = vi.fn().mockResolvedValue('mock-access-token');
     
     // Reset fetch mock
     mockFetch.mockReset();
@@ -215,7 +217,7 @@ describe('ApiKeyServiceWorker', () => {
       expect(result[1].status).toBe('revoked');
       expect(result[1].revokedBy).toBe('admin-789');
       // Ensure hash is not included
-      expect((result[0] as any).hash).toBeUndefined();
+      expect((result[0]).hash).toBeUndefined();
     });
   });
 
@@ -243,7 +245,7 @@ describe('ApiKeyServiceWorker', () => {
       // patchDocument() is a shared private helper -- an empty updateMask.fieldPaths query is a
       // Firestore full-document replace, not a no-op, so it must fail closed regardless of caller.
       await expect(
-        (service as any).patchDocument('projects/my-project/apiKeys/key-123', {}, 'mock-access-token')
+        (service).patchDocument('projects/my-project/apiKeys/key-123', {}, 'mock-access-token')
       ).rejects.toThrow(/empty update mask/i);
       expect(mockFetch).not.toHaveBeenCalled();
     });

@@ -22,6 +22,44 @@ interface ApiKeyWorkerConfig {
 }
 
 /**
+ * A Firestore REST API "Value" wire object, narrowed to the variants this file's
+ * key documents actually use (string/timestamp/boolean fields only — no nested
+ * map/array values here, unlike firestore.worker.ts's build documents).
+ */
+interface FirestoreValue {
+  booleanValue?: boolean;
+  stringValue?: string;
+  timestampValue?: string;
+}
+
+/** A Firestore REST document's `fields` map — also the shape every write body sends. */
+type FirestoreFields = Record<string, FirestoreValue>;
+
+/** A Firestore REST document, as returned by get/runQuery. */
+interface FirestoreDocument {
+  name: string;
+  fields: FirestoreFields;
+}
+
+/** A Firestore REST `StructuredQuery`, narrowed to the shapes this file builds. */
+interface FirestoreStructuredQuery {
+  from: Array<{ collectionId: string }>;
+  where?: {
+    fieldFilter?: { field: { fieldPath: string }; op: string; value: FirestoreValue };
+    compositeFilter?: {
+      op: string;
+      filters: Array<{ fieldFilter: { field: { fieldPath: string }; op: string; value: FirestoreValue } }>;
+    };
+  };
+  limit?: number;
+}
+
+/** One element of a Firestore REST `runQuery` response body. */
+interface FirestoreRunQueryResponseItem {
+  document?: FirestoreDocument;
+}
+
+/**
  * Cloudflare Worker implementation of ApiKeyService using Firestore REST API
  * This implementation uses service account authentication via JWT tokens
  */
@@ -61,7 +99,7 @@ export class ApiKeyServiceWorker implements ApiKeyService {
     const now = new Date();
     const keyPath = `projects/${projectId}/apiKeys/${keyId}`;
     
-    const keyDoc: any = {
+    const keyDoc: FirestoreFields = {
       name: { stringValue: data.name },
       prefix: { stringValue: prefix },
       hash: { stringValue: hash },
@@ -285,7 +323,7 @@ export class ApiKeyServiceWorker implements ApiKeyService {
   // Idempotent write: every field here is a fixed value the caller already
   // computed (never a Firestore increment transform), so resending the same
   // PATCH on a transient failure is safe. Retried on 429/503/500/network (F85).
-  private async setDocument(path: string, fields: any, token: string): Promise<void> {
+  private async setDocument(path: string, fields: FirestoreFields, token: string): Promise<void> {
     const url = `${this.baseUrl}/${path}`;
     const response = await retryFetch(() => fetch(url, {
       method: 'PATCH',
@@ -302,7 +340,7 @@ export class ApiKeyServiceWorker implements ApiKeyService {
   }
 
   // Idempotent write, same reasoning as setDocument above. Retried on 429/503/500/network (F85).
-  private async patchDocument(path: string, fields: any, token: string): Promise<void> {
+  private async patchDocument(path: string, fields: FirestoreFields, token: string): Promise<void> {
     const url = `${this.baseUrl}/${path}`;
     const fieldKeys = Object.keys(fields);
     // F9 (upload-provenance-updatemask security review): a PATCH with NO updateMask.fieldPaths
@@ -317,7 +355,7 @@ export class ApiKeyServiceWorker implements ApiKeyService {
     // One `updateMask.fieldPaths` param per field; a comma-joined value is one invalid path (F73/F84).
     const params = new URLSearchParams();
     for (const key of fieldKeys) {
-      params.append('updateMask.fieldPaths', /^[A-Za-z_][A-Za-z0-9_]*$/.test(key) ? key : `\`${key.replace(/`/g, '\\`')}\``);
+      params.append('updateMask.fieldPaths', /^[A-Za-z_]\w*$/.test(key) ? key : `\`${key.replace(/`/g, '\\`')}\``);
     }
 
     const response = await retryFetch(() => fetch(`${url}?${params.toString()}`, {
@@ -337,7 +375,7 @@ export class ApiKeyServiceWorker implements ApiKeyService {
   // Idempotent read: retried on 429/503/500/network (F85/F86 — this is the
   // validateApiKey query that 500'd the whole presign route for 7+ minutes
   // straight on stage without retrying).
-  private async queryDocuments(parent: string, structuredQuery: any, token: string): Promise<any[]> {
+  private async queryDocuments(parent: string, structuredQuery: FirestoreStructuredQuery, token: string): Promise<FirestoreDocument[]> {
     const url = `${this.baseUrl}/${parent}:runQuery`;
     const response = await retryFetch(() => fetch(url, {
       method: 'POST',
@@ -352,8 +390,8 @@ export class ApiKeyServiceWorker implements ApiKeyService {
       throw new Error(`Failed to query documents: ${response.statusText}`);
     }
 
-    const results = await response.json() as any[];
-    return results.filter((r: any) => r.document).map((r: any) => r.document);
+    const results = await response.json() as FirestoreRunQueryResponseItem[];
+    return results.flatMap((r) => (r.document ? [r.document] : []));
   }
 
   /**
@@ -473,9 +511,11 @@ export class ApiKeyServiceWorker implements ApiKeyService {
       base64 = btoa(binary);
     }
     
-    return base64
-      .replace(/\+/g, '-')
-      .replace(/\//g, '_')
-      .replace(/=+$/, '');
+    const unpadded = base64.replace(/\+/g, '-').replace(/\//g, '_');
+    // Strip trailing '=' padding without a `=+$`-shaped regex (sonarjs/super-linear-regex):
+    // a hand-rolled scan is O(n) with no backtracking, unlike a trailing-quantifier regex.
+    let end = unpadded.length;
+    while (end > 0 && unpadded[end - 1] === '=') end--;
+    return unpadded.slice(0, end);
   }
 }

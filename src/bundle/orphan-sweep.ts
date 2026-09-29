@@ -114,6 +114,53 @@ export interface OrphanSweepResult {
 }
 
 /**
+ * Resolves one already-filtered candidate (ledger F91/F92 sequence: R2 HEAD, then a fresh re-read,
+ * then a conditional write) and records the outcome on `result` in place. Split out of
+ * `sweepOrphanBundleBuilds` purely to keep that function's own cognitive complexity down — the
+ * per-candidate decision tree is one self-contained unit, and every path through it (skip for one
+ * of three reasons, mark failed, or record an error) already returns/logs everything it needs to.
+ */
+async function resolveOrphanCandidate(
+  store: OrphanSweepStore,
+  candidate: OrphanBundleCandidate,
+  result: OrphanSweepResult
+): Promise<void> {
+  try {
+    const exists = await store.bundleObjectExists(candidate);
+    if (exists) return;
+
+    // Ledger F92: re-check immediately before writing, not just at query time — the HEAD call
+    // above (and any retries either call made) can take long enough for a genuine, concurrent
+    // `/bundle/complete` to land in between.
+    const fresh = await store.getFreshState(candidate);
+    if (!fresh) {
+      result.skipped.push({ projectId: candidate.projectId, buildId: candidate.buildId, reason: 'deleted-before-write' });
+      return;
+    }
+    if (fresh.hasProcessingStatus) {
+      result.skipped.push({ projectId: candidate.projectId, buildId: candidate.buildId, reason: 'resolved-before-write' });
+      return;
+    }
+
+    const outcome = await store.markUploadNeverCompletedIfUnchanged(candidate, fresh.updateTime);
+    if (outcome === 'precondition-failed') {
+      result.skipped.push({ projectId: candidate.projectId, buildId: candidate.buildId, reason: 'precondition-failed' });
+      return;
+    }
+
+    result.markedFailed.push({ projectId: candidate.projectId, buildId: candidate.buildId });
+    console.log(
+      `[ORPHAN] ${candidate.projectId}/${candidate.buildId}: marked failed ` +
+        `(${UPLOAD_NEVER_COMPLETED_MESSAGE}, created ${candidate.createdAt.toISOString()})`
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[ORPHAN] Could not resolve ${candidate.projectId}/${candidate.buildId}:`, message);
+    result.errors.push({ projectId: candidate.projectId, buildId: candidate.buildId, error: message });
+  }
+}
+
+/**
  * Find bundle builds whose upload never completed and mark them `failed`.
  *
  * The store's own query (`findCandidates`) already filters to bundle builds with no
@@ -165,52 +212,7 @@ export async function sweepOrphanBundleBuilds(
   for (const candidate of candidates) {
     // See the doc comment above — the store's query already enforces this; kept as a guard.
     if (!candidate.hasSource || candidate.hasProcessingStatus) continue;
-
-    try {
-      const exists = await store.bundleObjectExists(candidate);
-      if (exists) continue;
-
-      // Ledger F92: re-check immediately before writing, not just at query time — the HEAD call
-      // above (and any retries either call made) can take long enough for a genuine, concurrent
-      // `/bundle/complete` to land in between.
-      const fresh = await store.getFreshState(candidate);
-      if (!fresh) {
-        result.skipped.push({
-          projectId: candidate.projectId,
-          buildId: candidate.buildId,
-          reason: 'deleted-before-write',
-        });
-        continue;
-      }
-      if (fresh.hasProcessingStatus) {
-        result.skipped.push({
-          projectId: candidate.projectId,
-          buildId: candidate.buildId,
-          reason: 'resolved-before-write',
-        });
-        continue;
-      }
-
-      const outcome = await store.markUploadNeverCompletedIfUnchanged(candidate, fresh.updateTime);
-      if (outcome === 'precondition-failed') {
-        result.skipped.push({
-          projectId: candidate.projectId,
-          buildId: candidate.buildId,
-          reason: 'precondition-failed',
-        });
-        continue;
-      }
-
-      result.markedFailed.push({ projectId: candidate.projectId, buildId: candidate.buildId });
-      console.log(
-        `[ORPHAN] ${candidate.projectId}/${candidate.buildId}: marked failed ` +
-          `(${UPLOAD_NEVER_COMPLETED_MESSAGE}, created ${candidate.createdAt.toISOString()})`
-      );
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      console.error(`[ORPHAN] Could not resolve ${candidate.projectId}/${candidate.buildId}:`, message);
-      result.errors.push({ projectId: candidate.projectId, buildId: candidate.buildId, error: message });
-    }
+    await resolveOrphanCandidate(store, candidate, result);
   }
 
   console.log(
