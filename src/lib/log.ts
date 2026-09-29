@@ -61,28 +61,40 @@ export const log: Logger = {
   flush: () => active().flush(),
 };
 
-/** Fields every line for this request should carry. Never throws. */
+/**
+ * Fields every line for this request should carry. Never throws.
+ *
+ * `project` and `build_id` are client-controlled until the API key middleware has validated the key
+ * for the project (it then sets c.var.projectId). So they are added only from that verified value,
+ * and a caller-supplied `project` extra that differs from it, or any `project`/`build_id` extra on a
+ * request that never authorized, is dropped (guarantee G1, UAT F47). Never read c.req.param here.
+ */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function reqFields(c: Context<any> | undefined, extra: LineFields = {}): LineFields {
   const out: LineFields = {};
+  let verified: string | undefined;
   try {
     if (c) {
       const id = c.get('requestId') as string | undefined;
       if (id) out.request_id = id;
-      const buildId = c.get('buildId') as string | undefined;
-      if (buildId) out.build_id = buildId;
-      let project: string | undefined;
-      try {
-        project = c.req.param('project') as string | undefined;
-      } catch {
-        project = undefined;
+      verified = c.get('projectId') as string | undefined;
+      if (verified) {
+        out.project = verified;
+        const buildId = c.get('buildId') as string | undefined;
+        if (buildId) out.build_id = buildId;
       }
-      if (project) out.project = project;
     }
   } catch {
     // never throw from logging
   }
-  return { ...out, ...extra };
+  const merged: LineFields = { ...out, ...extra };
+  if (!verified) {
+    delete merged.project;
+    delete merged.build_id;
+  } else if (merged.project !== verified) {
+    merged.project = verified;
+  }
+  return merged;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

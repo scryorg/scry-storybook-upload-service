@@ -17,7 +17,9 @@ declare module 'hono' {
   interface ContextVariableMap {
     /** This request's x-scry-request-id (always set by requestIdMiddleware). */
     requestId: string;
-    /** Set by handlers that know it, for the request line. */
+    /** Verified project id: set by apiKeyAuth only after the key validated for it. */
+    projectId: string;
+    /** Set by handlers once the build is looked up, for the request line. */
     buildId: string;
   }
 }
@@ -37,6 +39,21 @@ function routePattern(c: Context<any>): string {
   } catch {
     return 'unmatched';
   }
+}
+
+/**
+ * G1: project, build_id and client are logged only when the route matched a known pattern AND the
+ * API key middleware verified the project (c.var.projectId, set after the key validated for it).
+ * Never read from c.req.param or the path: those are client-controlled (UAT F47).
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function verifiedRequestFields(c: Context<any>) {
+  const route = routePattern(c);
+  const verified = route !== 'unmatched' ? (c.get('projectId') as string | undefined) : undefined;
+  const project = verified && SAFE_ID.test(verified) ? verified : undefined;
+  const buildId = project ? (c.get('buildId') as string | undefined) : undefined;
+  const client = project ? c.req.header('x-scry-client') : undefined;
+  return { route, project, buildId, client };
 }
 
 async function withRequestIdInBody(res: Response, requestId: string): Promise<Response> {
@@ -105,20 +122,13 @@ export async function requestIdMiddleware(c: Context<any>, next: Next): Promise<
   }
 
   try {
-    let project: string | undefined;
-    try {
-      project = c.req.param('project') as string | undefined;
-    } catch {
-      project = undefined;
-    }
-    const buildId = c.get('buildId') as string | undefined;
-    const client = c.req.header('x-scry-client');
+    const { route, project, buildId, client } = verifiedRequestFields(c);
     log.request({
       request_id: requestId,
-      route: routePattern(c),
+      route,
       status: c.res.status,
       ms: Date.now() - started,
-      ...(project && SAFE_ID.test(project) ? { project } : {}),
+      ...(project ? { project } : {}),
       ...(buildId && SAFE_ID.test(buildId) ? { build_id: buildId } : {}),
       ...(client && SAFE_CLIENT.test(client) ? { client } : {}),
     });

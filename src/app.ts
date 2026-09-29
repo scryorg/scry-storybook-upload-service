@@ -1009,7 +1009,7 @@ app.openapi(ciTimingsRoute, async (c) => {
       : body;
   const parsed = parseCiTimings(record);
   if (parsed.status === 'invalid') {
-    logWarn(c, 'ci timings invalid', 'ci_timings_invalid', { build_id: buildId });
+    logWarn(c, 'ci timings invalid', 'ci_timings_invalid');
     return c.json({ error: `Invalid ciTimings: ${parsed.issues.join('; ')}` }, 400);
   }
   if (parsed.status === 'absent') {
@@ -1354,7 +1354,6 @@ app.openapi(bundleCompleteRoute, async (c) => {
     const firestore = c.var.firestore;
     const queue = c.var.processingQueue;
     const requestId = c.var.requestId;
-    c.set('buildId', buildId);
 
     if (!firestore) {
       return c.json({ error: 'Firestore not configured' }, 500);
@@ -1372,6 +1371,7 @@ app.openapi(bundleCompleteRoute, async (c) => {
     if (build.versionId !== version) {
       return c.json({ error: 'Build does not belong to this project/version' }, 400);
     }
+    c.set('buildId', build.id);
 
     // Reject the bundle: delete the uploaded object, mark the build failed with the same messages
     // the caller gets back (so the Builds tab can show why), then respond 422 (contract §9).
