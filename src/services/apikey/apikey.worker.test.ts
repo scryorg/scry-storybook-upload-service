@@ -278,5 +278,16 @@ describe('ApiKeyServiceWorker', () => {
       const patchCall = mockFetch.mock.calls[0];
       expect(patchCall[0]).toContain('lastUsedAt');
     });
+
+    it('guarantee-2-single-field-unchanged: sends exactly one unquoted updateMask.fieldPaths param, byte-identical to before the fix', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({}) });
+
+      await service.updateLastUsed('my-project', 'key-123');
+
+      const url = mockFetch.mock.calls[0][0] as string;
+      const params = new URL(url).searchParams.getAll('updateMask.fieldPaths');
+      expect(params).toEqual(['lastUsedAt']);
+      expect(url).not.toContain(',');
+    });
   });
 });
