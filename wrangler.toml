@@ -112,9 +112,12 @@ queue = "scry-build-processing-staging"
 binding = "BUILD_PROCESSING_QUEUE"
 
 # Schema-v1 log lines are shipped to the central R2 store by the scry-logs tail consumer
-# (log-standardization). Staging only; production is added at promotion.
+# (log-standardization): staging ships to scry-logs-staging, production to scry-logs.
 [[env.staging.tail_consumers]]
 service = "scry-logs-staging"
+
+[[env.production.tail_consumers]]
+service = "scry-logs"
 # The processing consumer owns retries and DLQ scry-build-processing-staging-dlq.
 
 # Observability and Logging Configuration
