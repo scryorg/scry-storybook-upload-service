@@ -1,0 +1,16 @@
+{
+  "method": "POST",
+  "path": "/upload/acme/import-20261002T101500Z/bundle/complete",
+  "headers": [
+    "X-Scry-Caller",
+    "Content-Type"
+  ],
+  "body": {
+    "buildId": "<buildId from start>",
+    "zipKey": "acme/import-20261002T101500Z/builds/1/bundle.zip",
+    "skippedExtCounts": {
+      "psd": 3,
+      "tiff": 1
+    }
+  }
+}

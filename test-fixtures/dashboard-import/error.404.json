@@ -1,0 +1,8 @@
+{
+  "status": 404,
+  "note": "unknown build, or a build this caller did not start",
+  "body": {
+    "error": "Build not found",
+    "request_id": "<request id>"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "status": 200,
+  "body": {
+    "url": "<presigned PUT url>",
+    "fields": {
+      "key": "acme/import-20261002T101500Z/builds/1/bundle.zip"
+    },
+    "buildId": "build-1",
+    "buildNumber": 1
+  }
+}

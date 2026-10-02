@@ -58,6 +58,11 @@ type Bindings = StampBindings & {
 
   // Shared secret used to authorize cleanup requests.
   CLEANUP_TOKEN?: string;
+
+  // dashboard-import: shared HS256 secret for the dashboard's signed X-Scry-Caller door on the two
+  // bundle routes. A Worker secret (`wrangler secret put SCRY_UPLOAD_ASSERTION_SECRET --env <env>`);
+  // unset keeps the door closed.
+  SCRY_UPLOAD_ASSERTION_SECRET?: string;
 };
 
 // Create a new Hono instance specifically for the Worker, extending the shared AppEnv.
@@ -155,6 +160,9 @@ workerApp.use('*', async (c, next) => {
   // Inject processing queue if available
   if (c.env.BUILD_PROCESSING_QUEUE) {
     c.set('processingQueue', c.env.BUILD_PROCESSING_QUEUE);
+  }
+  if (c.env.SCRY_UPLOAD_ASSERTION_SECRET) {
+    c.set('assertionSecret', c.env.SCRY_UPLOAD_ASSERTION_SECRET);
   }
   if (c.env.CLEANUP_TOKEN) {
     c.set('cleanupToken', c.env.CLEANUP_TOKEN);

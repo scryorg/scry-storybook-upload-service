@@ -1,0 +1,21 @@
+{
+  "note": "Example only. Signed with the TEST secret below, never a real one. The dashboard signs with SCRY_UPLOAD_ASSERTION_SECRET.",
+  "header": "X-Scry-Caller",
+  "alg": "HS256",
+  "testSecret": "test-only-assertion-secret-0123456789abcdef",
+  "claims": {
+    "sub": "fakeUid_Canary_8f3a91",
+    "aud": "scry-upload",
+    "prj": "acme",
+    "ver": "import-20261002T101500Z",
+    "src": "x-adobe-bridge:other",
+    "iat": 1790000000,
+    "exp": 1790000030,
+    "jti": "jti-0123456789ab"
+  },
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJmYWtlVWlkX0NhbmFyeV84ZjNhOTEiLCJhdWQiOiJzY3J5LXVwbG9hZCIsInByaiI6ImFjbWUiLCJ2ZXIiOiJpbXBvcnQtMjAyNjEwMDJUMTAxNTAwWiIsInNyYyI6IngtYWRvYmUtYnJpZGdlOm90aGVyIiwiaWF0IjoxNzkwMDAwMDAwLCJleHAiOjE3OTAwMDAwMzAsImp0aSI6Imp0aS0wMTIzNDU2Nzg5YWIifQ.Qw--tX5Gr32iQ65acF8Q20uO24kCG79TEGUp-yLPTGA",
+  "lifetimeSeconds": 30,
+  "maxLifetimeSeconds": 60,
+  "clockSkewSeconds": 5,
+  "verifiedAt": 1790000010
+}
