@@ -1,0 +1,15 @@
+{
+  "status": 422,
+  "note": "bundle rejected: the object is deleted and the build is marked failed",
+  "body": {
+    "success": false,
+    "error": "Bundle rejected",
+    "errors": [
+      {
+        "code": "SCF_JSON_MISSING",
+        "message": "No scf.json at the bundle root, and no legacy metadata.json to convert."
+      }
+    ],
+    "request_id": "<request id>"
+  }
+}

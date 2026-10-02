@@ -157,6 +157,28 @@ For detailed Firestore setup instructions, see:
 
 The Firestore integration is **optional** - the service will work without it, but uploads won't be tracked in the database.
 
+## Dashboard import door (second auth door)
+
+The dashboard import lets a signed-in browser upload a bundle without an API key. The dashboard checks the
+caller's project role and then calls exactly two routes with a signed 60-second assertion in the `X-Scry-Caller`
+header instead of `X-API-Key`:
+
+- `POST /presigned-url/:project/:version/bundle.zip`
+- `POST /upload/:project/:version/bundle/complete`
+
+Every other route ignores the header and uses the API key as before. The assertion is an HS256 JWT signed with
+`SCRY_UPLOAD_ASSERTION_SECRET` (claims `sub`, `aud=scry-upload`, `prj`, `ver`, `src=x-adobe-bridge:*`, `iat`, `exp`,
+`jti`; at most 60 s lifetime, 5 s clock skew). Any failure is a single `401 {"error":"unauthorized"}`; the reason is
+only in the log (`err_code import_denied_<reason>`). Builds made through the door carry `channel: "dashboard"` and
+the creator's uid, and only that caller can complete them. Contract and fixtures:
+`docs/dashboard-import-contract.md`, `test-fixtures/dashboard-import/`. Browser PUT needs R2 CORS:
+`docs/dashboard-import-cors.md`.
+
+Set the secret (same value as the dashboard's) with `wrangler secret put SCRY_UPLOAD_ASSERTION_SECRET --env <env>`
+(Node: the `SCRY_UPLOAD_ASSERTION_SECRET` environment variable). **To switch the door off, unset the secret**
+(`wrangler secret delete SCRY_UPLOAD_ASSERTION_SECRET --env <env>`): the header is then ignored everywhere and the
+two routes accept API keys only, exactly as before.
+
 ## Development Guide
 
 This guide will walk you through setting up and running the service in both the Node.js and Cloudflare Worker environments.

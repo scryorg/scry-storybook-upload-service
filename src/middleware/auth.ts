@@ -98,7 +98,7 @@ function logAuth(
  */
 const VERIFIED_PROJECT = /^[A-Za-z0-9_-]{1,128}$/;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function markVerifiedProject(c: Context<any>, projectId: string): void {
+export function markVerifiedProject(c: Context<any>, projectId: string): void {
   if (VERIFIED_PROJECT.test(projectId)) c.set('projectId', projectId);
 }
 

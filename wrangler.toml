@@ -50,6 +50,8 @@ R2_BUCKET_NAME = "my-storybooks-production"
 # - FIREBASE_PROJECT_ID
 # - FIREBASE_CLIENT_EMAIL
 # - FIREBASE_PRIVATE_KEY
+# - SCRY_UPLOAD_ASSERTION_SECRET (optional; enables the dashboard's signed second door on the two bundle routes.
+#   Unset it to switch the door off. See README "Dashboard import door".)
 # - CLEANUP_TOKEN (required to enable DELETE /cleanup/:project/:version)
 # - SENTRY_DSN (Sentry Data Source Name for error tracking)
 #

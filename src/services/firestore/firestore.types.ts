@@ -215,6 +215,14 @@ export interface Build {
   uploadedByKeyProject?: string;
 
   /**
+   * Set only for a build created through the dashboard's signed door (dashboard-import): the channel
+   * marker next to `source`, and the Firebase uid the assertion named. Complete through that door
+   * requires both to match; the uid is never logged. Absent on every API-key build.
+   */
+  channel?: 'dashboard';
+  uploadedByUid?: string;
+
+  /**
    * How much CI time the deploy took, as the deployer measured it
    * (storybook-preview-ci-runtime). Absent when the deployer sent none.
    */
@@ -303,6 +311,14 @@ export interface CreateBuildData {
    */
   uploadedByKeyId?: string;
   uploadedByKeyProject?: string;
+
+  /**
+   * Set only for a build created through the dashboard's signed door (dashboard-import): the channel
+   * marker next to `source`, and the Firebase uid the assertion named. Complete through that door
+   * requires both to match; the uid is never logged. Absent on every API-key build.
+   */
+  channel?: 'dashboard';
+  uploadedByUid?: string;
 
   /**
    * How much CI time the deploy took, as the deployer measured it

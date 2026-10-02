@@ -1,0 +1,10 @@
+{
+  "status": 200,
+  "body": {
+    "success": true,
+    "message": "Bundle validated and processing queued",
+    "queued": true,
+    "buildId": "build-1",
+    "buildNumber": 1
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "status": 401,
+  "note": "every refusal is this body; the reason is only in the service log",
+  "body": {
+    "error": "unauthorized",
+    "request_id": "<request id>"
+  }
+}

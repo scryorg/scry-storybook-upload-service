@@ -64,6 +64,8 @@ export class FirestoreServiceNode implements FirestoreService {
         ...(data.branch ? { branch: data.branch } : {}),
         ...(data.uploadedByKeyId ? { uploadedByKeyId: data.uploadedByKeyId } : {}),
         ...(data.uploadedByKeyProject ? { uploadedByKeyProject: data.uploadedByKeyProject } : {}),
+        ...(data.channel ? { channel: data.channel } : {}),
+        ...(data.uploadedByUid ? { uploadedByUid: data.uploadedByUid } : {}),
         // CI timings (storybook-preview-ci-runtime); absent when not sent.
         ...(data.ciTimings ? { ciTimings: data.ciTimings } : {}),
         // Where this build's captures came from (capture-sources); absent = legacy Storybook web.
@@ -390,6 +392,8 @@ export class FirestoreServiceNode implements FirestoreService {
       ...(data.provenanceError ? { provenanceError: data.provenanceError } : {}),
       ...(data.uploadedByKeyId ? { uploadedByKeyId: data.uploadedByKeyId } : {}),
       ...(data.uploadedByKeyProject ? { uploadedByKeyProject: data.uploadedByKeyProject } : {}),
+      ...(data.channel === 'dashboard' ? { channel: data.channel } : {}),
+      ...(data.uploadedByUid ? { uploadedByUid: data.uploadedByUid } : {}),
       ...(data.ciTimings ? { ciTimings: data.ciTimings } : {}),
       ...(data.source ? { source: data.source } : {}),
       ...(data.validationErrors ? { validationErrors: data.validationErrors } : {}),

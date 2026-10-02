@@ -11,7 +11,9 @@ import { requestIdMiddleware, errorHandler } from './middleware/request-id.js';
 import { log, logWarn, reportError, reqFields } from './lib/log.js';
 import type { StorageService, StorageObjectMeta } from './services/storage/storage.service.js';
 import type { FirestoreService } from './services/firestore/firestore.service.js';
+import type { DashboardCaller } from './middleware/dashboard-door.js';
 import type {
+  Build,
   BuildCoverage,
   BuildProcessingStatus,
   BuildSource,
@@ -20,6 +22,7 @@ import type {
 } from './services/firestore/firestore.types.js';
 import type { ApiKeyService } from './services/apikey/apikey.service.js';
 import { apiKeyAuth, type AuthVariables } from './middleware/auth.js';
+import { dashboardDoor } from './middleware/dashboard-door.js';
 import { extractGitContext, normalizeCoverageInput } from './coverage/coverage.js';
 import { parseMultipartFormData } from './utils/multipart.js';
 import { ciEventFields, mergeCiTimings, parseCiTimings, type CiTimings, type CiTimingsParse } from './ci-timings/ci-timings.js';
@@ -36,6 +39,8 @@ export type AppEnv = {
     apiKeyService?: ApiKeyService; // Optional for API key authentication
     processingQueue?: Queue; // Optional build processing queue
     cleanupToken?: string;
+    /** SCRY_UPLOAD_ASSERTION_SECRET; unset keeps the dashboard door closed (dashboard-import). */
+    assertionSecret?: string;
   } & AuthVariables;
 };
 
@@ -57,8 +62,12 @@ app.onError(errorHandler);
 // project-mismatch check and validated the key against its own project, so any
 // project's key could write to any other project (upload-project-key-scope).
 // '/x/:project/*' also matches '/x/:project' itself.
-app.use('/upload/:project/*', apiKeyAuth());
-app.use('/presigned-url/:project/*', apiKeyAuth());
+//
+// dashboard-import: the same two mounts go through dashboardDoor, which hands every request to the
+// unchanged apiKeyAuth() except a POST to the two bundle routes that carries X-Scry-Caller while
+// SCRY_UPLOAD_ASSERTION_SECRET is set (those are decided by the signed assertion alone).
+app.use('/upload/:project/*', dashboardDoor(apiKeyAuth()));
+app.use('/presigned-url/:project/*', dashboardDoor(apiKeyAuth()));
 app.use('/upload-images/:project/*', apiKeyAuth());
 
 /**
@@ -1197,6 +1206,7 @@ app.openapi(presignedBundleUrlRoute, async (c) => {
     }
 
     const source: BuildSource = { kind: parsedSource.kind, platform: parsedSource.platform };
+    const dashboardCaller = c.get('dashboardCaller');
 
     // The build is created first (unlike the generic presigned-url route above, which historically
     // computes its flat key before a build exists): that gives us buildNumber up front, so the
@@ -1208,7 +1218,9 @@ app.openapi(presignedBundleUrlRoute, async (c) => {
       versionId: version,
       zipUrl: '',
       source,
-      ...uploadedBy(c.var.authenticatedApiKey),
+      ...(dashboardCaller
+        ? { channel: 'dashboard' as const, uploadedByUid: dashboardCaller.uid }
+        : uploadedBy(c.var.authenticatedApiKey)),
     });
 
     const key = `${project}/${version}/builds/${build.buildNumber}/bundle.zip`;
@@ -1216,6 +1228,9 @@ app.openapi(presignedBundleUrlRoute, async (c) => {
 
     c.set('buildId', build.id);
     log.info('bundle build created', reqFields(c));
+    if (dashboardCaller) {
+      log.info('import start', reqFields(c, { err_code: 'import_start', uid_hash: dashboardCaller.uidHash }));
+    }
 
     return c.json(
       {
@@ -1246,7 +1261,33 @@ const BundleCompleteBodySchema = z.object({
     .min(1)
     .max(512)
     .openapi({ description: 'The key the client PUT the bundle ZIP to (the presigned URL fields.key).' }),
+  skippedExtCounts: z
+    .unknown()
+    .optional()
+    .openapi({
+      description:
+        'Dashboard import only (optional, ignored by the CLI): { "<ext>": <count> } of file extensions the ' +
+        'browser skipped. Keys are allow-listed to [a-z0-9]{1,5}, at most 20, counts capped; any other shape ' +
+        'is ignored, never rejected. Logged as counts, never stored or echoed.',
+    }),
 });
+
+const SKIPPED_EXT_KEY = /^[a-z0-9]{1,5}$/;
+const SKIPPED_EXT_MAX_KEYS = 20;
+const SKIPPED_EXT_MAX_COUNT = 100000;
+
+/** Reduce the optional skippedExtCounts body field to a safe { ext: count } map. Never throws, never rejects. */
+export function sanitizeSkippedExtCounts(raw: unknown): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  for (const [ext, count] of Object.entries(raw as Record<string, unknown>)) {
+    if (Object.keys(out).length >= SKIPPED_EXT_MAX_KEYS) break;
+    if (!SKIPPED_EXT_KEY.test(ext)) continue;
+    if (typeof count !== 'number' || !Number.isInteger(count) || count < 1) continue;
+    out[ext] = Math.min(count, SKIPPED_EXT_MAX_COUNT);
+  }
+  return out;
+}
 
 const BundleCompleteResponseSchema = z.object({
   success: z.boolean(),
@@ -1326,6 +1367,29 @@ async function cleanupRejectedBundle(
     });
 }
 
+/** A build created through the dashboard door by this same user for this same signed source. */
+function isDashboardOwnedBuild(build: Build, caller: DashboardCaller): boolean {
+  return (
+    build.channel === 'dashboard' &&
+    build.uploadedByUid === caller.uid &&
+    !!build.source &&
+    `${build.source.kind}:${build.source.platform}` === caller.src
+  );
+}
+
+/**
+ * import_complete (plus one import_skip_<ext>_<n> line per skipped extension, so the counts are queryable
+ * with the existing scry-log schema, which has no key for a map). Extensions are allow-listed
+ * ([a-z0-9]{1,5}) and counts capped before they get here; never file names.
+ */
+function logImportComplete(c: Context<AppEnv>, caller: DashboardCaller, counts: Record<string, number>): void {
+  const fields = { uid_hash: caller.uidHash };
+  log.info('import complete', reqFields(c, { ...fields, err_code: 'import_complete' }));
+  for (const [ext, n] of Object.entries(counts)) {
+    log.info('import skipped', reqFields(c, { ...fields, err_code: `import_skip_${ext}_${n}` }));
+  }
+}
+
 // zipKey is caller-supplied (the client's own record of the presigned URL's key). The API key
 // already scopes the caller to :project; this additionally stops them asking the validator to
 // read and enqueue an object outside their own build's namespace.
@@ -1349,10 +1413,11 @@ function hasBundleObjectMeta(meta: StorageObjectMeta | null): meta is StorageObj
 app.openapi(bundleCompleteRoute, async (c) => {
   try {
     const { project, version } = c.req.valid('param');
-    const { buildId, zipKey } = c.req.valid('json');
+    const { buildId, zipKey, skippedExtCounts } = c.req.valid('json');
     const storage = c.var.storage;
     const firestore = c.var.firestore;
     const queue = c.var.processingQueue;
+    const dashboardCaller = c.get('dashboardCaller');
     const requestId = c.var.requestId;
 
     if (!firestore) {
@@ -1366,6 +1431,12 @@ app.openapi(bundleCompleteRoute, async (c) => {
 
     const build = await firestore.getBuild(project, buildId);
     if (!build) {
+      return c.json({ error: 'Build not found' }, 404);
+    }
+    // The dashboard door may complete only a build it created itself, for the same user and the same
+    // signed source (a stolen build id is no use to another user). Same 404 as a missing build.
+    if (dashboardCaller && !isDashboardOwnedBuild(build, dashboardCaller)) {
+      log.warn('import denied', reqFields(c, { err_code: 'import_denied_build' }));
       return c.json({ error: 'Build not found' }, 404);
     }
     if (build.versionId !== version) {
@@ -1448,6 +1519,8 @@ app.openapi(bundleCompleteRoute, async (c) => {
     } else {
       await firestore.updateBuild(project, buildId, { processingStatus: queuedStatus });
     }
+
+    if (dashboardCaller) logImportComplete(c, dashboardCaller, sanitizeSkippedExtCounts(skippedExtCounts));
 
     return c.json(
       {

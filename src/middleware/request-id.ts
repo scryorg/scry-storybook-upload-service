@@ -1,7 +1,9 @@
 // x-scry-request-id middleware (features observability-request-id, log-standardization).
 // Mounted first in app.ts so every response, including 401/404/500, carries an id:
 //   1. mint a ULID. This service is reached by customer API-key clients and has no
-//      service bearer, so per the trust rule it never accepts an inbound id;
+//      service bearer, so per the trust rule it never accepts an inbound id. The one exception
+//      is the dashboard door (middleware/dashboard-door.ts): once its signed assertion verified,
+//      it adopts the dashboard's x-scry-request-id, and this middleware reads it back after next();
 //   2. c.set('requestId') for handlers and the queue message;
 //   3. echo it as x-scry-request-id;
 //   4. add "request_id" to every JSON error body (status >= 400) that lacks one;
@@ -53,7 +55,9 @@ function verifiedRequestFields(c: Context<any>) {
   const project = verified && SAFE_ID.test(verified) ? verified : undefined;
   const buildId = project ? (c.get('buildId') as string | undefined) : undefined;
   const client = project ? c.req.header('x-scry-client') : undefined;
-  return { route, project, buildId, client };
+  // Set only by the dashboard door after its assertion verified (a 12-hex HMAC of the uid, never the uid).
+  const uidHash = project ? (c.get('dashboardCaller') as { uidHash?: string } | undefined)?.uidHash : undefined;
+  return { route, project, buildId, client, uidHash };
 }
 
 async function withRequestIdInBody(res: Response, requestId: string): Promise<Response> {
@@ -104,14 +108,18 @@ export async function requestIdMiddleware(c: Context<any>, next: Next): Promise<
 
   await next();
 
+  // The dashboard door adopts the dashboard's id once its assertion verified (trust rule), so read it back.
+  const finalId = (c.get('requestId') as string | undefined) ?? requestId;
+  if (finalId !== requestId) tagSentry(finalId);
+
   try {
-    let res = await withRequestIdInBody(c.res, requestId);
+    let res = await withRequestIdInBody(c.res, finalId);
     try {
-      res.headers.set(REQUEST_ID_HEADER, requestId);
+      res.headers.set(REQUEST_ID_HEADER, finalId);
     } catch {
       // Immutable headers (a proxied Response): copy once.
       res = new Response(res.body, res);
-      res.headers.set(REQUEST_ID_HEADER, requestId);
+      res.headers.set(REQUEST_ID_HEADER, finalId);
     }
     if (res !== c.res) {
       c.res = undefined as unknown as Response;
@@ -122,15 +130,16 @@ export async function requestIdMiddleware(c: Context<any>, next: Next): Promise<
   }
 
   try {
-    const { route, project, buildId, client } = verifiedRequestFields(c);
+    const { route, project, buildId, client, uidHash } = verifiedRequestFields(c);
     log.request({
-      request_id: requestId,
+      request_id: finalId,
       route,
       status: c.res.status,
       ms: Date.now() - started,
       ...(project ? { project } : {}),
       ...(buildId && SAFE_ID.test(buildId) ? { build_id: buildId } : {}),
       ...(client && SAFE_CLIENT.test(client) ? { client } : {}),
+      ...(uidHash ? { uid_hash: uidHash } : {}),
     });
   } catch {
     // a failing logger never changes the response

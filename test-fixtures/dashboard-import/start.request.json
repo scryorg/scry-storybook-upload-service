@@ -1,0 +1,8 @@
+{
+  "method": "POST",
+  "path": "/presigned-url/acme/import-20261002T101500Z/bundle.zip?source=x-adobe-bridge:other",
+  "headers": [
+    "X-Scry-Caller",
+    "x-scry-request-id"
+  ]
+}

@@ -146,6 +146,14 @@ export function describeFirestoreError(errorBody: string): { detail: string; bod
   return { detail, body };
 }
 
+/** dashboard-import: channel + creator uid, written only for a build created through the dashboard's signed door. */
+function dashboardBuildFields(data: CreateBuildData): Record<string, { stringValue: string }> {
+  return {
+    ...(data.channel ? { channel: { stringValue: data.channel } } : {}),
+    ...(data.uploadedByUid ? { uploadedByUid: { stringValue: data.uploadedByUid } } : {}),
+  };
+}
+
 export class FirestoreServiceWorker implements FirestoreService {
   private config: FirestoreConfig;
   private baseUrl: string;
@@ -240,6 +248,7 @@ export class FirestoreServiceWorker implements FirestoreService {
       // Which key created the build (upload-project-key-scope): doc id + project, never the key.
       ...(data.uploadedByKeyId ? { uploadedByKeyId: { stringValue: data.uploadedByKeyId } } : {}),
       ...(data.uploadedByKeyProject ? { uploadedByKeyProject: { stringValue: data.uploadedByKeyProject } } : {}),
+      ...dashboardBuildFields(data),
       // CI timings (storybook-preview-ci-runtime). Written only when the
       // deployer sent them; absent is never stored as zeros.
       ...(data.ciTimings ? { ciTimings: this.toFirestoreValue(data.ciTimings) } : {}),
@@ -1099,6 +1108,8 @@ export class FirestoreServiceWorker implements FirestoreService {
       ...(fields.branch?.stringValue ? { branch: fields.branch.stringValue } : {}),
       ...(fields.uploadedByKeyId?.stringValue ? { uploadedByKeyId: fields.uploadedByKeyId.stringValue } : {}),
       ...(fields.uploadedByKeyProject?.stringValue ? { uploadedByKeyProject: fields.uploadedByKeyProject.stringValue } : {}),
+      ...(fields.channel?.stringValue === 'dashboard' ? { channel: 'dashboard' as const } : {}),
+      ...(fields.uploadedByUid?.stringValue ? { uploadedByUid: fields.uploadedByUid.stringValue } : {}),
       ...(fields.ciTimings ? { ciTimings: this.fromFirestoreValue(fields.ciTimings) as CiTimings } : {}),
       ...(fields.source ? { source: this.fromFirestoreValue(fields.source) as BuildSource } : {}),
       ...(fields.validationErrors ? { validationErrors: this.fromFirestoreValue(fields.validationErrors) as BuildValidationIssue[] } : {}),
