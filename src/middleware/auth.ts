@@ -73,7 +73,10 @@ export interface AuthVariables {
     projectId: string;
     /** The project the key was minted for (from the key itself). */
     keyProjectId: string;
-    /** scry-sync: `'device'` for a Scry Sync desktop key; absent for every other key. */
+    /**
+     * scry-sync: what minted the key. `'device'` is a Scry Sync desktop key. ANY present value is the
+     * restricted class (see `isRestrictedKeyKind`); absent only for a key minted before scry-sync.
+     */
     kind?: string;
   };
 }
@@ -81,9 +84,31 @@ export interface AuthVariables {
 /** scry-sync: the `kind` the dashboard's device sign-in writes on the key it mints. */
 export const DEVICE_KEY_KIND = 'device';
 
+/** The one source kind a restricted (device) key may presign or complete (ledger F40). */
+export const DEVICE_KEY_SOURCE_KIND = 'x-scry-sync';
+
+/** What a restricted key is told on every refusal (route scope and source pin share the body). */
+export const DEVICE_KEY_REFUSAL = {
+  error: 'Forbidden',
+  message: 'This key can only upload pictures to its project',
+} as const;
+
 /**
- * scry-sync guarantee-1: the only requests a device key may make. Presign a bundle, complete it
- * (the PUT in between goes straight to R2 on the presigned URL) and revoke itself. Every other
+ * scry-sync fail-closed (ledger F39): a key is the restricted device class whenever its `kind`
+ * field is PRESENT, whatever the value ('device', 'Device', 'ci', a number...). The key services
+ * hand `kind` on as a string for any present field and leave it undefined only for a key document
+ * with no `kind` field, which keeps its pre-scry-sync rights. No present value is unrestricted
+ * today; to allow one later, add an explicit check here rather than loosening the rule.
+ */
+export function isRestrictedKeyKind(kind: string | undefined): boolean {
+  return kind !== undefined;
+}
+
+/**
+ * scry-sync guarantee-1: the only requests a device key may make through `apiKeyAuth`. Presign a
+ * bundle and complete it (the PUT in between goes straight to R2 on the presigned URL). Revoking
+ * itself (`DELETE /keys/self`) is not listed: that handler is not behind `apiKeyAuth` (no mount
+ * covers `/keys/*`) and authenticates the key itself, so an entry here would be dead. Every other
  * route (read, list, legacy uploads, coverage, metadata, images) is refused with 403, even for the
  * key's own project. Matched on the method and the concrete path, so a new route is refused by
  * default until it is added here.
@@ -91,7 +116,6 @@ export const DEVICE_KEY_KIND = 'device';
 const DEVICE_KEY_ROUTES: ReadonlyArray<{ method: string; path: RegExp }> = [
   { method: 'POST', path: /^\/presigned-url\/[^/]+\/[^/]+\/bundle\.zip$/ },
   { method: 'POST', path: /^\/upload\/[^/]+\/[^/]+\/bundle\/complete$/ },
-  { method: 'DELETE', path: /^\/keys\/self$/ },
 ];
 
 export function deviceKeyMayUse(method: string, path: string): boolean {
@@ -231,16 +255,10 @@ export function apiKeyAuth(options: ApiKeyAuthOptions = {}) {
 
     // scry-sync guarantee-1: a device key can upload bundles and revoke itself, nothing else.
     const keyKind = result.apiKey!.kind;
-    if (keyKind === DEVICE_KEY_KIND && !deviceKeyMayUse(c.req.method, c.req.path)) {
+    if (isRestrictedKeyKind(keyKind) && !deviceKeyMayUse(c.req.method, c.req.path)) {
       log.warn('device key refused', reqFields(c as never, { err_code: 'device_key_scope' }));
       logAuth('warn', { outcome: 'device_key_scope', keyId: result.apiKey!.id, method: c.req.method });
-      return c.json(
-        {
-          error: 'Forbidden',
-          message: 'This key can only upload pictures to its project',
-        },
-        403
-      );
+      return c.json(DEVICE_KEY_REFUSAL, 403);
     }
 
     // Authorized: only now may the project reach a log line.
@@ -253,7 +271,7 @@ export function apiKeyAuth(options: ApiKeyAuthOptions = {}) {
       prefix: result.apiKey!.prefix,
       projectId,
       keyProjectId,
-      ...(keyKind ? { kind: keyKind } : {}),
+      ...(keyKind !== undefined ? { kind: keyKind } : {}),
     });
 
     logAuth('log', {

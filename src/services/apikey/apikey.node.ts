@@ -14,6 +14,7 @@ import {
   getKeyPrefix,
   generateKeyId,
   isValidApiKeyFormat,
+  readKeyKind,
 } from './apikey.utils.js';
 
 /**
@@ -129,6 +130,8 @@ export class ApiKeyServiceNode implements ApiKeyService {
       }
     }
 
+    const kind = readKeyKind('kind' in data, data.kind);
+
     // Return valid result
     const apiKey: Omit<ApiKey, 'hash'> = {
       id: doc.id,
@@ -141,7 +144,8 @@ export class ApiKeyServiceNode implements ApiKeyService {
       expiresAt: data.expiresAt?.toDate(),
       revokedAt: data.revokedAt?.toDate(),
       revokedBy: data.revokedBy,
-      ...(typeof data.kind === 'string' && data.kind ? { kind: data.kind } : {}),
+      // fail-closed (F39): a present `kind` is never dropped, whatever its type; only no field is a legacy key
+      ...(kind === undefined ? {} : { kind }),
     };
 
     return {
