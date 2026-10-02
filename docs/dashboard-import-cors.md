@@ -1,7 +1,12 @@
 # Dashboard import: R2 CORS for the browser PUT (stage bucket only)
 
-Status: **not applied, not tested.** The spike could not run from the build box (see "Why it was not run").
-The steps below are exact and ready to run by someone with the credentials.
+Status: **applied to the stage bucket on 2026-10-02 and checked.** The bucket had no CORS rules before. One rule,
+`dashboard-import-browser-put`, was added to `my-storybooks-staging` through the Cloudflare API: origins
+`https://dashboard-stage.scrymore.com` and `http://localhost:3000`, methods `PUT`, `GET`, `HEAD`, header `content-type`,
+expose `ETag`, max age 3600. A preflight from the stage dashboard origin answered 204 with the matching
+`access-control-allow-origin`; a preflight from any other origin answered 403. **Production is not done**
+(tracked as F61 of `dashboard-import`): it needs the same rule on `my-storybooks-production` with the production
+dashboard origin only. Sections 1 to 3 below remain the way to repeat or undo it.
 
 The dashboard import (feature `dashboard-import`) has the browser `PUT` the bundle zip straight to a presigned R2 URL
 returned by `POST /presigned-url/:project/:version/bundle.zip`. A cross-origin `PUT` with `Content-Type` is preflighted,
@@ -14,14 +19,6 @@ so the bucket must answer `OPTIONS` with CORS headers.
 `https://<account id>.r2.cloudflarestorage.com/my-storybooks-staging/<project>/<version>/builds/<n>/bundle.zip?X-Amz-...`
 (path style, bucket `my-storybooks-staging` on stage, `my-storybooks-production` on production). CORS is a bucket setting
 and is answered by that host, not by the Worker.
-
-## Why it was not run
-
-- `wrangler whoami` on the build box: not authenticated, and no Cloudflare token in the environment.
-- No stage API key on the box. `SCRY_STAGE_FIXTURE_API_KEY` exists only as a GitHub Actions secret on `scry-management`.
-- `R2_ACCOUNT_ID` is a Worker secret, so the exact host is not known here.
-
-Nothing was changed on any bucket.
 
 ## 1. Mint a real stage presigned URL (API-key path, unchanged)
 
