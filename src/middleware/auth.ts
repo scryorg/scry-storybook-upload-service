@@ -87,6 +87,17 @@ export const DEVICE_KEY_KIND = 'device';
 /** The one source kind a restricted (device) key may presign or complete (ledger F40). */
 export const DEVICE_KEY_SOURCE_KIND = 'x-scry-sync';
 
+/** ...and the one platform it may name: the full source is exactly `x-scry-sync:other` (ledger F68). */
+export const DEVICE_KEY_SOURCE_PLATFORM = 'other';
+
+/**
+ * True only for the exact device-key source. Comparing the kind alone let `x-scry-sync:ios` /
+ * `x-scry-sync:web` through, and a distinct source key splits "latest build per source" (G7).
+ */
+export function isDeviceKeySource(source: { kind?: string; platform?: string } | null | undefined): boolean {
+  return source?.kind === DEVICE_KEY_SOURCE_KIND && source.platform === DEVICE_KEY_SOURCE_PLATFORM;
+}
+
 /** What a restricted key is told on every refusal (route scope and source pin share the body). */
 export const DEVICE_KEY_REFUSAL = {
   error: 'Forbidden',

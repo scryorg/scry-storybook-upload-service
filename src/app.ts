@@ -25,7 +25,7 @@ import {
   apiKeyAuth,
   isRestrictedKeyKind,
   DEVICE_KEY_REFUSAL,
-  DEVICE_KEY_SOURCE_KIND,
+  isDeviceKeySource,
   type AuthVariables,
 } from './middleware/auth.js';
 import { dashboardDoor } from './middleware/dashboard-door.js';
@@ -1208,9 +1208,9 @@ app.openapi(presignedBundleUrlRoute, async (c) => {
       );
     }
 
-    // scry-sync F40: a device key presigns only for Scry Sync's own source. Any other registered
+    // scry-sync F40: a device key presigns only for Scry Sync's own source (exactly x-scry-sync:other, F68). Any other registered
     // source would route its build through that source's processing path.
-    if (isRestrictedKeyKind(c.get('authenticatedApiKey')?.kind) && parsedSource.kind !== DEVICE_KEY_SOURCE_KIND) {
+    if (isRestrictedKeyKind(c.get('authenticatedApiKey')?.kind) && !isDeviceKeySource(parsedSource)) {
       log.warn('device key refused', reqFields(c, { err_code: 'device_key_source' }));
       return c.json(DEVICE_KEY_REFUSAL, 403);
     }
@@ -1492,7 +1492,7 @@ app.openapi(bundleCompleteRoute, async (c) => {
 
     // scry-sync F40: a device key completes only a build presigned for Scry Sync's own source.
     const restrictedKey = isRestrictedKeyKind(c.get('authenticatedApiKey')?.kind);
-    if (restrictedKey && build.source?.kind !== DEVICE_KEY_SOURCE_KIND) {
+    if (restrictedKey && !isDeviceKeySource(build.source)) {
       log.warn('device key refused', reqFields(c, { err_code: 'device_key_source' }));
       return c.json(DEVICE_KEY_REFUSAL, 403);
     }
@@ -1565,7 +1565,7 @@ app.openapi(bundleCompleteRoute, async (c) => {
     // scry-sync F40: the bundle's own manifest must also say Scry Sync, so a device key can not
     // presign as x-scry-sync and then upload another source's bundle. Same 403 as the presign pin;
     // the object is deleted and the build marked failed like any rejected bundle.
-    if (restrictedKey && validation.manifest?.source?.kind !== DEVICE_KEY_SOURCE_KIND) {
+    if (restrictedKey && !isDeviceKeySource(validation.manifest?.source)) {
       await cleanupRejectedBundle(c, storage, firestore, project, buildId, zipKey, [
         { code: 'SOURCE_NOT_ALLOWED', message: 'This key can only upload Scry Sync bundles.' },
       ]);

@@ -223,19 +223,23 @@ describe('ApiKeyServiceWorker', () => {
 
   describe('revokeApiKey', () => {
     it('should revoke an API key', async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({}),
-      });
+      // Read (active), then the conditional PATCH.
+      mockFetch
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ name: 'n', fields: { status: { stringValue: 'active' } }, updateTime: '2026-10-02T00:00:00.000000Z' }),
+        })
+        .mockResolvedValueOnce({ ok: true, json: async () => ({}) });
 
       await expect(service.revokeApiKey('my-project', 'key-123', 'admin-user')).resolves.not.toThrow();
 
       // Verify the PATCH request was made with correct fields
-      expect(mockFetch).toHaveBeenCalledTimes(1);
-      const patchCall = mockFetch.mock.calls[0];
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      const patchCall = mockFetch.mock.calls[1];
       expect(patchCall[0]).toContain('apiKeys/key-123');
       // F84: one updateMask.fieldPaths per field, never comma-joined
       expect(patchCall[0]).toContain('updateMask.fieldPaths=status&updateMask.fieldPaths=revokedAt&updateMask.fieldPaths=revokedBy');
+      expect(patchCall[0]).toContain('currentDocument.updateTime=');
       expect(patchCall[0]).not.toContain(',');
       expect(patchCall[1].method).toBe('PATCH');
     });

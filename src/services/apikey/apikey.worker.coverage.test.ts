@@ -147,7 +147,7 @@ describe('ApiKeyServiceWorker (coverage)', () => {
     ).rejects.toThrow('Failed to set document');
   });
 
-  it('revokeApiKey() throws when patchDocument fails', async () => {
+  it('revokeApiKey() throws when the key read fails', async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: false, statusText: 'bad' });
     globalThis.fetch = fetchMock;
 
@@ -156,7 +156,7 @@ describe('ApiKeyServiceWorker (coverage)', () => {
     (svc as any).tokenExpiry = Date.now() + 60_000;
 
     await expect(svc.revokeApiKey('my-project', 'key-1', 'admin')).rejects.toThrow(
-      'Failed to patch document'
+      'Failed to get document'
     );
   });
 
