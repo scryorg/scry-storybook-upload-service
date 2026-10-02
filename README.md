@@ -175,7 +175,7 @@ the creator's uid, and only that caller can complete them. Contract and fixtures
 `docs/dashboard-import-cors.md`.
 
 Set the secret (same value as the dashboard's) with `wrangler secret put SCRY_UPLOAD_ASSERTION_SECRET --env <env>`
-(Node: the `SCRY_UPLOAD_ASSERTION_SECRET` environment variable). **To switch the door off, unset the secret**
+(Node: the `SCRY_UPLOAD_ASSERTION_SECRET` environment variable). It must be at least 32 bytes; a shorter value is treated as unset (door closed, one warn line). **To switch the door off, unset the secret**
 (`wrangler secret delete SCRY_UPLOAD_ASSERTION_SECRET --env <env>`): the header is then ignored everywhere and the
 two routes accept API keys only, exactly as before.
 

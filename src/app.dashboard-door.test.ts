@@ -12,8 +12,8 @@ import { Hono } from 'hono';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { app, sanitizeSkippedExtCounts, type AppEnv } from './app.js';
-import { hashUid, verifyCallerAssertion } from './middleware/dashboard-door.js';
+import { app, sanitizeSkippedExtCounts, skipCountBucket, type AppEnv } from './app.js';
+import { hashUid, resetWeakSecretLogForTests, verifyCallerAssertion } from './middleware/dashboard-door.js';
 import type { ApiKeyService } from './services/apikey/apikey.service.js';
 import type { CreateBuildData, Build } from './services/firestore/firestore.types.js';
 import type { FirestoreService } from './services/firestore/firestore.service.js';
@@ -342,7 +342,7 @@ describe('complete through the door, and guarantee-5 (server half)', () => {
     const text = logged.join('\n');
     expect(text).toContain('import_start');
     expect(text).toContain('import_complete');
-    expect(text).toContain('import_skip_psd_3');
+    expect(text).toContain('import_skip_psd_2_9');
     expect(text).toContain('import_skip_tiff_1');
     expect(text).not.toContain('EVIL');
     expect(text).not.toContain('toolongext');
@@ -401,6 +401,7 @@ describe('complete through the door, and guarantee-5 (server half)', () => {
     expect(res.status).toBe(404);
   });
 
+  // fix round 1 tests are appended in their own describe blocks below
   it('old API-key complete bodies (no skippedExtCounts) are unchanged and log no import lines', async () => {
     const s = setup();
     const res = await presign(s, { 'X-API-Key': API_KEY }, `/presigned-url/${PROJECT}/main/bundle.zip?source=storybook-rn:ios`);
@@ -414,6 +415,207 @@ describe('complete through the door, and guarantee-5 (server half)', () => {
     });
     expect(out.status).toBe(200);
     expect(logged.join('\n')).not.toContain('import_');
+  });
+});
+
+describe('fix round 1: zipKey is bound to the caller\'s own build (both doors)', () => {
+  const USER_B = { claims: { sub: 'user-b-uid-0001' } };
+  const validZip = () => zipDirectory(path.join(FIXTURES_ROOT, 'valid-basic')) as never;
+  async function twoBuilds(s: ReturnType<typeof setup>) {
+    const a = await (await presign(s, { 'X-Scry-Caller': await sign() })).json();
+    const b = await (await presign(s, { 'X-Scry-Caller': await sign(USER_B) })).json();
+    return { a: { id: a.buildId as string, key: a.fields.key as string }, b: { id: b.buildId as string, key: b.fields.key as string } };
+  }
+  const completeAs = async (s: ReturnType<typeof setup>, body: unknown, opts: SignOptions = {}) =>
+    s.server.request(COMPLETE, { method: 'POST', headers: { ...JSON_HDR, 'X-Scry-Caller': await sign(opts) }, body: JSON.stringify(body) });
+
+  it('user A completing A\'s build with user B\'s valid zipKey is refused; B\'s object is not read, deleted or queued', async () => {
+    const s = setup();
+    const { a, b } = await twoBuilds(s);
+    expect(a.key).not.toBe(b.key);
+    await s.storage.upload(a.key, await validZip(), 'application/zip');
+    await s.storage.upload(b.key, await validZip(), 'application/zip');
+    const headSpy = vi.spyOn(s.storage, 'head');
+    const res = await completeAs(s, { buildId: a.id, zipKey: b.key });
+    const unknown = await completeAs(s, { buildId: 'no-such-build', zipKey: b.key });
+    expect(res.status).toBe(404);
+    const strip = ({ request_id: _r, ...rest }: Record<string, unknown>) => rest;
+    expect(strip(await res.json())).toEqual(strip(await unknown.json()));
+    expect(headSpy).not.toHaveBeenCalled();
+    expect(await s.storage.head(b.key)).not.toBeNull();
+    expect(s.send).not.toHaveBeenCalled();
+    expect(s.builds.get(a.id)?.processingStatus).toBeUndefined();
+    expect(s.builds.get(b.id)?.processingStatus).toBeUndefined();
+  });
+
+  it('A cannot get B\'s NON-validating object deleted by naming it as zipKey', async () => {
+    const s = setup();
+    const { a, b } = await twoBuilds(s);
+    await s.storage.upload(b.key, buildZip([{ name: 'not-a-bundle.txt', data: Buffer.from('hello') }]) as never, 'application/zip');
+    const res = await completeAs(s, { buildId: a.id, zipKey: b.key });
+    expect(res.status).toBe(404);
+    expect(await s.storage.head(b.key)).not.toBeNull();
+    expect(s.builds.get(a.id)?.processingStatus).toBeUndefined();
+    expect(s.builds.get(b.id)?.processingStatus).toBeUndefined();
+  });
+
+  it('each user can still complete their own build with their own key', async () => {
+    const s = setup();
+    const { a, b } = await twoBuilds(s);
+    await s.storage.upload(a.key, await validZip(), 'application/zip');
+    await s.storage.upload(b.key, await validZip(), 'application/zip');
+    expect((await completeAs(s, { buildId: a.id, zipKey: a.key })).status).toBe(200);
+    expect((await completeAs(s, { buildId: b.id, zipKey: b.key }, USER_B)).status).toBe(200);
+    expect(s.send).toHaveBeenCalledTimes(2);
+  });
+
+  it('same refusal on the API-key door: another build\'s key is a 404 and untouched; the correct key passes', async () => {
+    const s = setup();
+    const mk = async () => (await presign(s, { 'X-API-Key': API_KEY }, `/presigned-url/${PROJECT}/${VERSION}/bundle.zip?source=storybook-rn:ios`)).json();
+    const one = await mk();
+    const two = await mk();
+    await s.storage.upload(one.fields.key, await validZip(), 'application/zip');
+    await s.storage.upload(two.fields.key, await validZip(), 'application/zip');
+    const call = (buildId: string, zipKey: string) =>
+      s.server.request(COMPLETE, { method: 'POST', headers: { ...JSON_HDR, 'X-API-Key': API_KEY }, body: JSON.stringify({ buildId, zipKey }) });
+    const wrong = await call(one.buildId, two.fields.key);
+    expect(wrong.status).toBe(404);
+    expect(await s.storage.head(two.fields.key)).not.toBeNull();
+    expect(s.send).not.toHaveBeenCalled();
+    expect((await call(one.buildId, one.fields.key)).status).toBe(200);
+    expect(s.send).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['dot-dot segment', `${PROJECT}/${VERSION}/builds/../builds/1/bundle.zip`],
+    ['double slash', `${PROJECT}/${VERSION}/builds//1/bundle.zip`],
+    ['other project', `other/${VERSION}/builds/1/bundle.zip`],
+    ['not bundle.zip', `${PROJECT}/${VERSION}/builds/1/other.zip`],
+  ])('zipKey with %s is refused with 400 before any storage or Firestore access', async (_n, zipKey) => {
+    const s = setup();
+    const { a } = await twoBuilds(s);
+    await s.storage.upload(a.key, await validZip(), 'application/zip');
+    const headSpy = vi.spyOn(s.storage, 'head');
+    const res = await completeAs(s, { buildId: a.id, zipKey });
+    expect(res.status).toBe(400);
+    expect(headSpy).not.toHaveBeenCalled();
+    expect(await s.storage.head(a.key)).not.toBeNull();
+    expect(s.send).not.toHaveBeenCalled();
+  });
+});
+
+describe('fix round 1: complete acts only on a still-pending build (both doors)', () => {
+  const validZip = () => zipDirectory(path.join(FIXTURES_ROOT, 'valid-basic')) as never;
+
+  it('dashboard door: a second complete returns the same success, does not re-queue and does not reset status', async () => {
+    const s = setup();
+    const start = await (await presign(s, { 'X-Scry-Caller': await sign() })).json();
+    await s.storage.upload(start.fields.key, await validZip(), 'application/zip');
+    const call = async () =>
+      s.server.request(COMPLETE, { method: 'POST', headers: { ...JSON_HDR, 'X-Scry-Caller': await sign() }, body: JSON.stringify({ buildId: start.buildId, zipKey: start.fields.key }) });
+    expect((await call()).status).toBe(200);
+    expect(s.builds.get(start.buildId)?.processingStatus).toBe('queued');
+    s.builds.get(start.buildId)!.processingStatus = 'completed'; // the processor finished in between
+    const again = await call();
+    expect(again.status).toBe(200);
+    expect(await again.json()).toMatchObject({ success: true, buildId: start.buildId, buildNumber: 1 });
+    expect(s.send).toHaveBeenCalledTimes(1);
+    expect(s.builds.get(start.buildId)?.processingStatus).toBe('completed');
+    expect(s.updateBuild).not.toHaveBeenCalled();
+  });
+
+  it('API-key door: a retried complete is the same idempotent success, no second queue message, status kept', async () => {
+    const s = setup();
+    const start = await (await presign(s, { 'X-API-Key': API_KEY }, `/presigned-url/${PROJECT}/${VERSION}/bundle.zip?source=storybook-rn:ios`)).json();
+    await s.storage.upload(start.fields.key, await validZip(), 'application/zip');
+    const call = () =>
+      s.server.request(COMPLETE, { method: 'POST', headers: { ...JSON_HDR, 'X-API-Key': API_KEY }, body: JSON.stringify({ buildId: start.buildId, zipKey: start.fields.key }) });
+    expect((await call()).status).toBe(200);
+    s.builds.get(start.buildId)!.processingStatus = 'completed';
+    const again = await call();
+    expect(again.status).toBe(200);
+    expect(s.send).toHaveBeenCalledTimes(1);
+    expect(s.builds.get(start.buildId)?.processingStatus).toBe('completed');
+  });
+
+  it('a complete on a build already rejected (failed) is a 409 and touches nothing', async () => {
+    const s = setup();
+    const start = await (await presign(s, { 'X-Scry-Caller': await sign() })).json();
+    await s.storage.upload(start.fields.key, buildZip([{ name: 'not-a-bundle.txt', data: Buffer.from('hello') }]) as never, 'application/zip');
+    const call = async () =>
+      s.server.request(COMPLETE, { method: 'POST', headers: { ...JSON_HDR, 'X-Scry-Caller': await sign() }, body: JSON.stringify({ buildId: start.buildId, zipKey: start.fields.key }) });
+    expect((await call()).status).toBe(422);
+    s.updateBuild.mockClear();
+    await s.storage.upload(start.fields.key, await validZip(), 'application/zip');
+    const again = await call();
+    expect(again.status).toBe(409);
+    expect(s.send).not.toHaveBeenCalled();
+    expect(s.builds.get(start.buildId)?.processingStatus).toBe('failed');
+    expect(await s.storage.head(start.fields.key)).not.toBeNull();
+    expect(s.updateBuild).not.toHaveBeenCalled();
+  });
+});
+
+describe('fix round 1: assertion secret strength and uid_hash domain separation', () => {
+  beforeEach(() => resetWeakSecretLogForTests());
+
+  it('a secret under 32 bytes keeps the door closed (even a correctly signed token), falls to the API-key 401, logs once', async () => {
+    const weak = 'short-secret-31-bytes-xxxxxxxxx'; // 31 bytes
+    expect(weak).toHaveLength(31); // ASCII, so 31 bytes
+    const s = setup({ secret: weak });
+    const token = await sign({ secret: weak });
+    for (let i = 0; i < 3; i++) {
+      const res = await presign(s, { 'X-Scry-Caller': token });
+      expect(res.status).toBe(401);
+      expect(await res.json()).toMatchObject({ error: expect.stringContaining('Authentication required') });
+    }
+    expect(s.createBuild).not.toHaveBeenCalled();
+    expect(logged.filter((l) => l.includes('import_secret_weak'))).toHaveLength(1);
+    expect(logged.join('\n')).not.toContain(weak);
+    // an API key still works
+    expect((await presign(s, { 'X-Scry-Caller': token, 'X-API-Key': API_KEY })).status).toBe(200);
+  });
+
+  it('a secret of exactly 32 bytes opens the door', async () => {
+    const ok = 'x'.repeat(32);
+    const s = setup({ secret: ok });
+    expect((await presign(s, { 'X-Scry-Caller': await sign({ secret: ok }) })).status).toBe(200);
+  });
+
+  it('uid_hash is domain-separated: not the bare HMAC of the uid, still 12 lowercase hex and stable', async () => {
+    const key = await crypto.subtle.importKey('raw', enc.encode(SECRET), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    const bare = Buffer.from(await crypto.subtle.sign('HMAC', key, enc.encode(UID))).toString('hex').slice(0, 12);
+    const labelled = Buffer.from(await crypto.subtle.sign('HMAC', key, enc.encode(`uid-hash:v1:${UID}`))).toString('hex').slice(0, 12);
+    const h = await hashUid(SECRET, UID);
+    expect(h).toMatch(/^[0-9a-f]{12}$/);
+    expect(h).toBe(labelled);
+    expect(h).not.toBe(bare);
+    expect(await hashUid(SECRET, UID)).toBe(h);
+  });
+});
+
+describe('fix round 1: skipped-extension log lines are bucketed', () => {
+  it.each([[1, '1'], [2, '2_9'], [9, '2_9'], [10, '10_99'], [99, '10_99'], [100, '100_plus'], [100000, '100_plus']])('%i -> %s', (n, b) => {
+    expect(skipCountBucket(n)).toBe(b);
+  });
+
+  it('a complete logs one bucketed line per extension (at most 20), never the raw count', async () => {
+    const s = setup();
+    const start = await (await presign(s, { 'X-Scry-Caller': await sign() })).json();
+    await s.storage.upload(start.fields.key, await zipDirectory(path.join(FIXTURES_ROOT, 'valid-basic')) as never, 'application/zip');
+    const many = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`e${i}`, 1]));
+    const counts = { psd: 1, tiff: 5, gif: 42, heic: 4711, ...many };
+    const res = await s.server.request(COMPLETE, { method: 'POST', headers: { ...JSON_HDR, 'X-Scry-Caller': await sign() }, body: JSON.stringify({ buildId: start.buildId, zipKey: start.fields.key, skippedExtCounts: counts }) });
+    expect(res.status).toBe(200);
+    const lines = logged.filter((l) => l.includes('import_skip_'));
+    expect(lines).toHaveLength(20);
+    const text = logged.join('\n');
+    expect(text).toContain('import_skip_psd_1');
+    expect(text).toContain('import_skip_tiff_2_9');
+    expect(text).toContain('import_skip_gif_10_99');
+    expect(text).toContain('import_skip_heic_100_plus');
+    for (const raw of ['_5"', '_42', '_4711']) expect(text).not.toContain(`import_skip_tiff${raw}`);
+    expect(text).not.toMatch(/import_skip_\w+_(5|42|4711)\b/);
   });
 });
 

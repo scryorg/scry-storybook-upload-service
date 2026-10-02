@@ -42,6 +42,12 @@ before any claim is read. See `test-fixtures/dashboard-import/assertion.json` fo
 - **Build ownership.** A dashboard-door build records `channel: "dashboard"` and `uploadedByUid`. Complete through the door
   only works on a build with channel `dashboard`, the same uid, and the same `src`; anything else is `404 {"error":"Build not found"}`
   (identical to an unknown build). The door cannot complete an API-key build and the API-key path is unchanged.
+- **Stored on the build.** `channel` (`"dashboard"`) and `uploadedByUid` (the raw Firebase uid) are stored on every
+  dashboard-door build, next to `source`. Neither is ever logged (logs carry `uid_hash` only). The dashboard must not hand
+  `uploadedByUid` to viewers or non-members of the project.
+- **Secret strength.** `SCRY_UPLOAD_ASSERTION_SECRET` shorter than 32 bytes is treated as unset: the door stays closed (one
+  warn line `import_secret_weak`, once per process) and the API-key path runs.
+- **`uid_hash`.** First 12 hex of HMAC-SHA256(secret, `uid-hash:v1:` + uid), domain-separated from the assertion signature.
 - **Request ids.** After the assertion verifies, the dashboard's `x-scry-request-id` is adopted, echoed in the response header,
   and forwarded to the processing queue. Before verification it is ignored.
 
@@ -52,13 +58,19 @@ before any claim is read. See `test-fixtures/dashboard-import/assertion.json` fo
 2. `POST complete {buildId, zipKey, skippedExtCounts?}` -> `200 {success:true, queued:true, buildId, buildNumber}` (`complete.*.json`),
    or `422 {success:false, errors:[{code,message}]}` with the object deleted and the build marked `failed` (`error.422.json`),
    or `404` (`error.404.json`), or `400` if the object was never uploaded (the build stays pending).
+   `zipKey` must be exactly this build's own key, `<project>/<version>/builds/<buildNumber>/bundle.zip` (the `fields.key` the
+   presign returned), on both doors. A malformed key (`..`, `//`, wrong prefix or suffix) is `400`; any other build's key is the same
+   `404 {"error":"Build not found"}` as an unknown build, and nothing is read, deleted or queued.
+   Complete only acts on a build still awaiting its bundle. A repeat after a success (`queued`, `processing`, `completed`,
+   `partial`) is `200 {success:true, message:"Bundle already accepted", queued:true, buildId, buildNumber}` with no new queue
+   message and no status change; a repeat after a rejection (`failed`) is `409 {"error":"Build is not awaiting a bundle"}`.
 3. A pending build is never reported completed: `processingStatus` is only written by complete (queued) or a failed cleanup.
 
 ### `skippedExtCounts` (optional, complete body)
 
 Counts of file extensions the browser skipped, e.g. `{"psd":3,"tiff":1}`. Keys must match `[a-z0-9]{1,5}`, at most 20 keys,
 values positive integers capped at 100000. Anything else (wrong type, bad keys) is silently ignored, never a 4xx.
-It is only logged.
+It is only logged, as one bucketed line per extension (at most 20 lines per complete, see the log table).
 
 ## Log codes (schema v1; the channel and counts ride in `err_code` because the shared schema has no such fields yet)
 
@@ -66,9 +78,12 @@ It is only logged.
 |---|---|---|---|
 | info | `import start` | `import_start` | `request_id`, `project`, `build_id`, `uid_hash` |
 | info | `import complete` | `import_complete` | same |
-| info | `import skipped` | `import_skip_<ext>_<count>` (one line per extension) | same |
+| info | `import skipped` | `import_skip_<ext>_<bucket>` (one line per extension, at most 20) | same |
+| warn | `dashboard door closed` | `import_secret_weak` (assertion secret under 32 bytes, once per process) | `request_id` only |
 | warn | `import denied` | `import_denied_<reason>` | `request_id` only (nothing request-controlled) |
 
 `<reason>` is one of: malformed, alg, signature, claims, aud, expired, early, lifetime, project, version, source, subject;
 `import_denied_build` means a verified caller tried to complete a build it does not own.
+`<bucket>` is the skipped count as `1`, `2_9` (2-9), `10_99` (10-99) or `100_plus` (100+); `err_code` only allows `[a-z0-9_.]`, so
+the ranges use `_` and never carry the exact count.
 No log line or error body ever contains the token, the secret or the uid.

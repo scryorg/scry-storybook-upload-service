@@ -42,6 +42,9 @@ export const MAX_LIFETIME_SECONDS = 60;
 export const CLOCK_SKEW_SECONDS = 5;
 export const DASHBOARD_SOURCE_KIND = 'x-adobe-bridge';
 const MAX_TOKEN_CHARS = 2048;
+/** Shortest shared secret (in bytes) that opens the door; anything shorter is treated as unset. */
+export const MIN_SECRET_BYTES = 32;
+const UID_HASH_LABEL = 'uid-hash:v1:';
 
 const PRESIGN_PATH = /^\/presigned-url\/([^/]+)\/([^/]+)\/bundle\.zip$/;
 const COMPLETE_PATH = /^\/upload\/([^/]+)\/([^/]+)\/bundle\/complete$/;
@@ -112,9 +115,15 @@ async function hmacKey(secret: string, usage: 'sign' | 'verify'): Promise<Crypto
   return crypto.subtle.importKey('raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, [usage]);
 }
 
-/** First 12 hex of HMAC-SHA256(secret, uid). Salted by the secret, stable per environment. */
+/**
+ * First 12 hex of HMAC-SHA256(secret, "uid-hash:v1:" + uid). Salted by the secret, stable per
+ * environment. The fixed label keeps this MAC from ever being a valid MAC over a JWT signing input
+ * (`<header>.<payload>`, which cannot start with the label), so a `sub` cannot be crafted to collide.
+ */
 export async function hashUid(secret: string, uid: string): Promise<string> {
-  const mac = new Uint8Array(await crypto.subtle.sign('HMAC', await hmacKey(secret, 'sign'), encoder.encode(uid)));
+  const mac = new Uint8Array(
+    await crypto.subtle.sign('HMAC', await hmacKey(secret, 'sign'), encoder.encode(`${UID_HASH_LABEL}${uid}`))
+  );
   return Array.from(mac.slice(0, 6), (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
@@ -210,6 +219,25 @@ function adoptRequestId(c: Context<any>): void {
   if (isValidRequestId(inbound)) c.set('requestId', inbound);
 }
 
+let weakSecretLogged = false;
+
+/** The secret if it is long enough to sign with, else undefined (door closed). Logs once per process, never the value. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function usableSecret(c: Context<any>, secret: string | undefined): string | undefined {
+  if (!secret) return undefined;
+  if (encoder.encode(secret).length >= MIN_SECRET_BYTES) return secret;
+  if (!weakSecretLogged) {
+    weakSecretLogged = true;
+    log.warn('dashboard door closed', reqFields(c, { err_code: 'import_secret_weak' }));
+  }
+  return undefined;
+}
+
+/** Test hook: re-arm the log-once flag. */
+export function resetWeakSecretLogForTests(): void {
+  weakSecretLogged = false;
+}
+
 /**
  * Wrap the API-key middleware: on the two eligible routes, with the secret set and `X-Scry-Caller`
  * present, the assertion replaces the API key. Everything else is `apiKeyMw` unchanged.
@@ -219,7 +247,7 @@ export function dashboardDoor(apiKeyMw: MiddlewareHandler): MiddlewareHandler {
   return async (c: Context<any>, next: Next) => {
     const route = eligibleRoute(c.req.method, c.req.path);
     const token = c.req.header(CALLER_HEADER);
-    const secret = c.get('assertionSecret') as string | undefined;
+    const secret = usableSecret(c, c.get('assertionSecret') as string | undefined);
     if (!route || !token || !secret) return apiKeyMw(c, next);
 
     const project = decodeParam(route.project);
