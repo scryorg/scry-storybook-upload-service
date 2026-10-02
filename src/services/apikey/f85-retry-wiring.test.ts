@@ -54,15 +54,16 @@ describe('F85/F86: apikey.worker Firestore retry wiring', () => {
     expect(calls).toBe(1);
   });
 
-  it('revokeApiKey (patchDocument) retries a 429 then succeeds', async () => {
+  it('revokeApiKey (read + conditional patch) retries a 429 then succeeds', async () => {
     let calls = 0;
     vi.stubGlobal('fetch', vi.fn(async () => {
       calls++;
       if (calls === 1) return { ok: false, status: 429, statusText: 'Too Many Requests', headers: noHeaders() };
-      return { ok: true, status: 200, json: async () => ({}) };
+      return { ok: true, status: 200, json: async () => ({ fields: { status: { stringValue: 'active' } }, updateTime: 't1' }) };
     }));
 
+    // read (429, then ok) + conditional PATCH: the 429 on the read is retried like any other call
     await expect(service().revokeApiKey('proj', 'key-1', 'admin')).resolves.toBeUndefined();
-    expect(calls).toBe(2);
+    expect(calls).toBe(3);
   });
 });

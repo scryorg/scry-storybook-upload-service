@@ -189,11 +189,20 @@ export class ApiKeyServiceNode implements ApiKeyService {
     userId: string
   ): Promise<void> {
     const keyRef = this.db.doc(`projects/${projectId}/apiKeys/${keyId}`);
-    
-    await keyRef.update({
-      status: 'revoked',
-      revokedAt: admin.firestore.FieldValue.serverTimestamp(),
-      revokedBy: userId,
+
+    // First revocation wins (F43a): the read and write share one transaction, so a concurrent or
+    // repeat revoke sees the key already revoked and leaves revokedAt/revokedBy untouched.
+    await this.db.runTransaction(async (tx) => {
+      const snap = await tx.get(keyRef);
+      if (!snap.exists) {
+        throw new Error('Failed to revoke API key: not found');
+      }
+      if (snap.data()?.status === 'revoked') return;
+      tx.update(keyRef, {
+        status: 'revoked',
+        revokedAt: admin.firestore.FieldValue.serverTimestamp(),
+        revokedBy: userId,
+      });
     });
   }
 

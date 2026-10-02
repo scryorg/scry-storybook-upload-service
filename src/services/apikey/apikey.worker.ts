@@ -17,6 +17,9 @@ import {
 import { retryFetch } from '../../utils/firestore-retry.js';
 import { exchangeJwtForAccessToken } from '../../utils/google-token.js';
 
+/** Tries for a revoke that keeps losing its precondition to unrelated writes (read + conditional PATCH each). */
+const REVOKE_MAX_ATTEMPTS = 3;
+
 interface ApiKeyWorkerConfig {
   projectId: string;
   clientEmail: string;
@@ -41,6 +44,8 @@ type FirestoreFields = Record<string, FirestoreValue>;
 interface FirestoreDocument {
   name: string;
   fields: FirestoreFields;
+  /** RFC 3339 time of the last write; the value a `currentDocument.updateTime` precondition must match. */
+  updateTime?: string;
 }
 
 /** A Firestore REST `StructuredQuery`, narrowed to the shapes this file builds. */
@@ -272,14 +277,23 @@ export class ApiKeyServiceWorker implements ApiKeyService {
   ): Promise<void> {
     const token = await this.getAccessToken();
     const keyPath = `projects/${projectId}/apiKeys/${keyId}`;
-    
-    const fields = {
-      status: { stringValue: 'revoked' },
-      revokedAt: { timestampValue: new Date().toISOString() },
-      revokedBy: { stringValue: userId },
-    };
 
-    await this.patchDocument(keyPath, fields, token);
+    // First revocation wins (F43a): read the key, stop if it is already revoked, and write with an
+    // `updateTime` precondition so a concurrent revoke that lands between our read and write makes
+    // this PATCH fail instead of overwriting revokedAt/revokedBy. A lost race is re-read: if the
+    // key is now revoked we are done (idempotent); any other change (e.g. a lastUsedAt write) retries.
+    for (let attempt = 0; attempt < REVOKE_MAX_ATTEMPTS; attempt++) {
+      const current = await this.getDocument(keyPath, token);
+      if (current.fields.status?.stringValue === 'revoked') return;
+
+      const fields = {
+        status: { stringValue: 'revoked' },
+        revokedAt: { timestampValue: new Date().toISOString() },
+        revokedBy: { stringValue: userId },
+      };
+      if (await this.patchDocumentIfUnchanged(keyPath, fields, current.updateTime, token)) return;
+    }
+    throw new Error('Failed to revoke API key: document kept changing');
   }
 
   /**
@@ -376,6 +390,49 @@ export class ApiKeyServiceWorker implements ApiKeyService {
     if (!response.ok) {
       throw new Error(`Failed to patch document: ${response.statusText}`);
     }
+  }
+
+  // Idempotent read of one document; retried on 429/503/500/network (F85).
+  private async getDocument(path: string, token: string): Promise<FirestoreDocument> {
+    const response = await retryFetch(() => fetch(`${this.baseUrl}/${path}`, {
+      method: 'GET',
+      headers: { 'Authorization': `Bearer ${token}` },
+    }), { op: 'getDocument' });
+
+    if (!response.ok) {
+      throw new Error(`Failed to get document: ${response.statusText}`);
+    }
+    const doc = await response.json() as FirestoreDocument;
+    return { ...doc, fields: doc.fields ?? {} };
+  }
+
+  // Conditional PATCH: only applies if the document's updateTime still equals the one we read.
+  // Returns false when Firestore refuses the precondition (400 FAILED_PRECONDITION / 409 ABORTED,
+  // i.e. someone wrote in between), true when it applied; any other failure throws. Resending the
+  // same conditional write after a transient error is safe (fixed values, same precondition).
+  private async patchDocumentIfUnchanged(
+    path: string,
+    fields: FirestoreFields,
+    updateTime: string | undefined,
+    token: string
+  ): Promise<boolean> {
+    const params = new URLSearchParams();
+    for (const key of Object.keys(fields)) params.append('updateMask.fieldPaths', key);
+    if (updateTime) params.append('currentDocument.updateTime', updateTime);
+    else params.append('currentDocument.exists', 'true');
+
+    const response = await retryFetch(() => fetch(`${this.baseUrl}/${path}?${params.toString()}`, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ fields }),
+    }), { op: 'patchDocument' });
+
+    if (response.ok) return true;
+    if (await isPreconditionFailure(response)) return false;
+    throw new Error(`Failed to patch document: ${response.statusText}`);
   }
 
   // Idempotent read: retried on 429/503/500/network (F85/F86 — this is the
@@ -509,5 +566,17 @@ export class ApiKeyServiceWorker implements ApiKeyService {
     let end = unpadded.length;
     while (end > 0 && unpadded[end - 1] === '=') end--;
     return unpadded.slice(0, end);
+  }
+}
+
+/** True for the statuses Firestore REST uses for a failed write precondition. */
+async function isPreconditionFailure(response: Response): Promise<boolean> {
+  if (response.status === 409) return true;
+  if (response.status !== 400) return false;
+  try {
+    const body = await response.json() as { error?: { status?: string } };
+    return body.error?.status === 'FAILED_PRECONDITION';
+  } catch {
+    return false;
   }
 }

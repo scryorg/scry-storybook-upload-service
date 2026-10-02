@@ -419,6 +419,76 @@ describe('guarantee-1 source pin: a device key only presigns and completes x-scr
   });
 });
 
+describe('guarantee-1 full source pin: a device key presigns and completes exactly x-scry-sync:other (F68)', () => {
+  it.each(['x-scry-sync:ios', 'x-scry-sync:web', 'x-scry-sync:android', 'x-scry-sync:macos', 'x-scry-sync:windows', 'x-scry-sync:email'])(
+    'presign: ?source=%s is 403 with the existing body; no build, no presigned URL',
+    async (source) => {
+      const { server, storage, firestore } = setup();
+      const res = await req(server, 'POST', `/presigned-url/studio/sync-1/bundle.zip?source=${encodeURIComponent(source)}`);
+      expect(res.status).toBe(403);
+      expect(await res.json()).toMatchObject(REFUSAL);
+      expect(firestore.createBuild).not.toHaveBeenCalled();
+      expect(storage.getPresignedUploadUrl).not.toHaveBeenCalled();
+      expect(logged.some((l) => l.includes('device_key_source'))).toBe(true);
+    }
+  );
+
+  it('complete: a build stored as x-scry-sync:ios is 403 for a device key, not queued', async () => {
+    const send = vi.fn(async () => undefined);
+    const { server, firestore } = setup({ storage: syncStorage(), queue: { send }, buildSource: { kind: 'x-scry-sync', platform: 'ios' } });
+    const res = await req(server, 'POST', COMPLETE, JSON_BODY(COMPLETE_BODY));
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject(REFUSAL);
+    expect(send).not.toHaveBeenCalled();
+    expect(firestore.updateProcessingStatus).not.toHaveBeenCalled();
+  });
+
+  it.each(['ios', 'web', 'android'])(
+    'complete: an x-scry-sync:other build whose manifest says platform %s is 403; object deleted, build failed, not queued',
+    async (platform) => {
+      const send = vi.fn(async () => undefined);
+      const storage = syncStorage({ kind: 'x-scry-sync', platform });
+      const { server, firestore } = setup({ storage, queue: { send } });
+      const res = await req(server, 'POST', COMPLETE, JSON_BODY(COMPLETE_BODY));
+      expect(res.status).toBe(403);
+      expect(await res.json()).toMatchObject(REFUSAL);
+      expect(send).not.toHaveBeenCalled();
+      expect(firestore.updateBuild).toHaveBeenCalledWith('studio', 'b1', expect.objectContaining({ processingStatus: 'failed' }));
+      expect(await storage.head(ZIP_KEY)).toBeNull();
+    }
+  );
+
+  it('complete: a manifest with no platform (defaults to web) is refused for a device key', async () => {
+    const send = vi.fn(async () => undefined);
+    const storage = new MockStorageService();
+    storage.seed(
+      ZIP_KEY,
+      buildZip([
+        { name: 'scf.json', data: Buffer.from(JSON.stringify({ scf: '1.0', source: { kind: 'x-scry-sync' }, captures: [{ id: 'p2', image: 'images/p2.png' }] })) },
+        { name: 'images/p2.png', data: PNG },
+      ])
+    );
+    const { server } = setup({ storage, queue: { send } });
+    expect((await req(server, 'POST', COMPLETE, JSON_BODY(COMPLETE_BODY))).status).toBe(403);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('exactly x-scry-sync:other still passes presign and complete (recorded fixture shape)', async () => {
+    const send = vi.fn(async () => undefined);
+    const { server } = setup({ storage: syncStorage(), queue: { send } });
+    expect((await req(server, 'POST', PRESIGN)).status).toBe(200);
+    expect((await req(server, 'POST', COMPLETE, JSON_BODY(COMPLETE_BODY))).status).toBe(200);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it('other key kinds are unaffected: a key with no kind may presign x-scry-sync:ios and storybook:web', async () => {
+    const { server } = setup({ noKind: true });
+    for (const source of ['x-scry-sync:ios', 'storybook:web']) {
+      expect((await req(server, 'POST', `/presigned-url/studio/sync-1/bundle.zip?source=${encodeURIComponent(source)}`)).status, source).toBe(200);
+    }
+  });
+});
+
 describe('DELETE /keys/self is not behind apiKeyAuth (F41)', () => {
   it('a restricted key, whatever its kind, revokes itself through the self-authenticating handler', async () => {
     for (const kind of ['device', 'Device', 5]) {
