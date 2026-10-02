@@ -29,6 +29,7 @@ import { ciEventFields, mergeCiTimings, parseCiTimings, type CiTimings, type CiT
 import { parseSourceKey } from './bundle/source-key.js';
 import { readBoundedZip, DEFAULT_BOUNDED_ZIP_LIMITS } from './bundle/bounded-zip.js';
 import { validateBundle } from './vendor/scf/dist/index.js';
+import { registerSelfRevoke } from './keys/self-revoke.js';
 
 // Define the application's environment, including injectable variables.
 export type AppEnv = {
@@ -1961,6 +1962,9 @@ app.openapi(imageUploadCompleteRoute, async (c) => {
     );
   }
 });
+
+// scry-sync: the desktop app's "Disconnect" revokes its own key (guarantee-5).
+registerSelfRevoke(app);
 
 // Serve OpenAPI spec
 app.doc('/openapi.json', {

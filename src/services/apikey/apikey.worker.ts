@@ -217,6 +217,7 @@ export class ApiKeyServiceWorker implements ApiKeyService {
       expiresAt: fields.expiresAt?.timestampValue ? new Date(fields.expiresAt.timestampValue) : undefined,
       revokedAt: fields.revokedAt?.timestampValue ? new Date(fields.revokedAt.timestampValue) : undefined,
       revokedBy: fields.revokedBy?.stringValue,
+      ...(fields.kind?.stringValue ? { kind: fields.kind.stringValue } : {}),
     };
 
     return {

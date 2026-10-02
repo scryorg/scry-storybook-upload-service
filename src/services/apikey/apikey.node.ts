@@ -141,6 +141,7 @@ export class ApiKeyServiceNode implements ApiKeyService {
       expiresAt: data.expiresAt?.toDate(),
       revokedAt: data.revokedAt?.toDate(),
       revokedBy: data.revokedBy,
+      ...(typeof data.kind === 'string' && data.kind ? { kind: data.kind } : {}),
     };
 
     return {

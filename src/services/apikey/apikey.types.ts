@@ -62,6 +62,13 @@ export interface ApiKey {
    * User ID who revoked the key (if applicable)
    */
   revokedBy?: string;
+
+  /**
+   * scry-sync: what minted the key. `'device'` is a Scry Sync desktop key from the dashboard's
+   * device sign-in; it may only upload bundles and revoke itself (guarantee-1). Absent on every
+   * key minted before scry-sync, which keeps its existing rights.
+   */
+  kind?: string;
 }
 
 /**

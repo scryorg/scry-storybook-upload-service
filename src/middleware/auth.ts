@@ -73,7 +73,29 @@ export interface AuthVariables {
     projectId: string;
     /** The project the key was minted for (from the key itself). */
     keyProjectId: string;
+    /** scry-sync: `'device'` for a Scry Sync desktop key; absent for every other key. */
+    kind?: string;
   };
+}
+
+/** scry-sync: the `kind` the dashboard's device sign-in writes on the key it mints. */
+export const DEVICE_KEY_KIND = 'device';
+
+/**
+ * scry-sync guarantee-1: the only requests a device key may make. Presign a bundle, complete it
+ * (the PUT in between goes straight to R2 on the presigned URL) and revoke itself. Every other
+ * route (read, list, legacy uploads, coverage, metadata, images) is refused with 403, even for the
+ * key's own project. Matched on the method and the concrete path, so a new route is refused by
+ * default until it is added here.
+ */
+const DEVICE_KEY_ROUTES: ReadonlyArray<{ method: string; path: RegExp }> = [
+  { method: 'POST', path: /^\/presigned-url\/[^/]+\/[^/]+\/bundle\.zip$/ },
+  { method: 'POST', path: /^\/upload\/[^/]+\/[^/]+\/bundle\/complete$/ },
+  { method: 'DELETE', path: /^\/keys\/self$/ },
+];
+
+export function deviceKeyMayUse(method: string, path: string): boolean {
+  return DEVICE_KEY_ROUTES.some((r) => r.method === method.toUpperCase() && r.path.test(path));
 }
 
 /**
@@ -207,6 +229,20 @@ export function apiKeyAuth(options: ApiKeyAuthOptions = {}) {
       );
     }
 
+    // scry-sync guarantee-1: a device key can upload bundles and revoke itself, nothing else.
+    const keyKind = result.apiKey!.kind;
+    if (keyKind === DEVICE_KEY_KIND && !deviceKeyMayUse(c.req.method, c.req.path)) {
+      log.warn('device key refused', reqFields(c as never, { err_code: 'device_key_scope' }));
+      logAuth('warn', { outcome: 'device_key_scope', keyId: result.apiKey!.id, method: c.req.method });
+      return c.json(
+        {
+          error: 'Forbidden',
+          message: 'This key can only upload pictures to its project',
+        },
+        403
+      );
+    }
+
     // Authorized: only now may the project reach a log line.
     markVerifiedProject(c, projectId);
 
@@ -217,6 +253,7 @@ export function apiKeyAuth(options: ApiKeyAuthOptions = {}) {
       prefix: result.apiKey!.prefix,
       projectId,
       keyProjectId,
+      ...(keyKind ? { kind: keyKind } : {}),
     });
 
     logAuth('log', {
