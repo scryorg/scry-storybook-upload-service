@@ -157,3 +157,20 @@ export function generateKeyId(): string {
   }
   return id;
 }
+/**
+ * What `kind` a key document with an unreadable `kind` is given. Any value is restricted (see
+ * `isRestrictedKeyKind` in middleware/auth.ts); this one names the cause in logs and tests.
+ */
+export const UNRECOGNISED_KEY_KIND = 'unrecognised';
+
+/**
+ * scry-sync fail-closed (ledger F39): the key's `kind` as the services hand it on. A document with
+ * no `kind` field yields `undefined` (a legacy key, unchanged). A document with the field present
+ * always yields a non-empty string: the stored string when it is one, else UNRECOGNISED_KEY_KIND
+ * (a non-string, null or empty value). The caller never sees "present" collapsed into "absent",
+ * so a mis-typed `kind` can not turn a device key into an unrestricted one.
+ */
+export function readKeyKind(present: boolean, raw: unknown): string | undefined {
+  if (!present) return undefined;
+  return typeof raw === 'string' && raw.length > 0 ? raw : UNRECOGNISED_KEY_KIND;
+}

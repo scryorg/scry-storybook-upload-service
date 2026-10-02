@@ -12,6 +12,7 @@ import {
   getKeyPrefix,
   generateKeyId,
   isValidApiKeyFormat,
+  readKeyKind,
 } from './apikey.utils.js';
 import { retryFetch } from '../../utils/firestore-retry.js';
 import { exchangeJwtForAccessToken } from '../../utils/google-token.js';
@@ -205,6 +206,8 @@ export class ApiKeyServiceWorker implements ApiKeyService {
     // Extract document ID from the name
     const docId = doc.name.split('/').pop()!;
 
+    const kind = readKeyKind('kind' in fields, fields.kind?.stringValue);
+
     // Return valid result
     const apiKey: Omit<ApiKey, 'hash'> = {
       id: docId,
@@ -217,6 +220,8 @@ export class ApiKeyServiceWorker implements ApiKeyService {
       expiresAt: fields.expiresAt?.timestampValue ? new Date(fields.expiresAt.timestampValue) : undefined,
       revokedAt: fields.revokedAt?.timestampValue ? new Date(fields.revokedAt.timestampValue) : undefined,
       revokedBy: fields.revokedBy?.stringValue,
+      // fail-closed (F39): a present `kind` is never dropped, whatever its type; only no field is a legacy key
+      ...(kind === undefined ? {} : { kind }),
     };
 
     return {

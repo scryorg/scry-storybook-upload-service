@@ -21,7 +21,13 @@ import type {
   CreateBuildData,
 } from './services/firestore/firestore.types.js';
 import type { ApiKeyService } from './services/apikey/apikey.service.js';
-import { apiKeyAuth, type AuthVariables } from './middleware/auth.js';
+import {
+  apiKeyAuth,
+  isRestrictedKeyKind,
+  DEVICE_KEY_REFUSAL,
+  DEVICE_KEY_SOURCE_KIND,
+  type AuthVariables,
+} from './middleware/auth.js';
 import { dashboardDoor } from './middleware/dashboard-door.js';
 import { extractGitContext, normalizeCoverageInput } from './coverage/coverage.js';
 import { parseMultipartFormData } from './utils/multipart.js';
@@ -29,6 +35,7 @@ import { ciEventFields, mergeCiTimings, parseCiTimings, type CiTimings, type CiT
 import { parseSourceKey } from './bundle/source-key.js';
 import { readBoundedZip, DEFAULT_BOUNDED_ZIP_LIMITS } from './bundle/bounded-zip.js';
 import { validateBundle } from './vendor/scf/dist/index.js';
+import { registerSelfRevoke } from './keys/self-revoke.js';
 
 // Define the application's environment, including injectable variables.
 export type AppEnv = {
@@ -1201,6 +1208,13 @@ app.openapi(presignedBundleUrlRoute, async (c) => {
       );
     }
 
+    // scry-sync F40: a device key presigns only for Scry Sync's own source. Any other registered
+    // source would route its build through that source's processing path.
+    if (isRestrictedKeyKind(c.get('authenticatedApiKey')?.kind) && parsedSource.kind !== DEVICE_KEY_SOURCE_KIND) {
+      log.warn('device key refused', reqFields(c, { err_code: 'device_key_source' }));
+      return c.json(DEVICE_KEY_REFUSAL, 403);
+    }
+
     if (!firestore) {
       return c.json({ error: 'Firestore not configured' }, 500);
     }
@@ -1476,6 +1490,13 @@ app.openapi(bundleCompleteRoute, async (c) => {
     }
     c.set('buildId', build.id);
 
+    // scry-sync F40: a device key completes only a build presigned for Scry Sync's own source.
+    const restrictedKey = isRestrictedKeyKind(c.get('authenticatedApiKey')?.kind);
+    if (restrictedKey && build.source?.kind !== DEVICE_KEY_SOURCE_KIND) {
+      log.warn('device key refused', reqFields(c, { err_code: 'device_key_source' }));
+      return c.json(DEVICE_KEY_REFUSAL, 403);
+    }
+
     // Complete acts only on a build still pending. A repeat after a success (a CLI retry whose first
     // response was lost, a double click) answers the same success without touching the queue, the
     // object or the status. A repeat after a rejection is refused: its object is already deleted.
@@ -1540,6 +1561,16 @@ app.openapi(bundleCompleteRoute, async (c) => {
     const validation = await validateBundle(zipResult.files);
     if (!validation.ok) {
       return reject(validation.errors);
+    }
+    // scry-sync F40: the bundle's own manifest must also say Scry Sync, so a device key can not
+    // presign as x-scry-sync and then upload another source's bundle. Same 403 as the presign pin;
+    // the object is deleted and the build marked failed like any rejected bundle.
+    if (restrictedKey && validation.manifest?.source?.kind !== DEVICE_KEY_SOURCE_KIND) {
+      await cleanupRejectedBundle(c, storage, firestore, project, buildId, zipKey, [
+        { code: 'SOURCE_NOT_ALLOWED', message: 'This key can only upload Scry Sync bundles.' },
+      ]);
+      log.warn('device key refused', reqFields(c, { err_code: 'device_key_source' }));
+      return c.json(DEVICE_KEY_REFUSAL, 403);
     }
     // Ledger F60: warnings from a checked-then-discarded member (e.g. STRUCTURE_TREE_LARGE) never
     // reached validateBundle (it never saw that member's bytes) — merge them back in here so the
@@ -1961,6 +1992,9 @@ app.openapi(imageUploadCompleteRoute, async (c) => {
     );
   }
 });
+
+// scry-sync: the desktop app's "Disconnect" revokes its own key (guarantee-5).
+registerSelfRevoke(app);
 
 // Serve OpenAPI spec
 app.doc('/openapi.json', {
