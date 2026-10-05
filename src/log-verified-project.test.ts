@@ -44,7 +44,7 @@ function setup(valid: boolean | 'throw', getBuild: unknown = null) {
     head: vi.fn(),
     delete: vi.fn(),
   } as unknown as StorageService;
-  const build = { id: 'b1', projectId: 'realproj', versionId: 'v1', buildNumber: 1, zipUrl: 'z', status: 'active', createdAt: new Date(), createdBy: 't' };
+  const build = { id: 'b1', projectId: 'realprojAAAAAAAAAAAA', versionId: 'v1', buildNumber: 1, zipUrl: 'z', status: 'active', createdAt: new Date(), createdBy: 't' };
   const firestore = {
     createBuild: vi.fn(async () => build),
     getBuild: vi.fn(async () => getBuild),
@@ -151,17 +151,17 @@ describe('F47 unverified request values never reach a line', () => {
 
   it('authorized request with a body/path build id that does not exist logs no build_id', async () => {
     const server = makeServer(true, null);
-    const res = await post(server, `/upload/realproj/v1/bundle/complete`, { 'X-API-Key': 'scry_proj_realproj_secret' }, { buildId: CB, zipKey: `realproj/v1/builds/${CB}/bundle.zip` });
+    const res = await post(server, `/upload/realprojAAAAAAAAAAAA/v1/bundle/complete`, { 'X-API-Key': 'scry_proj_realprojAAAAAAAAAAAA_secret' }, { buildId: CB, zipKey: `realprojAAAAAAAAAAAA/v1/builds/${CB}/bundle.zip` });
     expect(res.status).toBe(404);
     const all = lines.join('\n');
     expect(all).not.toContain(CB);
-    expect(requestLines()[0]).toMatchObject({ project: 'realproj' });
+    expect(requestLines()[0]).toMatchObject({ project: 'realprojAAAAAAAAAAAA' });
     expect(requestLines()[0].build_id).toBeUndefined();
   });
 
   it('ci-timings with a client path build id does not log it', async () => {
     const server = makeServer(true, null);
-    const res = await post(server, `/upload/realproj/v1/builds/${CB}/ci-timings`, { 'X-API-Key': 'scry_proj_realproj_secret' }, { ciTimings: 'not-an-object' });
+    const res = await post(server, `/upload/realprojAAAAAAAAAAAA/v1/builds/${CB}/ci-timings`, { 'X-API-Key': 'scry_proj_realprojAAAAAAAAAAAA_secret' }, { ciTimings: 'not-an-object' });
     expect(res.status).toBe(400);
     expect(lines.join('\n')).not.toContain(CB);
   });
@@ -169,13 +169,13 @@ describe('F47 unverified request values never reach a line', () => {
 
 describe('F47 a legitimate authorized upload still logs its real project id', () => {
   it('presigned-url logs project, build_id and a well-formed client', async () => {
-    const res = await post(makeServer(true), `/presigned-url/realproj/v1/storybook.zip`, {
-      'X-API-Key': 'scry_proj_realproj_secret',
+    const res = await post(makeServer(true), `/presigned-url/realprojAAAAAAAAAAAA/v1/storybook.zip`, {
+      'X-API-Key': 'scry_proj_realprojAAAAAAAAAAAA_secret',
       'x-scry-client': 'scry-deployer/1.2.3',
     });
     expect(res.status).toBe(200);
     const [line] = requestLines();
-    expect(line).toMatchObject({ project: 'realproj', build_id: 'b1', client: 'scry-deployer/1.2.3', route: '/presigned-url/:project/:version/:filename' });
+    expect(line).toMatchObject({ project: 'realprojAAAAAAAAAAAA', build_id: 'b1', client: 'scry-deployer/1.2.3', route: '/presigned-url/:project/:version/:filename' });
     const all = lines.join('\n');
     for (const m of [CH, CR, CB]) expect(all, m).not.toContain(m);
   });

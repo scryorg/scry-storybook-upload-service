@@ -1,4 +1,5 @@
 import type { CiTimings } from '../../ci-timings/ci-timings.js';
+import type { BuildStep, StepSummaryUpdate } from '../../lib/build-steps.js';
 
 export type { CiTimings };
 
@@ -330,6 +331,14 @@ export interface CreateBuildData {
    * Where this build's captures came from (capture-sources). Absent = legacy Storybook web.
    */
   source?: BuildSource;
+
+  /**
+   * staff-builds-view: the request that created the build (stored as `requestId`) and the first
+   * pipeline step it took. Together they seed `stepSummary` {firstStepAt, lastStep, lastStepAt,
+   * outcome, requestId} inside the same create write. Both omitted = no summary is written.
+   */
+  requestId?: string;
+  firstStep?: BuildStep;
 }
 
 // ============= UPLOAD TYPES =============
@@ -424,4 +433,10 @@ export interface UpdateBuildData {
 
   /** See `Build.processingError`. Set alongside `processingStatus: 'failed'`. */
   processingError?: string;
+
+  /**
+   * staff-builds-view: moves `stepSummary.lastStep/lastStepAt/outcome` inside this same write
+   * (nested mask paths, so `firstStepAt` and `requestId` are never touched). No extra Firestore write.
+   */
+  stepSummary?: StepSummaryUpdate;
 }

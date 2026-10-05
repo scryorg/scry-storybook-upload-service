@@ -61,6 +61,50 @@ The service includes optional Firestore integration for tracking build metadata 
 - **`src/services/firestore/firestore.worker.ts`**: Cloudflare Worker implementation using Firestore REST API
 - **`src/services/firestore/firestore.types.ts`**: Shared type definitions for build records
 
+### Build step events (`build.step`)
+
+Each pipeline step writes one structured log line (schema v1, service `upload`, same destination as the request lines), so a support person can follow a build with `scry-management/scripts/scry-logs.py --env stage --build <id>`. The closed list of steps lives in `src/lib/build-steps.ts` (`BUILD_STEPS`, `BUILD_STEP_OUTCOMES`) and is the same list, with the same strings, in `scry-build-processing-service`. This service emits the first four; build processing emits the rest.
+
+Steps: `upload_received`, `presign`, `complete`, `enqueue`, `queue_pickup`, `lease_wait`, `credits_wait`, `chunk_start`, `chunk_done`, `retry`, `finalise`, `fail`, `dead_letter`, `stall_mark`.
+
+Outcomes: `start`, `ok`, `wait`, `retry`, `fail`, `dead`, `stalled`.
+
+Fields: `step`, `outcome`, `build_id`, `project`, `request_id`, plus `ms`, `attempt`, `chunk`, `chunks_total` and `reason` where they apply. `project` and `build_id` are attached only after the API key was verified for the project. `reason` is one of a closed list of codes (below), never free text or an exception message; `emitBuildStep` turns anything else into `unknown`. This service emits `validation`, `source_not_allowed` and `queue_send_failed`. Failing to log never fails the upload.
+
+Reason codes (closed list `BUILD_STEP_REASONS`, the same list in both repos; the dashboard maps each to plain words):
+
+| Code | Means |
+|---|---|
+| `ai_timeout` | an AI call or step ran past its deadline |
+| `http_429` | a vendor rate-limited the request |
+| `http_4xx` | a vendor or service refused the request (other than 429) |
+| `http_5xx` | a vendor or service failed on its side |
+| `credits_exhausted` | not enough AI credits; the build waits or stops |
+| `credits_unavailable` | the credits ledger could not be reached |
+| `quota` | a plan or vendor quota was hit |
+| `validation` | the upload or its metadata failed a check |
+| `source_not_allowed` | the key's source is not allowed for this upload |
+| `lease_lost` | the indexing turn was lost or could not be taken |
+| `queue_redelivery` | the queue handed the message back |
+| `queue_send_failed` | the processing queue refused the message |
+| `empty_archive` | the archive listed no stories |
+| `stories_dropped` | stories the archive declared were not captured |
+| `stories_failed` | stories inside a chunk that ran produced no row |
+| `chunks_missing` | chunks never ran (circuit breaker or terminated instance) |
+| `stalled_no_story` | stalled before the story count was known |
+| `stalled_no_heartbeat` | stalled with no stage progress ever recorded |
+| `stalled_total` | stalled: progress stopped for the threshold |
+| `dead_letter` | the queue gave up on the message |
+| `unknown` | none of the above |
+
+Example line:
+
+```json
+{"v":1,"ts":"2026-10-05T20:31:07.412Z","level":"info","service":"upload","env":"staging","msg":"build.step","request_id":"01K6Z3V8Q2W9X4N7B5M1C0D8ER","project":"AbCdEfGhIjKlMnOpQrSt","build_id":"7nQ2xLk9Pq3RsT4uVw5Y","step":"enqueue","outcome":"ok"}
+```
+
+The build document also keeps `requestId` and `stepSummary {firstStepAt, lastStep, lastStepAt, outcome, requestId}`. `firstStepAt`, `requestId` are written when the build is created; `lastStep`, `lastStepAt` and `outcome` ride the existing `updateProcessingStatus` (or `updateBuild`) write through nested field-mask paths, so no extra Firestore write is made and `firstStepAt` is never overwritten.
+
 ## Architecture: API Key Authentication
 
 The service includes a custom Firebase-based API key authentication system for securing upload endpoints.

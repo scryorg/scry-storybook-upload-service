@@ -1,5 +1,6 @@
 import { log } from '../../lib/log.js';
 import { scrubString } from '../../lib/scry-log/index.js';
+import type { StepSummaryUpdate } from '../../lib/build-steps.js';
 import type { FirestoreService } from './firestore.service.js';
 import type {
   Build,
@@ -146,11 +147,69 @@ export function describeFirestoreError(errorBody: string): { detail: string; bod
   return { detail, body };
 }
 
+/**
+ * One `updateMask.fieldPaths` value. A dotted name is a NESTED path (`stepSummary.lastStep` is the
+ * `lastStep` key inside the `stepSummary` map), so each dot-separated segment is quoted on its own.
+ * A segment that is not a plain identifier (`[A-Za-z_]\w*`) is wrapped in backticks per Firestore's
+ * field-path syntax. Consequence: a top-level field whose own name contains a dot cannot be addressed
+ * here (it would be read as nested); no caller has one, and the pinning tests in
+ * firestore.quote-field-path.test.ts fail if that changes silently.
+ */
+export function quoteFieldPath(fieldPath: string): string {
+  const quoteSegment = (segment: string) =>
+    /^[A-Za-z_]\w*$/.test(segment) ? segment : `\`${segment.replace(/`/g, '\\`')}\``;
+  return fieldPath.split('.').map(quoteSegment).join('.');
+}
+
 /** dashboard-import: channel + creator uid, written only for a build created through the dashboard's signed door. */
 function dashboardBuildFields(data: CreateBuildData): Record<string, { stringValue: string }> {
   return {
     ...(data.channel ? { channel: { stringValue: data.channel } } : {}),
     ...(data.uploadedByUid ? { uploadedByUid: { stringValue: data.uploadedByUid } } : {}),
+  };
+}
+
+/** Nested mask paths for a step-summary move: firstStepAt and requestId are never in the mask, so they are never clobbered. */
+const STEP_SUMMARY_MASK = ['stepSummary.lastStep', 'stepSummary.lastStepAt', 'stepSummary.outcome'];
+
+/** staff-builds-view: the moving part of `stepSummary`, as Firestore REST fields, to ride an existing PATCH. */
+function stepSummaryFields(s: StepSummaryUpdate): Record<string, unknown> {
+  return {
+    stepSummary: {
+      mapValue: {
+        fields: {
+          lastStep: { stringValue: s.lastStep },
+          lastStepAt: { timestampValue: (s.at ?? new Date()).toISOString() },
+          outcome: { stringValue: s.outcome },
+        },
+      },
+    },
+  };
+}
+
+/** The step-summary part of a PATCH: fields and nested mask paths, both empty when there is no summary. */
+function stepSummaryPatch(s: StepSummaryUpdate | undefined): { fields: Record<string, unknown>; mask: string[] } {
+  return s ? { fields: stepSummaryFields(s), mask: STEP_SUMMARY_MASK } : { fields: {}, mask: [] };
+}
+
+/** staff-builds-view: requestId and the first step of `stepSummary`, written in the create write itself. */
+function stepSummarySeed(data: CreateBuildData, at: Date): Record<string, unknown> {
+  const iso = at.toISOString();
+  const requestId = data.requestId ? { requestId: { stringValue: data.requestId } } : {};
+  if (!data.firstStep) return requestId;
+  return {
+    ...requestId,
+    stepSummary: {
+      mapValue: {
+        fields: {
+          firstStepAt: { timestampValue: iso },
+          lastStep: { stringValue: data.firstStep },
+          lastStepAt: { timestampValue: iso },
+          outcome: { stringValue: 'ok' },
+          ...requestId,
+        },
+      },
+    },
   };
 }
 
@@ -261,6 +320,8 @@ export class FirestoreServiceWorker implements FirestoreService {
       // (`findOrphanBundleCandidates`) instead of scanning every project's builds looking for one
       // with `source` set and no `processingStatus` — see that method's doc comment.
       ...(data.source ? { bundlePending: { booleanValue: true } } : {}),
+      // staff-builds-view: the creating request and the first step, in the create write itself.
+      ...stepSummarySeed(data, now),
     };
 
     log.debug('create build step');
@@ -609,6 +670,9 @@ export class FirestoreServiceWorker implements FirestoreService {
     if (updates.processingStatus) {
       maskFieldPaths.push('bundlePending');
     }
+    const summary = stepSummaryPatch(updates.stepSummary);
+    Object.assign(fields, summary.fields);
+    maskFieldPaths.push(...summary.mask);
 
     await this.patchDocument(buildPath, fields, token, maskFieldPaths);
   }
@@ -653,18 +717,21 @@ export class FirestoreServiceWorker implements FirestoreService {
   async updateProcessingStatus(
     projectId: string,
     buildId: string,
-    status: BuildProcessingStatus
+    status: BuildProcessingStatus,
+    stepSummary?: StepSummaryUpdate
   ): Promise<void> {
     const token = await this.getAccessToken();
     const buildPath = `projects/${projectId}/builds/${buildId}`;
     // Ledger F91: this is the route's own success path (`/bundle/complete` sets `queued` here after
     // validation) — see the matching comment on `updateBuild` above for why `bundlePending` is
     // cleared alongside processingStatus in every writer, not only there.
+    // staff-builds-view: the step summary rides this same PATCH (nested mask paths), no extra write.
+    const summary = stepSummaryPatch(stepSummary);
     await this.patchDocument(
       buildPath,
-      { processingStatus: { stringValue: status } },
+      { processingStatus: { stringValue: status }, ...summary.fields },
       token,
-      ['processingStatus', 'bundlePending']
+      ['processingStatus', 'bundlePending', ...summary.mask]
     );
   }
 
@@ -983,14 +1050,7 @@ export class FirestoreServiceWorker implements FirestoreService {
 
     // Firestore's REST API takes one `updateMask.fieldPaths` query param PER field, not a single
     // comma-joined value (that is parsed as one field path containing a literal comma, which
-    // Firestore rejects with "Invalid property path"). A bare field name (our case: top-level
-    // build-doc fields like `status`, `zipUrl`, `commitSha`) never needs quoting, but a path
-    // segment containing anything other than [A-Za-z0-9_] — or one starting with a digit — must be
-    // wrapped in backticks per Firestore's field-path syntax, so this stays correct if a future
-    // field name ever needs it.
-    const needsBackticks = (segment: string) => !/^[A-Za-z_]\w*$/.test(segment);
-    const quoteFieldPath = (fieldPath: string) =>
-      needsBackticks(fieldPath) ? `\`${fieldPath.replace(/`/g, '\\`')}\`` : fieldPath;
+    // Firestore rejects with "Invalid property path"). Each path goes through `quoteFieldPath`.
 
     const resolvedMaskFields = maskFieldPaths ?? Object.keys(fields);
     // F9 (upload-provenance-updatemask security review): a PATCH sent with NO

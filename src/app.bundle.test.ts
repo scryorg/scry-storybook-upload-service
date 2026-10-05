@@ -139,7 +139,7 @@ describe('POST /upload/:project/:version/bundle/complete', () => {
     expect(send).toHaveBeenCalledWith(
       expect.objectContaining({ projectId: 'acme', versionId: 'main', buildId: 'build-100', zipKey: ZIP_KEY, format: 'scf' })
     );
-    expect(updateProcessingStatus).toHaveBeenCalledWith('acme', 'build-100', 'queued');
+    expect(updateProcessingStatus).toHaveBeenCalledWith('acme', 'build-100', 'queued', expect.objectContaining({ lastStep: 'enqueue', outcome: 'ok' }));
     // the bundle stays: nothing here should have deleted it
     expect(await storage.head(ZIP_KEY)).not.toBeNull();
   });
