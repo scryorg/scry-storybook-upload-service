@@ -9,6 +9,7 @@ import { z } from 'zod';
 import { swaggerUI } from '@hono/swagger-ui';
 import { requestIdMiddleware, errorHandler } from './middleware/request-id.js';
 import { log, logWarn, reportError, reqFields } from './lib/log.js';
+import { emitBuildStep, stepSummaryFor, type BuildStep, type StepSummaryUpdate } from './lib/build-steps.js';
 import type { StorageService, StorageObjectMeta } from './services/storage/storage.service.js';
 import type { FirestoreService } from './services/firestore/firestore.service.js';
 import type { DashboardCaller } from './middleware/dashboard-door.js';
@@ -552,6 +553,8 @@ app.openapi(uploadRoute, async (c) => {
           // build document has never kept them, so a search result could name
           // the deploy but not the code (P13a).
           ...extractGitContext(coveragePayload),
+          requestId: c.var.requestId,
+          firstStep: 'upload_received',
         };
 
         const build = await firestore.createBuild(project, buildData);
@@ -559,6 +562,7 @@ app.openapi(uploadRoute, async (c) => {
         buildNumber = build.buildNumber;
         c.set('buildId', build.id);
         log.info('build created', reqFields(c));
+        emitBuildStep(c, { step: 'upload_received', outcome: 'ok', buildId: build.id });
         logCiTimings('upload', { project, version, buildNumber }, ciParsed, c);
 
         // Opens the funnel (playbook §5.5): uploaded -> processed -> indexed ->
@@ -887,6 +891,7 @@ app.openapi(metadataUploadRoute, async (c) => {
 
     const zipKey = `${project}/${version}/builds/${build.buildNumber}/metadata-screenshots.zip`;
     await storage.upload(zipKey, new Blob([body]).stream(), 'application/zip');
+    emitBuildStep(c, { step: 'upload_received', outcome: 'ok', buildId: build.id });
 
     // Record provenance before the build is queued, so the indexer finds it on
     // the document when it reads the build (it stamps build_sha on every row it
@@ -901,22 +906,24 @@ app.openapi(metadataUploadRoute, async (c) => {
 
     let queued = false;
     if (queue) {
-      await queue.send({
-        projectId: project,
-        versionId: version,
-        buildId: build.id,
-        zipKey,
-        timestamp: Date.now(),
-        trace: currentTraceContext(),
-        requestId,
-      });
+      await sendToQueue(c, firestore, project, build.id, () =>
+        queue.send({
+          projectId: project,
+          versionId: version,
+          buildId: build.id,
+          zipKey,
+          timestamp: Date.now(),
+          trace: currentTraceContext(),
+          requestId,
+        })
+      );
       queued = true;
       log.info('build queued', reqFields(c, { build_id: build.id }));
     }
 
     const queuedStatus: BuildProcessingStatus = 'queued';
     if (firestore.updateProcessingStatus) {
-      await firestore.updateProcessingStatus(project, build.id, queuedStatus);
+      await firestore.updateProcessingStatus(project, build.id, queuedStatus, queuedSummary(queued, 'upload_received'));
     } else {
       await firestore.updateBuild(project, build.id, { processingStatus: queuedStatus });
     }
@@ -1235,6 +1242,8 @@ app.openapi(presignedBundleUrlRoute, async (c) => {
       ...(dashboardCaller
         ? { channel: 'dashboard' as const, uploadedByUid: dashboardCaller.uid }
         : uploadedBy(c.var.authenticatedApiKey)),
+      requestId: c.var.requestId,
+      firstStep: 'presign',
     });
 
     const key = `${project}/${version}/builds/${build.buildNumber}/bundle.zip`;
@@ -1242,6 +1251,7 @@ app.openapi(presignedBundleUrlRoute, async (c) => {
 
     c.set('buildId', build.id);
     log.info('bundle build created', reqFields(c));
+    emitBuildStep(c, { step: 'presign', outcome: 'ok', buildId: build.id });
     if (dashboardCaller) {
       log.info('import start', reqFields(c, { err_code: 'import_start', uid_hash: dashboardCaller.uidHash }));
     }
@@ -1366,6 +1376,38 @@ const bundleCompleteRoute = createRoute({
 // Best-effort cleanup for a rejected bundle upload (ledger F31/F32/F49 contract §9): delete the
 // uploaded object and mark the build failed, logging either half's failure rather than throwing --
 // a rejection response must still reach the caller even if this cleanup half-fails.
+/** The summary that rides the `queued` status write: `enqueue` when the build was queued, else the last step that did happen. */
+function queuedSummary(queued: boolean, otherwise: BuildStep): StepSummaryUpdate {
+  return stepSummaryFor(queued ? 'enqueue' : otherwise, 'ok');
+}
+
+/**
+ * Send a build to the processing queue. A failed send leaves a `build.step enqueue fail` line and,
+ * best effort, the summary on the build (no processingStatus is written: the route answers 500), then
+ * rethrows so the route's own error handling is unchanged. Nothing here can mask the original error.
+ */
+async function sendToQueue(
+  c: Context<AppEnv>,
+  firestore: FirestoreService,
+  project: string,
+  buildId: string,
+  send: () => Promise<unknown>
+): Promise<void> {
+  try {
+    await send();
+    emitBuildStep(c, { step: 'enqueue', outcome: 'ok', buildId });
+  } catch (err) {
+    const step: BuildStep = 'enqueue';
+    emitBuildStep(c, { step, outcome: 'fail', buildId, reason: 'queue send failed' });
+    try {
+      await firestore.updateBuild(project, buildId, { stepSummary: stepSummaryFor(step, 'fail') });
+    } catch {
+      // best effort: the original error is what the route reports
+    }
+    throw err;
+  }
+}
+
 async function cleanupRejectedBundle(
   c: Context<AppEnv>,
   storage: StorageService,
@@ -1379,7 +1421,7 @@ async function cleanupRejectedBundle(
     logWarn(c, 'could not delete rejected object', 'bundle_delete_failed');
   });
   await firestore
-    .updateBuild(project, buildId, { processingStatus: 'failed', validationErrors: issues })
+    .updateBuild(project, buildId, { processingStatus: 'failed', validationErrors: issues, stepSummary: stepSummaryFor('complete', 'fail') })
     .catch(() => {
       logWarn(c, 'could not mark build failed', 'bundle_mark_failed');
     });
@@ -1524,6 +1566,7 @@ app.openapi(bundleCompleteRoute, async (c) => {
     const reject = async (issues: BuildValidationIssue[]) => {
       await cleanupRejectedBundle(c, storage, firestore, project, buildId, zipKey, issues);
       log.warn('bundle rejected', reqFields(c, { err_code: 'bundle_rejected' }));
+      emitBuildStep(c, { step: 'complete', outcome: 'fail', buildId, reason: issues.map((i) => i.code).slice(0, 5).join(' ') });
       return c.json({ success: false, error: 'Bundle rejected', errors: issues }, 422);
     };
 
@@ -1570,6 +1613,7 @@ app.openapi(bundleCompleteRoute, async (c) => {
         { code: 'SOURCE_NOT_ALLOWED', message: 'This key can only upload Scry Sync bundles.' },
       ]);
       log.warn('device key refused', reqFields(c, { err_code: 'device_key_source' }));
+      emitBuildStep(c, { step: 'complete', outcome: 'fail', buildId, reason: 'SOURCE_NOT_ALLOWED' });
       return c.json(DEVICE_KEY_REFUSAL, 403);
     }
     // Ledger F60: warnings from a checked-then-discarded member (e.g. STRUCTURE_TREE_LARGE) never
@@ -1578,26 +1622,29 @@ app.openapi(bundleCompleteRoute, async (c) => {
     // pass, per contract §9/G7 (a bundle the validator would accept-with-warnings is never silently
     // accepted-with-fewer-warnings just because this route streamed it).
     const warnings = [...zipResult.warnings, ...validation.warnings];
+    emitBuildStep(c, { step: 'complete', outcome: 'ok', buildId });
 
     let queued = false;
     if (queue) {
-      await queue.send({
-        projectId: project,
-        versionId: version,
-        buildId,
-        zipKey,
-        format: 'scf',
-        timestamp: Date.now(),
-        trace: currentTraceContext(),
-        requestId,
-      });
+      await sendToQueue(c, firestore, project, buildId, () =>
+        queue.send({
+          projectId: project,
+          versionId: version,
+          buildId,
+          zipKey,
+          format: 'scf',
+          timestamp: Date.now(),
+          trace: currentTraceContext(),
+          requestId,
+        })
+      );
       queued = true;
       log.info('build queued', reqFields(c));
     }
 
     const queuedStatus: BuildProcessingStatus = 'queued';
     if (firestore.updateProcessingStatus) {
-      await firestore.updateProcessingStatus(project, buildId, queuedStatus);
+      await firestore.updateProcessingStatus(project, buildId, queuedStatus, queuedSummary(queued, 'complete'));
     } else {
       await firestore.updateBuild(project, buildId, { processingStatus: queuedStatus });
     }
@@ -1712,12 +1759,15 @@ app.openapi(presignedUrlRoute, async (c) => {
         zipUrl: zipUrl,
         ...uploadedBy(c.var.authenticatedApiKey),
         ...(ciTimings ? { ciTimings } : {}),
+        requestId: c.var.requestId,
+        firstStep: 'presign',
       });
       buildId = build.id;
       buildNumber = build.buildNumber;
       
       c.set('buildId', build.id);
       log.info('build created', reqFields(c));
+      emitBuildStep(c, { step: 'presign', outcome: 'ok', buildId: build.id });
       logCiTimings('presigned-url', { project, version, buildNumber }, ciParsed, c);
 
       // Opens the funnel (playbook §5.5). This is the route the deployer

@@ -9,6 +9,7 @@ import type {
   CreateUploadData,
   OrphanBundleCandidate,
 } from './firestore.types.js';
+import type { StepSummaryUpdate } from '../../lib/build-steps.js';
 
 /**
  * Defines the contract for all Firestore operations within the application.
@@ -165,7 +166,8 @@ export interface FirestoreService {
   updateProcessingStatus?(
     projectId: string,
     buildId: string,
-    status: BuildProcessingStatus
+    status: BuildProcessingStatus,
+    stepSummary?: StepSummaryUpdate
   ): Promise<void>;
 
   /**

@@ -1,5 +1,6 @@
 import { log } from '../../lib/log.js';
 import { scrubString } from '../../lib/scry-log/index.js';
+import type { StepSummaryUpdate } from '../../lib/build-steps.js';
 import type { FirestoreService } from './firestore.service.js';
 import type {
   Build,
@@ -154,6 +155,50 @@ function dashboardBuildFields(data: CreateBuildData): Record<string, { stringVal
   };
 }
 
+/** Nested mask paths for a step-summary move: firstStepAt and requestId are never in the mask, so they are never clobbered. */
+const STEP_SUMMARY_MASK = ['stepSummary.lastStep', 'stepSummary.lastStepAt', 'stepSummary.outcome'];
+
+/** staff-builds-view: the moving part of `stepSummary`, as Firestore REST fields, to ride an existing PATCH. */
+function stepSummaryFields(s: StepSummaryUpdate): Record<string, unknown> {
+  return {
+    stepSummary: {
+      mapValue: {
+        fields: {
+          lastStep: { stringValue: s.lastStep },
+          lastStepAt: { timestampValue: (s.at ?? new Date()).toISOString() },
+          outcome: { stringValue: s.outcome },
+        },
+      },
+    },
+  };
+}
+
+/** The step-summary part of a PATCH: fields and nested mask paths, both empty when there is no summary. */
+function stepSummaryPatch(s: StepSummaryUpdate | undefined): { fields: Record<string, unknown>; mask: string[] } {
+  return s ? { fields: stepSummaryFields(s), mask: STEP_SUMMARY_MASK } : { fields: {}, mask: [] };
+}
+
+/** staff-builds-view: requestId and the first step of `stepSummary`, written in the create write itself. */
+function stepSummarySeed(data: CreateBuildData, at: Date): Record<string, unknown> {
+  const iso = at.toISOString();
+  const requestId = data.requestId ? { requestId: { stringValue: data.requestId } } : {};
+  if (!data.firstStep) return requestId;
+  return {
+    ...requestId,
+    stepSummary: {
+      mapValue: {
+        fields: {
+          firstStepAt: { timestampValue: iso },
+          lastStep: { stringValue: data.firstStep },
+          lastStepAt: { timestampValue: iso },
+          outcome: { stringValue: 'ok' },
+          ...requestId,
+        },
+      },
+    },
+  };
+}
+
 export class FirestoreServiceWorker implements FirestoreService {
   private config: FirestoreConfig;
   private baseUrl: string;
@@ -261,6 +306,8 @@ export class FirestoreServiceWorker implements FirestoreService {
       // (`findOrphanBundleCandidates`) instead of scanning every project's builds looking for one
       // with `source` set and no `processingStatus` — see that method's doc comment.
       ...(data.source ? { bundlePending: { booleanValue: true } } : {}),
+      // staff-builds-view: the creating request and the first step, in the create write itself.
+      ...stepSummarySeed(data, now),
     };
 
     log.debug('create build step');
@@ -609,6 +656,9 @@ export class FirestoreServiceWorker implements FirestoreService {
     if (updates.processingStatus) {
       maskFieldPaths.push('bundlePending');
     }
+    const summary = stepSummaryPatch(updates.stepSummary);
+    Object.assign(fields, summary.fields);
+    maskFieldPaths.push(...summary.mask);
 
     await this.patchDocument(buildPath, fields, token, maskFieldPaths);
   }
@@ -653,18 +703,21 @@ export class FirestoreServiceWorker implements FirestoreService {
   async updateProcessingStatus(
     projectId: string,
     buildId: string,
-    status: BuildProcessingStatus
+    status: BuildProcessingStatus,
+    stepSummary?: StepSummaryUpdate
   ): Promise<void> {
     const token = await this.getAccessToken();
     const buildPath = `projects/${projectId}/builds/${buildId}`;
     // Ledger F91: this is the route's own success path (`/bundle/complete` sets `queued` here after
     // validation) — see the matching comment on `updateBuild` above for why `bundlePending` is
     // cleared alongside processingStatus in every writer, not only there.
+    // staff-builds-view: the step summary rides this same PATCH (nested mask paths), no extra write.
+    const summary = stepSummaryPatch(stepSummary);
     await this.patchDocument(
       buildPath,
-      { processingStatus: { stringValue: status } },
+      { processingStatus: { stringValue: status }, ...summary.fields },
       token,
-      ['processingStatus', 'bundlePending']
+      ['processingStatus', 'bundlePending', ...summary.mask]
     );
   }
 
@@ -989,8 +1042,12 @@ export class FirestoreServiceWorker implements FirestoreService {
     // wrapped in backticks per Firestore's field-path syntax, so this stays correct if a future
     // field name ever needs it.
     const needsBackticks = (segment: string) => !/^[A-Za-z_]\w*$/.test(segment);
-    const quoteFieldPath = (fieldPath: string) =>
-      needsBackticks(fieldPath) ? `\`${fieldPath.replace(/`/g, '\\`')}\`` : fieldPath;
+    const quoteSegment = (segment: string) =>
+      needsBackticks(segment) ? `\`${segment.replace(/`/g, '\\`')}\`` : segment;
+    // staff-builds-view: a nested path (`stepSummary.lastStep`) is a dotted list of segments; each segment
+    // is quoted on its own. Quoting the whole path would make Firestore read it as ONE field whose name
+    // contains a dot, and the nested write would land in the wrong place.
+    const quoteFieldPath = (fieldPath: string) => fieldPath.split('.').map(quoteSegment).join('.');
 
     const resolvedMaskFields = maskFieldPaths ?? Object.keys(fields);
     // F9 (upload-provenance-updatemask security review): a PATCH sent with NO

@@ -11,6 +11,33 @@ import type {
   Upload,
   CreateUploadData,
 } from './firestore.types.js';
+import type { StepSummaryUpdate } from '../../lib/build-steps.js';
+
+/** staff-builds-view: dotted paths so `firstStepAt` and `requestId` inside `stepSummary` are never overwritten. */
+function nodeStepSummary(s: StepSummaryUpdate | undefined): Record<string, unknown> {
+  if (!s) return {};
+  return {
+    'stepSummary.lastStep': s.lastStep,
+    'stepSummary.lastStepAt': s.at ?? new Date(),
+    'stepSummary.outcome': s.outcome,
+  };
+}
+
+/** staff-builds-view: requestId and the first step of `stepSummary`, written in the create write itself. */
+function nodeStepSummarySeed(data: CreateBuildData): Record<string, unknown> {
+  const requestId = data.requestId ? { requestId: data.requestId } : {};
+  if (!data.firstStep) return requestId;
+  return {
+    ...requestId,
+    stepSummary: {
+      firstStepAt: admin.firestore.FieldValue.serverTimestamp(),
+      lastStep: data.firstStep,
+      lastStepAt: admin.firestore.FieldValue.serverTimestamp(),
+      outcome: 'ok',
+      ...requestId,
+    },
+  };
+}
 
 /**
  * Node.js implementation of FirestoreService using Firebase Admin SDK
@@ -70,6 +97,8 @@ export class FirestoreServiceNode implements FirestoreService {
         ...(data.ciTimings ? { ciTimings: data.ciTimings } : {}),
         // Where this build's captures came from (capture-sources); absent = legacy Storybook web.
         ...(data.source ? { source: data.source } : {}),
+        // staff-builds-view: the creating request and the first step, in the create write itself.
+        ...nodeStepSummarySeed(data),
       };
 
       transaction.set(buildRef, buildData);
@@ -210,7 +239,8 @@ export class FirestoreServiceNode implements FirestoreService {
     // `provenanceError: null` means "clear it" (upload-provenance-updatemask D2); the Admin SDK
     // writes a literal null for a plain `null` value, so it needs FieldValue.delete() to actually
     // remove the field the way the Worker implementation's mask-without-body trick does.
-    const payload: Record<string, unknown> = { ...updates };
+    const { stepSummary, ...rest } = updates;
+    const payload: Record<string, unknown> = { ...rest, ...nodeStepSummary(stepSummary) };
     if (updates.provenanceError === null) {
       payload.provenanceError = admin.firestore.FieldValue.delete();
     }
@@ -235,10 +265,11 @@ export class FirestoreServiceNode implements FirestoreService {
   async updateProcessingStatus(
     projectId: string,
     buildId: string,
-    status: BuildProcessingStatus
+    status: BuildProcessingStatus,
+    stepSummary?: StepSummaryUpdate
   ): Promise<void> {
     const buildRef = this.db.doc(`projects/${projectId}/builds/${buildId}`);
-    await buildRef.update({ processingStatus: status });
+    await buildRef.update({ processingStatus: status, ...nodeStepSummary(stepSummary) });
   }
 
   /**

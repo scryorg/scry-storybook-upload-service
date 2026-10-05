@@ -31,11 +31,18 @@ export interface LogLine {
   err_code?: string;
   client?: string;
   log_drop?: number;
+  /** build.step events (staff-builds-view): closed-enum step and outcome, bounded scrubbed reason, small counters. */
+  step?: string;
+  outcome?: string;
+  reason?: string;
+  attempt?: number;
+  chunk?: number;
+  chunks_total?: number;
 }
 
 export const REQUIRED_KEYS = ['v', 'ts', 'level', 'service', 'env', 'msg'] as const;
-export const OPTIONAL_STRING_KEYS = ['version', 'request_id', 'route', 'project', 'run_id', 'build_id', 'uid_hash', 'err_code', 'client'] as const;
-export const OPTIONAL_NUMBER_KEYS = ['status', 'ms', 'log_drop'] as const;
+export const OPTIONAL_STRING_KEYS = ['version', 'request_id', 'route', 'project', 'run_id', 'build_id', 'uid_hash', 'err_code', 'client', 'step', 'outcome', 'reason'] as const;
+export const OPTIONAL_NUMBER_KEYS = ['status', 'ms', 'log_drop', 'attempt', 'chunk', 'chunks_total'] as const;
 export const ALLOWED_KEYS: ReadonlyArray<string> = [...REQUIRED_KEYS, ...OPTIONAL_STRING_KEYS, ...OPTIONAL_NUMBER_KEYS];
 
 /** Ids that may appear in a line: path-safe, bounded (ULID, uuid, project ids). */
@@ -52,7 +59,8 @@ export const ERR_CODE_MAX = 48;
 /** No word in msg (space-separated) and no `_`/`.` part of err_code may be longer than this: keeps tokens out. */
 export const WORD_MAX = 20;
 export const INVALID = '[invalid]';
-const FIXED_KEYS = new Set(['msg', 'err_code']);
+// step and outcome are closed enums written as lowercase codes: they use the err_code shape.
+const FIXED_KEYS = new Set(['msg', 'err_code', 'step', 'outcome']);
 
 let invalidCount = 0;
 /** Number of msg/err_code values replaced by [invalid] since the last call (process-wide); resets to 0. */
@@ -67,7 +75,7 @@ function wordsShort(val: string, sep: RegExp): boolean {
   return true;
 }
 
-/** True when `val` is an acceptable msg (k = 'msg') or err_code (k = 'err_code'). Allow-list, then scrubber on top. */
+/** True when `val` is an acceptable msg (k = 'msg') or code (any other fixed key: err_code, step, outcome). Allow-list, then scrubber on top. */
 export function isFixedText(k: string, val: string): boolean {
   if (k === 'msg') return val.length <= MSG_MAX && MSG_PATTERN.test(val) && wordsShort(val, / /) && scrubString(val) === val;
   return val.length <= ERR_CODE_MAX && ERR_CODE_PATTERN.test(val) && wordsShort(val, /[_.]/) && scrubString(val) === val;
@@ -120,6 +128,19 @@ function isIdentifier(k: string, val: string): boolean {
   return SHAPE_ID_KEYS.has(k) && val.length <= 40 && IDENTIFIER_SHAPE.test(val) && !ALL_DIGITS.test(val);
 }
 
+/** Producers allowed to label themselves in `client` (header x-scry-client is client-controlled, so the store enforces this). */
+export const CLIENT_NAMES: ReadonlyArray<string> = ['scry-link', 'scry-deployer', 'scry-sbcov', 'scry-mcp', 'scry-cli', 'scry-dashboard'];
+export const CLIENT_VERSION = /^\d{1,4}\.\d{1,4}\.\d{1,4}(?:-[0-9A-Za-z.]{1,16})?$/;
+/** Firebase-style project id: exactly 20 ASCII alphanumerics. */
+export const PROJECT_ID = /^[A-Za-z0-9]{20}$/;
+
+/** True for `<allow-listed name>/<x.y.z[-pre]>` and nothing else. */
+export function isClient(val: string): boolean {
+  if (val.length > 64) return false;
+  const i = val.indexOf('/');
+  return i > 0 && CLIENT_NAMES.includes(val.slice(0, i)) && CLIENT_VERSION.test(val.slice(i + 1));
+}
+
 export interface ValidationResult {
   ok: boolean;
   errors: string[];
@@ -160,7 +181,7 @@ function validateLineUnsafe(line: unknown): ValidationResult {
     }
     if (val.length > MAX_STRING) errors.push(`${k} exceeds ${MAX_STRING} chars`);
     if (FIXED_KEYS.has(k)) {
-      if (val !== INVALID && !isFixedText(k, val)) errors.push(k === 'msg' ? 'msg must be words only (letters, space, _ . : -), max 80 chars' : 'err_code must match ^[a-z][a-z0-9_.]{0,47}$');
+      if (val !== INVALID && !isFixedText(k, val)) errors.push(k === 'msg' ? 'msg must be words only (letters, space, _ . : -), max 80 chars' : `${k} must match ^[a-z][a-z0-9_.]{0,47}$`);
       continue;
     }
     if (k === 'route') {
@@ -172,6 +193,14 @@ function validateLineUnsafe(line: unknown): ValidationResult {
       continue;
     }
     if (k === 'version' && VERSION_SHAPE.test(val)) continue;
+    if (k === 'client') {
+      if (!isClient(val)) errors.push('client must be <allow-listed name>/<x.y.z>');
+      continue;
+    }
+    if (k === 'project') {
+      if (!PROJECT_ID.test(val)) errors.push('project must match ^[A-Za-z0-9]{20}$');
+      continue;
+    }
     if (isIdentifier(k, val)) continue;
     if (ID_KEYS.has(k) && !SAFE_ID.test(val)) errors.push(`${k} has unsafe characters`);
     if (k === 'uid_hash' && !UID_HASH.test(val)) errors.push('uid_hash must be 12 lowercase hex chars');
@@ -234,6 +263,15 @@ function sanitizeLineUnsafe(input: unknown): LogLine | null {
     }
     if (k === 'version' && VERSION_SHAPE.test(val)) {
       out[k] = val;
+      continue;
+    }
+    // client and project are client-controlled upstream: strict shape or DROPPED (no [invalid], not a validity failure).
+    if (k === 'client') {
+      if (isClient(val)) out[k] = val;
+      continue;
+    }
+    if (k === 'project') {
+      if (PROJECT_ID.test(val)) out[k] = val;
       continue;
     }
     // Cap BEFORE any regex work so the cost is bounded by MAX_STRING, whatever the caller passed.

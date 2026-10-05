@@ -102,7 +102,7 @@ describe('app metadata route', () => {
         timestamp: expect.any(Number),
       })
     );
-    expect(firestore.updateProcessingStatus).toHaveBeenCalledWith('my-project', 'build-123', 'queued');
+    expect(firestore.updateProcessingStatus).toHaveBeenCalledWith('my-project', 'build-123', 'queued', expect.objectContaining({ lastStep: 'enqueue', outcome: 'ok' }));
 
     const body = await res.json();
     expect(body.queued).toBe(true);

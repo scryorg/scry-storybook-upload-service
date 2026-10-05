@@ -45,7 +45,7 @@ function setup(opts: { firestoreFails?: boolean; queueFails?: boolean; storageFa
     delete: vi.fn(),
     deleteByPrefix: vi.fn(),
   } as unknown as StorageService;
-  const build = { id: 'b1', projectId: 'proj', versionId: 'v1', buildNumber: 1, zipUrl: 'z', status: 'active', createdAt: new Date(), createdBy: 't' };
+  const build = { id: 'b1', projectId: 'projAAAAAAAAAAAAAAAA', versionId: 'v1', buildNumber: 1, zipUrl: 'z', status: 'active', createdAt: new Date(), createdBy: 't' };
   const fail = () => {
     throw new Error(`firestore said ${canary.values.email} ${canary.values.bearer}`);
   };
@@ -106,7 +106,7 @@ beforeEach(() => {
 describe('golden line', () => {
   it('a request line validates against schema v1 and carries only allow-listed fields', async () => {
     const { server } = setup({ keys: true });
-    const res = await server.request('/presigned-url/proj/v1/storybook.zip', JSON_POST({ contentType: 'application/zip' }, { 'X-API-Key': 'scry_proj_proj_secret' }));
+    const res = await server.request('/presigned-url/projAAAAAAAAAAAAAAAA/v1/storybook.zip', JSON_POST({ contentType: 'application/zip' }, { 'X-API-Key': 'scry_proj_projAAAAAAAAAAAAAAAA_secret' }));
     expect(res.status).toBe(200);
     const [line] = requestLines();
     expect(validateLine(line)).toEqual({ ok: true, errors: [] });
@@ -116,7 +116,7 @@ describe('golden line', () => {
       service: 'upload',
       route: '/presigned-url/:project/:version/:filename',
       status: 200,
-      project: 'proj',
+      project: 'projAAAAAAAAAAAAAAAA',
       build_id: 'b1',
     });
     expect(line.request_id).toBe(res.headers.get('x-scry-request-id'));
@@ -124,7 +124,7 @@ describe('golden line', () => {
 
   it('every line emitted during a request is schema-valid', async () => {
     const { server } = setup({ firestoreFails: true });
-    await server.request('/presigned-url/proj/v1/storybook.zip', JSON_POST({ contentType: 'application/zip' }));
+    await server.request('/presigned-url/projAAAAAAAAAAAAAAAA/v1/storybook.zip', JSON_POST({ contentType: 'application/zip' }));
     expect(lines.length).toBeGreaterThan(1);
     for (const l of parsed()) expect(validateLine(l), JSON.stringify(l)).toEqual({ ok: true, errors: [] });
   });
@@ -136,9 +136,9 @@ describe('guarantee-3 id echoed and logged per response class', () => {
     const r2 = await ok.server.request('/health');
     const r404 = await ok.server.request('/no/such/route');
     const keyed = setup({ keys: true });
-    const r401 = await keyed.server.request('/presigned-url/proj/v1/storybook.zip', JSON_POST({}));
+    const r401 = await keyed.server.request('/presigned-url/projAAAAAAAAAAAAAAAA/v1/storybook.zip', JSON_POST({}));
     const broken = setup({ storageFails: true });
-    const r500 = await broken.server.request('/presigned-url/proj/v1/storybook.zip', JSON_POST({ contentType: 'application/zip' }));
+    const r500 = await broken.server.request('/presigned-url/projAAAAAAAAAAAAAAAA/v1/storybook.zip', JSON_POST({ contentType: 'application/zip' }));
 
     expect([r2.status, r404.status, r401.status, r500.status]).toEqual([200, 404, 401, 500]);
     const logged = new Map(requestLines().map((l) => [l.request_id as string, l]));
@@ -151,7 +151,7 @@ describe('guarantee-3 id echoed and logged per response class', () => {
 
   it('error JSON bodies carry request_id equal to the header', async () => {
     const { server } = setup({ storageFails: true });
-    const res = await server.request('/presigned-url/proj/v1/storybook.zip', JSON_POST({ contentType: 'application/zip' }));
+    const res = await server.request('/presigned-url/projAAAAAAAAAAAAAAAA/v1/storybook.zip', JSON_POST({ contentType: 'application/zip' }));
     const body = await res.json();
     expect(body.request_id).toBe(res.headers.get('x-scry-request-id'));
     expect(body.error).toBeTruthy();
@@ -165,7 +165,7 @@ describe('guarantee-3 id echoed and logged per response class', () => {
 
   it('the id travels in the queue message', async () => {
     const { server, queue } = setup();
-    const res = await server.request('/upload-images/proj/complete', JSON_POST({ uploadId: 'u1', zipKey: 'proj/uploads/1/images.zip' }));
+    const res = await server.request('/upload-images/projAAAAAAAAAAAAAAAA/complete', JSON_POST({ uploadId: 'u1', zipKey: 'projAAAAAAAAAAAAAAAA/uploads/1/images.zip' }));
     // Firestore double has no upload methods, so this may fail after the enqueue point; only assert when it sent.
     for (const call of queue.send.mock.calls as unknown as Array<[Record<string, unknown>]>) {
       expect(call[0].requestId).toBe(res.headers.get('x-scry-request-id'));
@@ -176,7 +176,7 @@ describe('guarantee-3 id echoed and logged per response class', () => {
 describe('errors reach Sentry with the request id', () => {
   it('a caught upload failure (storage down) is captured with tag request_id = the header', async () => {
     const { server } = setup({ storageFails: true });
-    const res = await server.request('/presigned-url/proj/v1/storybook.zip', JSON_POST({ contentType: 'application/zip' }));
+    const res = await server.request('/presigned-url/projAAAAAAAAAAAAAAAA/v1/storybook.zip', JSON_POST({ contentType: 'application/zip' }));
     expect(res.status).toBe(500);
     expect(captured).toHaveLength(1);
     expect(captured[0].opts?.tags?.request_id).toBe(res.headers.get('x-scry-request-id'));
@@ -184,7 +184,7 @@ describe('errors reach Sentry with the request id', () => {
 
   it('a Firestore failure after the upload succeeded is captured, and the upload still answers 200', async () => {
     const { server } = setup({ firestoreFails: true });
-    const res = await server.request('/presigned-url/proj/v1/storybook.zip', JSON_POST({ contentType: 'application/zip' }));
+    const res = await server.request('/presigned-url/projAAAAAAAAAAAAAAAA/v1/storybook.zip', JSON_POST({ contentType: 'application/zip' }));
     expect(res.status).toBe(200);
     expect(captured.map((c) => c.opts?.tags?.err_code)).toContain('firestore_after_presign_failed');
     expect(captured[0].opts?.tags?.request_id).toBe(res.headers.get('x-scry-request-id'));
@@ -192,7 +192,7 @@ describe('errors reach Sentry with the request id', () => {
 
   it('a failed queue send after the metadata upload is captured with the request id', async () => {
     const { server } = setup({ queueFails: true });
-    const res = await server.request('/upload/proj/v1/metadata', {
+    const res = await server.request('/upload/projAAAAAAAAAAAAAAAA/v1/metadata', {
       method: 'POST',
       headers: { 'Content-Type': 'application/zip' },
       body: new Uint8Array([1, 2, 3]),
@@ -210,7 +210,7 @@ describe('guarantee-1 canary corpus absent', () => {
   it('no marker in any log line when canaries ride in headers, query, body and error messages', async () => {
     const { server } = setup({ firestoreFails: true, keys: true });
     const v = canary.values;
-    await server.request(`/presigned-url/proj/v1/storybook.zip?${v.query_pair}&email=${encodeURIComponent(v.email)}`, {
+    await server.request(`/presigned-url/projAAAAAAAAAAAAAAAA/v1/storybook.zip?${v.query_pair}&email=${encodeURIComponent(v.email)}`, {
       ...JSON_POST({ contentType: 'application/zip', note: v.email, q: v.query_url }, {
         'X-API-Key': v.sk_key,
         Authorization: v.bearer,
@@ -219,7 +219,7 @@ describe('guarantee-1 canary corpus absent', () => {
       }),
     });
     const stormy = setup({ storageFails: true });
-    await stormy.server.request(`/presigned-url/proj/v1/storybook.zip?${v.query_pair}`, JSON_POST({ contentType: 'application/zip' }, { Authorization: v.bearer }));
+    await stormy.server.request(`/presigned-url/projAAAAAAAAAAAAAAAA/v1/storybook.zip?${v.query_pair}`, JSON_POST({ contentType: 'application/zip' }, { Authorization: v.bearer }));
     expect(lines.length).toBeGreaterThan(0);
     expect(hasMarker(lines.join('\n'))).toEqual([]);
   });
@@ -242,14 +242,14 @@ describe('guarantee-1 canary corpus absent', () => {
 describe('guarantee-4 requests succeed when logging is broken', () => {
   it('console that throws does not change status or body', async () => {
     const { server } = setup();
-    const before = await server.request('/presigned-url/proj/v1/storybook.zip', JSON_POST({ contentType: 'application/zip' }));
+    const before = await server.request('/presigned-url/projAAAAAAAAAAAAAAAA/v1/storybook.zip', JSON_POST({ contentType: 'application/zip' }));
     const beforeBody = await before.json();
     for (const m of ['log', 'warn', 'error', 'info'] as const) {
       vi.spyOn(console, m).mockImplementation(() => {
         throw new Error('sink down');
       });
     }
-    const res = await server.request('/presigned-url/proj/v1/storybook.zip', JSON_POST({ contentType: 'application/zip' }));
+    const res = await server.request('/presigned-url/projAAAAAAAAAAAAAAAA/v1/storybook.zip', JSON_POST({ contentType: 'application/zip' }));
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(Object.keys(body).sort()).toEqual(Object.keys(beforeBody).sort());
