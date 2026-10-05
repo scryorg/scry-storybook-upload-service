@@ -147,6 +147,20 @@ export function describeFirestoreError(errorBody: string): { detail: string; bod
   return { detail, body };
 }
 
+/**
+ * One `updateMask.fieldPaths` value. A dotted name is a NESTED path (`stepSummary.lastStep` is the
+ * `lastStep` key inside the `stepSummary` map), so each dot-separated segment is quoted on its own.
+ * A segment that is not a plain identifier (`[A-Za-z_]\w*`) is wrapped in backticks per Firestore's
+ * field-path syntax. Consequence: a top-level field whose own name contains a dot cannot be addressed
+ * here (it would be read as nested); no caller has one, and the pinning tests in
+ * firestore.quote-field-path.test.ts fail if that changes silently.
+ */
+export function quoteFieldPath(fieldPath: string): string {
+  const quoteSegment = (segment: string) =>
+    /^[A-Za-z_]\w*$/.test(segment) ? segment : `\`${segment.replace(/`/g, '\\`')}\``;
+  return fieldPath.split('.').map(quoteSegment).join('.');
+}
+
 /** dashboard-import: channel + creator uid, written only for a build created through the dashboard's signed door. */
 function dashboardBuildFields(data: CreateBuildData): Record<string, { stringValue: string }> {
   return {
@@ -1036,18 +1050,7 @@ export class FirestoreServiceWorker implements FirestoreService {
 
     // Firestore's REST API takes one `updateMask.fieldPaths` query param PER field, not a single
     // comma-joined value (that is parsed as one field path containing a literal comma, which
-    // Firestore rejects with "Invalid property path"). A bare field name (our case: top-level
-    // build-doc fields like `status`, `zipUrl`, `commitSha`) never needs quoting, but a path
-    // segment containing anything other than [A-Za-z0-9_] — or one starting with a digit — must be
-    // wrapped in backticks per Firestore's field-path syntax, so this stays correct if a future
-    // field name ever needs it.
-    const needsBackticks = (segment: string) => !/^[A-Za-z_]\w*$/.test(segment);
-    const quoteSegment = (segment: string) =>
-      needsBackticks(segment) ? `\`${segment.replace(/`/g, '\\`')}\`` : segment;
-    // staff-builds-view: a nested path (`stepSummary.lastStep`) is a dotted list of segments; each segment
-    // is quoted on its own. Quoting the whole path would make Firestore read it as ONE field whose name
-    // contains a dot, and the nested write would land in the wrong place.
-    const quoteFieldPath = (fieldPath: string) => fieldPath.split('.').map(quoteSegment).join('.');
+    // Firestore rejects with "Invalid property path"). Each path goes through `quoteFieldPath`.
 
     const resolvedMaskFields = maskFieldPaths ?? Object.keys(fields);
     // F9 (upload-provenance-updatemask security review): a PATCH sent with NO

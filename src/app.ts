@@ -1398,7 +1398,7 @@ async function sendToQueue(
     emitBuildStep(c, { step: 'enqueue', outcome: 'ok', buildId });
   } catch (err) {
     const step: BuildStep = 'enqueue';
-    emitBuildStep(c, { step, outcome: 'fail', buildId, reason: 'queue send failed' });
+    emitBuildStep(c, { step, outcome: 'fail', buildId, reason: 'queue_send_failed' });
     try {
       await firestore.updateBuild(project, buildId, { stepSummary: stepSummaryFor(step, 'fail') });
     } catch {
@@ -1566,7 +1566,7 @@ app.openapi(bundleCompleteRoute, async (c) => {
     const reject = async (issues: BuildValidationIssue[]) => {
       await cleanupRejectedBundle(c, storage, firestore, project, buildId, zipKey, issues);
       log.warn('bundle rejected', reqFields(c, { err_code: 'bundle_rejected' }));
-      emitBuildStep(c, { step: 'complete', outcome: 'fail', buildId, reason: issues.map((i) => i.code).slice(0, 5).join(' ') });
+      emitBuildStep(c, { step: 'complete', outcome: 'fail', buildId, reason: 'validation' });
       return c.json({ success: false, error: 'Bundle rejected', errors: issues }, 422);
     };
 
@@ -1613,7 +1613,7 @@ app.openapi(bundleCompleteRoute, async (c) => {
         { code: 'SOURCE_NOT_ALLOWED', message: 'This key can only upload Scry Sync bundles.' },
       ]);
       log.warn('device key refused', reqFields(c, { err_code: 'device_key_source' }));
-      emitBuildStep(c, { step: 'complete', outcome: 'fail', buildId, reason: 'SOURCE_NOT_ALLOWED' });
+      emitBuildStep(c, { step: 'complete', outcome: 'fail', buildId, reason: 'source_not_allowed' });
       return c.json(DEVICE_KEY_REFUSAL, 403);
     }
     // Ledger F60: warnings from a checked-then-discarded member (e.g. STRUCTURE_TREE_LARGE) never

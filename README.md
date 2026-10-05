@@ -69,7 +69,33 @@ Steps: `upload_received`, `presign`, `complete`, `enqueue`, `queue_pickup`, `lea
 
 Outcomes: `start`, `ok`, `wait`, `retry`, `fail`, `dead`, `stalled`.
 
-Fields: `step`, `outcome`, `build_id`, `project`, `request_id`, plus `ms`, `attempt`, `chunk`, `chunks_total` and `reason` where they apply. `project` and `build_id` are attached only after the API key was verified for the project. `reason` is scrubbed with the scry-log scrubber and cut to 200 chars; it is a fixed phrase or an issue code, never an exception message. Failing to log never fails the upload.
+Fields: `step`, `outcome`, `build_id`, `project`, `request_id`, plus `ms`, `attempt`, `chunk`, `chunks_total` and `reason` where they apply. `project` and `build_id` are attached only after the API key was verified for the project. `reason` is one of a closed list of codes (below), never free text or an exception message; `emitBuildStep` turns anything else into `unknown`. This service emits `validation`, `source_not_allowed` and `queue_send_failed`. Failing to log never fails the upload.
+
+Reason codes (closed list `BUILD_STEP_REASONS`, the same list in both repos; the dashboard maps each to plain words):
+
+| Code | Means |
+|---|---|
+| `ai_timeout` | an AI call or step ran past its deadline |
+| `http_429` | a vendor rate-limited the request |
+| `http_4xx` | a vendor or service refused the request (other than 429) |
+| `http_5xx` | a vendor or service failed on its side |
+| `credits_exhausted` | not enough AI credits; the build waits or stops |
+| `credits_unavailable` | the credits ledger could not be reached |
+| `quota` | a plan or vendor quota was hit |
+| `validation` | the upload or its metadata failed a check |
+| `source_not_allowed` | the key's source is not allowed for this upload |
+| `lease_lost` | the indexing turn was lost or could not be taken |
+| `queue_redelivery` | the queue handed the message back |
+| `queue_send_failed` | the processing queue refused the message |
+| `empty_archive` | the archive listed no stories |
+| `stories_dropped` | stories the archive declared were not captured |
+| `stories_failed` | stories inside a chunk that ran produced no row |
+| `chunks_missing` | chunks never ran (circuit breaker or terminated instance) |
+| `stalled_no_story` | stalled before the story count was known |
+| `stalled_no_heartbeat` | stalled with no stage progress ever recorded |
+| `stalled_total` | stalled: progress stopped for the threshold |
+| `dead_letter` | the queue gave up on the message |
+| `unknown` | none of the above |
 
 Example line:
 

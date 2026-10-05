@@ -1,5 +1,5 @@
 {
-  "_note": "Clearly fake values. Every string in `values` must be scrubbed; no `markers` substring may appear in any log output, store object or Sentry event.",
+  "_note": "Clearly fake values. The credential-like values (email through query_pair) must be scrubbed; story_title and design_text are customer CONTENT that no scrubber can recognise, so they must never reach a build.step event at all (reasons are closed codes). No `markers` substring may appear in any log output, store object or Sentry event.",
   "values": {
     "email": "canary.user+FAKE@example.invalid",
     "jwt": "eyJhbGciOiJub25lIn0.eyJjYW5hcnkiOiJGQUtFIn0.ZmFrZXNpZ25hdHVyZQ",
@@ -8,7 +8,9 @@
     "bearer": "Bearer canaryFAKEtoken0123456789",
     "cookie": "cookie: session=CANARYSESSIONFAKE; csrf=CANARYCSRFFAKE",
     "query_url": "https://search.example.invalid/v1/search?query=CANARYQUERYTEXT+red+login+button&limit=5",
-    "query_pair": "query=CANARYQUERYTEXT red-login-button"
+    "query_pair": "query=CANARYQUERYTEXT red-login-button",
+    "story_title": "CANARYSTORYTITLE Checkout / Payment Declined Banner",
+    "design_text": "CANARYDESIGNTEXT Enter your card number to confirm your order"
   },
   "markers": [
     "canary.user+FAKE",
@@ -19,6 +21,8 @@
     "canaryFAKEtoken",
     "CANARYSESSIONFAKE",
     "CANARYCSRFFAKE",
-    "CANARYQUERYTEXT"
+    "CANARYQUERYTEXT",
+    "CANARYSTORYTITLE",
+    "CANARYDESIGNTEXT"
   ]
 }

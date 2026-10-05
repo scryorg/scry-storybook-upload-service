@@ -1,8 +1,8 @@
 /**
  * staff-builds-view: the `build.step` events the upload service emits.
  *
- * guarantee-3 (no PII in events): an event carries ids, a fixed step and outcome, counters and a
- * scrubbed, bounded reason. Never an email, never an exception message.
+ * guarantee-3-no-pii-in-events: an event carries ids, a fixed step and outcome, counters and a
+ * closed reason code. Never an email, never an exception message, never story or design text.
  * guarantee-4 (logging failure isolated): a logger that throws, or a console that throws, never
  * fails the upload.
  * Also: step order for a happy build, the failure path, and that the step summary rides the
@@ -14,7 +14,7 @@ import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Hono } from 'hono';
 import { app, type AppEnv } from './app.js';
-import { BUILD_STEPS, BUILD_STEP_OUTCOMES, REASON_MAX, boundReason, emitBuildStep } from './lib/build-steps.js';
+import { BUILD_STEPS, BUILD_STEP_OUTCOMES, BUILD_STEP_REASONS, classifyReason, emitBuildStep, isReasonCode } from './lib/build-steps.js';
 import { isFixedText, validateLine } from './lib/scry-log/index.js';
 import { log } from './lib/log.js';
 import type { ApiKeyService } from './services/apikey/apikey.service.js';
@@ -26,6 +26,10 @@ import { zipDirectory } from './bundle/__tests__/test-helpers.js';
 const PROJECT = 'projAAAAAAAAAAAAAAAA';
 const KEY = `scry_proj_${PROJECT}_secret`;
 const EMAIL = 'jane.doe@example.com';
+const canary = JSON.parse(readFileSync(new URL('../test-fixtures/canary.json', import.meta.url), 'utf8')) as {
+  values: Record<string, string>;
+  markers: string[];
+};
 const FIXTURES_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), 'bundle/__fixtures__');
 const ULID = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 
@@ -147,7 +151,7 @@ describe('build.step: failure paths', () => {
     expect(res.status).toBe(422);
     const [fail] = steps();
     expect(fail).toMatchObject({ level: 'warn', step: 'complete', outcome: 'fail', build_id: 'build-100' });
-    expect(fail.reason).toContain('DUPLICATE_ID');
+    expect(fail.reason).toBe('validation');
     expect(queue.send).not.toHaveBeenCalled();
     expect(firestore.updateBuild).toHaveBeenCalledTimes(1);
     expect(firestore.updateBuild).toHaveBeenCalledWith(
@@ -174,18 +178,61 @@ describe('build.step: failure paths', () => {
       ['upload_received', 'ok'],
       ['enqueue', 'fail'],
     ]);
-    expect(steps()[1].reason).toBe('queue send failed');
+    expect(steps()[1].reason).toBe('queue_send_failed');
     expect(firestore.updateBuild).toHaveBeenCalledWith(PROJECT, 'build-100', { stepSummary: expect.objectContaining({ lastStep: 'enqueue', outcome: 'fail' }) });
   });
 });
 
-describe('guarantee-3-no-pii-in-build-step-events', () => {
-  it('boundReason scrubs an email, collapses whitespace and bounds the length', () => {
-    expect(boundReason(`failed for ${EMAIL}`)).not.toContain(EMAIL);
-    expect(boundReason('x'.repeat(5000))).toHaveLength(REASON_MAX);
-    expect(boundReason('a\n\n  b\t c')).toBe('a b c');
-    expect(boundReason('   ')).toBeUndefined();
-    expect(boundReason({ not: 'a string' })).toBeUndefined();
+describe('guarantee-3-no-pii-in-events', () => {
+  it('the reason list is closed: every code is valid fixed text and the README lists them all', () => {
+    const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
+    for (const code of BUILD_STEP_REASONS) {
+      expect(code).toMatch(/^[a-z][a-z0-9_.]{0,47}$/);
+      expect(isFixedText('err_code', code), code).toBe(true);
+      expect(readme).toContain(`\`${code}\``);
+    }
+    expect(new Set(BUILD_STEP_REASONS).size).toBe(BUILD_STEP_REASONS.length);
+    expect(isReasonCode('queue send failed')).toBe(false);
+  });
+
+  it('a reason outside the closed set is emitted as unknown, never as text (emails, story title, design text, even through a cast)', () => {
+    for (const text of [EMAIL, canary.values.story_title, canary.values.design_text, Object.values(canary.values).join(' ')]) {
+      emitBuildStep(undefined, { step: 'enqueue', outcome: 'fail', buildId: 'build-100', reason: text as never });
+    }
+    emitBuildStep(undefined, { step: 'enqueue', outcome: 'fail', buildId: 'build-100', reason: 'queue_send_failed' });
+    expect(steps().map((l) => l.reason)).toEqual(['unknown', 'unknown', 'unknown', 'unknown', 'queue_send_failed']);
+    const text = lines.join('\n');
+    expect(text).not.toContain(EMAIL);
+    for (const marker of canary.markers) expect(text).not.toContain(marker);
+    for (const value of Object.values(canary.values)) expect(text).not.toContain(value);
+  });
+
+  it('story and design text in the thrown error of a failed queue send never reaches the line', async () => {
+    const queue: Queue = {
+      send: vi.fn(async () => {
+        throw new Error(`${canary.values.story_title} ${canary.values.design_text} ${EMAIL}`);
+      }),
+    };
+    const { server } = setup({ queue });
+    await server.request(`/upload/${PROJECT}/main/metadata`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/zip', 'X-API-Key': KEY },
+      body: new Uint8Array([80, 75, 3, 4]),
+    });
+    expect(steps().length).toBeGreaterThan(0);
+    const text = lines.join('\n');
+    for (const marker of canary.markers) expect(text).not.toContain(marker);
+    expect(text).not.toContain(EMAIL);
+    for (const l of steps()) if (l.reason !== undefined) expect(isReasonCode(l.reason)).toBe(true);
+  });
+
+  it('classifyReason returns only codes, whatever it is given', () => {
+    expect(classifyReason(Object.assign(new Error('x'), { status: 429 }))).toBe('http_429');
+    expect(classifyReason(new Error('Milvus HTTP error 500'))).toBe('http_5xx');
+    expect(classifyReason('The operation timed out')).toBe('ai_timeout');
+    for (const input of [canary.values.story_title, new Error(canary.values.design_text), undefined, 7]) {
+      expect(isReasonCode(classifyReason(input))).toBe(true);
+    }
   });
 
   it('an email in a header or in the error text never reaches a build.step line', async () => {
