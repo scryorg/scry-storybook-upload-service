@@ -16,6 +16,11 @@ import type {
   Upload,
   CreateUploadData,
   OrphanBundleCandidate,
+  Capture,
+  CreateCaptureData,
+  CaptureOs,
+  CaptureMode,
+  CaptureSendMode,
 } from './firestore.types.js';
 import { retryFetch } from '../../utils/firestore-retry.js';
 import { exchangeJwtForAccessToken } from '../../utils/google-token.js';
@@ -981,6 +986,167 @@ export class FirestoreServiceWorker implements FirestoreService {
     }
 
     return value;
+  }
+
+  // ============= SNIP CAPTURES (feature snip-capture) =============
+
+  async createCaptureIfAbsent(
+    projectId: string,
+    data: CreateCaptureData
+  ): Promise<{ capture: Capture; created: boolean }> {
+    const token = await this.getAccessToken();
+    const path = `projects/${projectId}/captures/${data.captureId}`;
+    const now = new Date();
+    const capture: Capture = {
+      captureId: data.captureId,
+      capturedByUid: data.capturedByUid,
+      deviceId: data.deviceId,
+      status: 'pending',
+      width: data.width,
+      height: data.height,
+      bytes: data.bytes,
+      sha256: data.sha256,
+      scale: data.scale,
+      os: data.os,
+      mode: data.mode,
+      sendMode: data.sendMode,
+      ...(data.note ? { note: data.note } : {}),
+      sharedWith: [],
+      sharedWithOrgIds: [],
+      sharedWithProject: false,
+      createdAt: now,
+      expiresAt: data.expiresAt,
+    };
+    const created = await this.createDocumentIfAbsent(path, this.captureToFields(capture), token);
+    if (created) return { capture, created: true };
+    const existing = await this.getDocument(path, token);
+    if (!existing) throw new Error('Capture vanished after an exists conflict');
+    return { capture: this.convertDocToCapture(data.captureId, existing.fields), created: false };
+  }
+
+  async getCapture(projectId: string, captureId: string): Promise<Capture | null> {
+    const token = await this.getAccessToken();
+    const doc = await this.getDocument(`projects/${projectId}/captures/${captureId}`, token);
+    return doc ? this.convertDocToCapture(captureId, doc.fields) : null;
+  }
+
+  async markCaptureReady(projectId: string, captureId: string): Promise<Capture> {
+    const token = await this.getAccessToken();
+    const path = `projects/${projectId}/captures/${captureId}`;
+    const doc = await this.getDocument(path, token);
+    if (!doc) throw new Error('Capture not found');
+    const receivedAt = new Date();
+    await this.patchDocument(
+      path,
+      { status: { stringValue: 'ready' }, receivedAt: { timestampValue: receivedAt.toISOString() } },
+      token
+    );
+    return { ...this.convertDocToCapture(captureId, doc.fields), status: 'ready', receivedAt };
+  }
+
+  /**
+   * One `:commit` carrying an `increment` field transform, which Firestore applies atomically and
+   * answers with the new value. NOT sent through `retryFetch`: a blind resend of an increment would
+   * count twice, and an over-count only makes the limit slightly stricter, so a failure is surfaced.
+   */
+  async incrementCaptureCounter(projectId: string, counterId: string, expireAt: Date): Promise<number> {
+    const token = await this.getAccessToken();
+    const name = `projects/${this.config.projectId}/databases/(default)/documents/projects/${projectId}/captureLimits/${counterId}`;
+    const response = await fetch(`${this.baseUrl}:commit`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        writes: [
+          {
+            update: { name, fields: { expireAt: { timestampValue: expireAt.toISOString() } } },
+            updateMask: { fieldPaths: ['expireAt'] },
+            updateTransforms: [{ fieldPath: 'count', increment: { integerValue: '1' } }],
+          },
+        ],
+      }),
+    });
+    if (!response.ok) {
+      log.error('capture counter failed', { err_code: `firestore_${response.status}`, status: response.status });
+      throw new Error(`Failed to increment counter: ${response.status}`);
+    }
+    const body = (await response.json()) as { writeResults?: Array<{ transformResults?: FirestoreValue[] }> };
+    const value = body.writeResults?.[0]?.transformResults?.[0]?.integerValue;
+    const count = value === undefined ? NaN : parseInt(value, 10);
+    if (!Number.isFinite(count)) throw new Error('Counter increment returned no value');
+    return count;
+  }
+
+  /**
+   * PATCH with `currentDocument.exists=false`: Firestore applies it only when no document is there,
+   * atomically. `false` means a document already existed (FAILED_PRECONDITION / ALREADY_EXISTS).
+   */
+  private async createDocumentIfAbsent(path: string, fields: FirestoreFields, token: string): Promise<boolean> {
+    const params = new URLSearchParams({ 'currentDocument.exists': 'false' });
+    const response = await retryFetch(() => fetch(`${this.baseUrl}/${path}?${params.toString()}`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fields }),
+    }), { op: 'createDocumentIfAbsent' });
+    if (response.ok) return true;
+    const errorBody = await response.text().catch(() => '');
+    if (response.status === 409 || isPreconditionFailure(response.status, errorBody)) return false;
+    const { detail } = describeFirestoreError(errorBody);
+    log.error('create failed', { err_code: `firestore_${response.status}`, status: response.status });
+    const suffix = detail ? ' (' + detail + ')' : '';
+    throw new Error(`Failed to create document: ${response.status} ${response.statusText}${suffix}`);
+  }
+
+  private captureToFields(c: Capture): FirestoreFields {
+    const strings = (values: string[]): FirestoreValue => ({ arrayValue: { values: values.map((v) => ({ stringValue: v })) } });
+    return {
+      captureId: { stringValue: c.captureId },
+      capturedByUid: { stringValue: c.capturedByUid },
+      deviceId: { stringValue: c.deviceId },
+      status: { stringValue: c.status },
+      width: { integerValue: String(c.width) },
+      height: { integerValue: String(c.height) },
+      bytes: { integerValue: String(c.bytes) },
+      sha256: { stringValue: c.sha256 },
+      scale: this.toFirestoreValue(c.scale),
+      os: { stringValue: c.os },
+      mode: { stringValue: c.mode },
+      sendMode: { stringValue: c.sendMode },
+      ...(c.note ? { note: { stringValue: c.note } } : {}),
+      sharedWith: strings(c.sharedWith),
+      sharedWithOrgIds: strings(c.sharedWithOrgIds),
+      sharedWithProject: { booleanValue: c.sharedWithProject },
+      createdAt: { timestampValue: c.createdAt.toISOString() },
+      ...(c.receivedAt ? { receivedAt: { timestampValue: c.receivedAt.toISOString() } } : {}),
+      expiresAt: { timestampValue: c.expiresAt.toISOString() },
+    };
+  }
+
+  private convertDocToCapture(id: string, fields: FirestoreFields): Capture {
+    const strings = (v: FirestoreValue | undefined): string[] =>
+      (v?.arrayValue?.values ?? []).flatMap((x) => (x.stringValue !== undefined ? [x.stringValue] : []));
+    const num = (v: FirestoreValue | undefined): number =>
+      v?.integerValue !== undefined ? parseInt(v.integerValue, 10) : (v?.doubleValue ?? 0);
+    return {
+      captureId: id,
+      capturedByUid: fields.capturedByUid?.stringValue || '',
+      deviceId: fields.deviceId?.stringValue || '',
+      status: fields.status?.stringValue === 'ready' ? 'ready' : 'pending',
+      width: num(fields.width),
+      height: num(fields.height),
+      bytes: num(fields.bytes),
+      sha256: fields.sha256?.stringValue || '',
+      scale: num(fields.scale),
+      os: (fields.os?.stringValue || 'mac') as CaptureOs,
+      mode: (fields.mode?.stringValue || 'region') as CaptureMode,
+      sendMode: (fields.sendMode?.stringValue || 'review') as CaptureSendMode,
+      ...(fields.note?.stringValue ? { note: fields.note.stringValue } : {}),
+      sharedWith: strings(fields.sharedWith),
+      sharedWithOrgIds: strings(fields.sharedWithOrgIds),
+      sharedWithProject: fields.sharedWithProject?.booleanValue === true,
+      createdAt: new Date(fields.createdAt?.timestampValue || 0),
+      ...(fields.receivedAt?.timestampValue ? { receivedAt: new Date(fields.receivedAt.timestampValue) } : {}),
+      expiresAt: new Date(fields.expiresAt?.timestampValue || 0),
+    };
   }
 
   // Idempotent read: retried on 429/503/500/network (F85/F86).

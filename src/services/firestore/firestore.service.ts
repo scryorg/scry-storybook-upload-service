@@ -8,6 +8,8 @@ import type {
   Upload,
   CreateUploadData,
   OrphanBundleCandidate,
+  Capture,
+  CreateCaptureData,
 } from './firestore.types.js';
 import type { StepSummaryUpdate } from '../../lib/build-steps.js';
 
@@ -223,4 +225,28 @@ export interface FirestoreService {
     projectId: string,
     uploadId: string
   ): Promise<void>;
+
+  // ============= SNIP CAPTURES (feature snip-capture) =============
+
+  /**
+   * Creates `projects/{p}/captures/{captureId}` as `pending` only if it does not exist yet.
+   * `created: false` returns the document that is already there (a retried presign), never a second
+   * one and never an overwrite.
+   */
+  createCaptureIfAbsent(
+    projectId: string,
+    data: CreateCaptureData
+  ): Promise<{ capture: Capture; created: boolean }>;
+
+  /** One capture, or null. */
+  getCapture(projectId: string, captureId: string): Promise<Capture | null>;
+
+  /** Marks a capture `ready` and stamps `receivedAt` with the server's clock. Returns the updated capture. */
+  markCaptureReady(projectId: string, captureId: string): Promise<Capture>;
+
+  /**
+   * Atomically adds 1 to a counter document and returns the new count (`projects/{p}/captureLimits/{id}`).
+   * `expireAt` rides on the document so a Firestore TTL policy on the field can remove old windows.
+   */
+  incrementCaptureCounter(projectId: string, counterId: string, expireAt: Date): Promise<number>;
 }

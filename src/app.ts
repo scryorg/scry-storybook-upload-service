@@ -37,6 +37,7 @@ import { parseSourceKey } from './bundle/source-key.js';
 import { readBoundedZip, DEFAULT_BOUNDED_ZIP_LIMITS } from './bundle/bounded-zip.js';
 import { validateBundle } from './vendor/scf/dist/index.js';
 import { registerSelfRevoke } from './keys/self-revoke.js';
+import { registerCaptures } from './captures/captures.js';
 
 // Define the application's environment, including injectable variables.
 export type AppEnv = {
@@ -77,6 +78,8 @@ app.onError(errorHandler);
 app.use('/upload/:project/*', dashboardDoor(apiKeyAuth()));
 app.use('/presigned-url/:project/*', dashboardDoor(apiKeyAuth()));
 app.use('/upload-images/:project/*', apiKeyAuth());
+// snip-capture: device-key routes for Scry Snip pictures (a capture is never a build).
+app.use('/captures/:project/*', apiKeyAuth());
 
 /**
  * Which key created a build (upload-project-key-scope): the key's Firestore doc
@@ -2045,6 +2048,7 @@ app.openapi(imageUploadCompleteRoute, async (c) => {
 
 // scry-sync: the desktop app's "Disconnect" revokes its own key (guarantee-5).
 registerSelfRevoke(app);
+registerCaptures(app);
 
 // Serve OpenAPI spec
 app.doc('/openapi.json', {

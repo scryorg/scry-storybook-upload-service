@@ -78,6 +78,7 @@ export default defineConfig({
       // Files to exclude from coverage
       exclude: [
         'src/**/*.test.ts',
+        'src/**/*.test-support.ts',
         'src/**/*.spec.ts',
         'src/**/*.d.ts',
         // Pure type/interface modules (no runtime behavior)
