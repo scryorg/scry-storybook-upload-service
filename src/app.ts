@@ -1218,7 +1218,7 @@ app.openapi(presignedBundleUrlRoute, async (c) => {
       );
     }
 
-    // scry-sync F40: a device key presigns only for Scry Sync's own source (exactly x-scry-sync:other, F68). Any other registered
+    // scry-sync F40: a device key presigns only for Scry Sync's own sources (exactly x-scry-sync:other or x-scry-cc:other, F68). Any other registered
     // source would route its build through that source's processing path.
     if (isRestrictedKeyKind(c.get('authenticatedApiKey')?.kind) && !isDeviceKeySource(parsedSource)) {
       log.warn('device key refused', reqFields(c, { err_code: 'device_key_source' }));
@@ -1611,7 +1611,14 @@ app.openapi(bundleCompleteRoute, async (c) => {
     // scry-sync F40: the bundle's own manifest must also say Scry Sync, so a device key can not
     // presign as x-scry-sync and then upload another source's bundle. Same 403 as the presign pin;
     // the object is deleted and the build marked failed like any rejected bundle.
-    if (restrictedKey && !isDeviceKeySource(validation.manifest?.source)) {
+    // cc-libraries-source: with two allowed sources, the bundle must also say the SAME source the build was presigned
+    // for, so a key cannot presign as x-scry-sync:other and upload an x-scry-cc:other bundle (or the reverse).
+    if (
+      restrictedKey &&
+      (!isDeviceKeySource(validation.manifest?.source) ||
+        validation.manifest?.source?.kind !== build.source?.kind ||
+        validation.manifest?.source?.platform !== build.source?.platform)
+    ) {
       await cleanupRejectedBundle(c, storage, firestore, project, buildId, zipKey, [
         { code: 'SOURCE_NOT_ALLOWED', message: 'This key can only upload Scry Sync bundles.' },
       ]);

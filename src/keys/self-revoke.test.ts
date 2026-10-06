@@ -489,6 +489,87 @@ describe('guarantee-1 full source pin: a device key presigns and completes exact
   });
 });
 
+const CC_PRESIGN = '/presigned-url/studio/sync-1/bundle.zip?source=x-scry-cc:other';
+const CC = { kind: 'x-scry-cc', platform: 'other' } as const;
+
+describe('guarantee-6 upload pin (cc-libraries-source): a device key presigns and completes exactly x-scry-sync:other or x-scry-cc:other', () => {
+  it('presign: x-scry-cc:other is 200 and the build is stored as x-scry-cc:other', async () => {
+    const { server, firestore } = setup();
+    const res = await req(server, 'POST', CC_PRESIGN);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ buildId: 'b1', fields: { key: ZIP_KEY } });
+    expect(firestore.createBuild).toHaveBeenCalledWith('studio', expect.objectContaining({ source: CC }));
+  });
+
+  it.each([
+    'x-scry-cc:ios', 'x-scry-cc:web', 'x-scry-cc:android', 'x-scry-cc:macos', 'x-scry-cc:windows', 'x-scry-cc:email',
+    'x-scry-sync:ios', 'x-scry-sync:web', 'x-scry-ccx:other', 'x-scry-cc-2:other',
+  ])('presign: ?source=%s is 403 with the existing body; no build, no presigned URL', async (source) => {
+    const { server, storage, firestore } = setup();
+    const res = await req(server, 'POST', `/presigned-url/studio/sync-1/bundle.zip?source=${encodeURIComponent(source)}`);
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject(REFUSAL);
+    expect(firestore.createBuild).not.toHaveBeenCalled();
+    expect(storage.getPresignedUploadUrl).not.toHaveBeenCalled();
+    expect(logged.some((l) => l.includes('device_key_source'))).toBe(true);
+  });
+
+  it('presign: a bare x-scry-cc (no platform) is refused, 400 or 403, and never creates a build', async () => {
+    const { server, storage, firestore } = setup();
+    const res = await req(server, 'POST', '/presigned-url/studio/sync-1/bundle.zip?source=x-scry-cc');
+    expect([400, 403]).toContain(res.status);
+    expect(firestore.createBuild).not.toHaveBeenCalled();
+    expect(storage.getPresignedUploadUrl).not.toHaveBeenCalled();
+  });
+
+  it.each(['ios', 'web'])('complete: a build stored as x-scry-cc:%s is 403 for a device key, not queued', async (platform) => {
+    const send = vi.fn(async () => undefined);
+    const { server, firestore } = setup({ storage: syncStorage(), queue: { send }, buildSource: { kind: 'x-scry-cc', platform } });
+    const res = await req(server, 'POST', COMPLETE, JSON_BODY(COMPLETE_BODY));
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject(REFUSAL);
+    expect(send).not.toHaveBeenCalled();
+    expect(firestore.updateProcessingStatus).not.toHaveBeenCalled();
+  });
+
+  it('complete: an x-scry-cc:other build with an x-scry-cc:other bundle is 200 and queued', async () => {
+    const send = vi.fn(async () => undefined);
+    const { server } = setup({ storage: syncStorage(CC), queue: { send }, buildSource: CC });
+    expect((await req(server, 'POST', COMPLETE, JSON_BODY(COMPLETE_BODY))).status).toBe(200);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['presigned x-scry-sync:other, bundle says x-scry-cc:other', undefined, CC],
+    ['presigned x-scry-cc:other, bundle says x-scry-sync:other', CC, { kind: 'x-scry-sync', platform: 'other' }],
+  ])('complete: a key pinned to one source cannot upload as the other (%s) - 403, object deleted, build failed, not queued', async (_label, buildSource, manifestSource) => {
+    const send = vi.fn(async () => undefined);
+    const storage = syncStorage(manifestSource);
+    const { server, firestore } = setup({ storage, queue: { send }, buildSource });
+    const res = await req(server, 'POST', COMPLETE, JSON_BODY(COMPLETE_BODY));
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject(REFUSAL);
+    expect(send).not.toHaveBeenCalled();
+    expect(firestore.updateProcessingStatus).not.toHaveBeenCalled();
+    expect(firestore.updateBuild).toHaveBeenCalledWith('studio', 'b1', expect.objectContaining({ processingStatus: 'failed' }));
+    expect(await storage.head(ZIP_KEY)).toBeNull();
+  });
+
+  it.each(['ios', 'web', 'android'])('complete: an x-scry-cc:other build whose manifest says x-scry-cc:%s is 403; object deleted, not queued', async (platform) => {
+    const send = vi.fn(async () => undefined);
+    const storage = syncStorage({ kind: 'x-scry-cc', platform });
+    const { server } = setup({ storage, queue: { send }, buildSource: CC });
+    expect((await req(server, 'POST', COMPLETE, JSON_BODY(COMPLETE_BODY))).status).toBe(403);
+    expect(send).not.toHaveBeenCalled();
+    expect(await storage.head(ZIP_KEY)).toBeNull();
+  });
+
+  it('other key kinds are unaffected: a key with no kind may presign x-scry-cc:ios', async () => {
+    const { server } = setup({ noKind: true });
+    expect((await req(server, 'POST', '/presigned-url/studio/sync-1/bundle.zip?source=x-scry-cc:ios')).status).toBe(200);
+  });
+});
+
 describe('DELETE /keys/self is not behind apiKeyAuth (F41)', () => {
   it('a restricted key, whatever its kind, revokes itself through the self-authenticating handler', async () => {
     for (const kind of ['device', 'Device', 5]) {

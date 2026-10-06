@@ -86,18 +86,27 @@ export interface AuthVariables {
 /** scry-sync: the `kind` the dashboard's device sign-in writes on the key it mints. */
 export const DEVICE_KEY_KIND = 'device';
 
-/** The one source kind a restricted (device) key may presign or complete (ledger F40). */
+/** Scry Sync's folder source kind (ledger F40). */
 export const DEVICE_KEY_SOURCE_KIND = 'x-scry-sync';
 
-/** ...and the one platform it may name: the full source is exactly `x-scry-sync:other` (ledger F68). */
+/** Scry Sync's Creative Cloud Libraries source kind (cc-libraries-source PR 3): its own engine, bundle and "latest build". */
+export const DEVICE_KEY_CC_SOURCE_KIND = 'x-scry-cc';
+
+/** ...and the one platform either may name: the full source is exactly `<kind>:other` (ledger F68). */
 export const DEVICE_KEY_SOURCE_PLATFORM = 'other';
 
+/** The two exact sources a restricted (device) key may presign or complete. Nothing else, no wildcard. */
+export const DEVICE_KEY_SOURCES: readonly string[] = [
+  `${DEVICE_KEY_SOURCE_KIND}:${DEVICE_KEY_SOURCE_PLATFORM}`,
+  `${DEVICE_KEY_CC_SOURCE_KIND}:${DEVICE_KEY_SOURCE_PLATFORM}`,
+];
+
 /**
- * True only for the exact device-key source. Comparing the kind alone let `x-scry-sync:ios` /
+ * True only for one of the exact device-key sources. Comparing the kind alone let `x-scry-sync:ios` /
  * `x-scry-sync:web` through, and a distinct source key splits "latest build per source" (G7).
  */
 export function isDeviceKeySource(source: { kind?: string; platform?: string } | null | undefined): boolean {
-  return source?.kind === DEVICE_KEY_SOURCE_KIND && source.platform === DEVICE_KEY_SOURCE_PLATFORM;
+  return typeof source?.kind === 'string' && typeof source.platform === 'string' && DEVICE_KEY_SOURCES.includes(`${source.kind}:${source.platform}`);
 }
 
 /** What a restricted key is told on every refusal (route scope and source pin share the body). */
