@@ -458,7 +458,10 @@ Actions logs if validation or the post-deploy commit check fails.
 | `GET /healthz`, `GET /health` | none | Deploy stamp (see Deployment identity) |
 | `POST /upload/:project/:version` | API key | Upload a Storybook ZIP (optional coverage); queues build processing |
 | `POST /upload/:project/:version/coverage` | API key | Attach a coverage report to a build |
-| `POST /upload/:project/:version/metadata` | API key | Upload the metadata/screenshot ZIP and queue processing |
+| `POST /upload/:project/:version/metadata` | API key | Upload the metadata/screenshot ZIP through the Worker (up to 100 MiB; over that answers 413, use the direct upload) and queue processing |
+| `POST /upload/:project/:version/metadata/presign` | API key | Signed PUT link for this build's metadata ZIP (no size cap in the path); answers `{ url, key, buildId, buildNumber }` |
+| `POST /upload/:project/:version/metadata/complete` | API key | After the PUT: body `{ buildId, zipKey }`, query `commitSha`/`branch`; checks the object is the one issued for the build (2 GiB ceiling), then queues exactly as the route above; a repeat answers 200 without queuing again |
+| `POST /upload/:project/:version/metadata/failed` | API key | Body `{ buildId, reason }`: the deployer gave up on the PUT; marks the build `failed` ("metadata upload failed: ...") instead of leaving it without a status |
 | `GET /upload/:project/:version` | API key | File info for an uploaded build |
 | `POST /presigned-url/:project/:version/:filename` | API key | Presigned R2 PUT URL + Firestore build record |
 | `POST /upload-images/:project`, `.../complete` | API key | Presigned image-set upload for image indexing |

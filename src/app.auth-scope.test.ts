@@ -76,6 +76,10 @@ const ROUTES: Array<{ name: string; method: string; path: string; init: { header
   { name: 'POST /presigned-url/:project/:version/:filename', method: 'POST', path: '/presigned-url/victim/v1/storybook.zip', init: JSON_BODY({ contentType: 'application/zip' }) },
   { name: 'POST /upload-images/:project', method: 'POST', path: '/upload-images/victim', init: JSON_BODY({ imageCount: 1 }) },
   { name: 'POST /upload-images/:project/complete', method: 'POST', path: '/upload-images/victim/complete', init: JSON_BODY({ uploadId: 'u1', zipKey: 'victim/uploads/1/images.zip' }) },
+  // metadata-zip-100mb-limit: presigned metadata ZIP upload (guarantee-4)
+  { name: 'POST /upload/:project/:version/metadata/presign', method: 'POST', path: '/upload/victim/v1/metadata/presign', init: { headers: {} } },
+  { name: 'POST /upload/:project/:version/metadata/complete', method: 'POST', path: '/upload/victim/v1/metadata/complete', init: JSON_BODY({ buildId: 'b1', zipKey: 'victim/v1/builds/1/metadata-screenshots.zip' }) },
+  { name: 'POST /upload/:project/:version/metadata/failed', method: 'POST', path: '/upload/victim/v1/metadata/failed', init: JSON_BODY({ buildId: 'b1', reason: 'x' }) },
   // capture-sources PR 2: bundle upload (guarantee-3)
   { name: 'POST /presigned-url/:project/:version/bundle.zip', method: 'POST', path: '/presigned-url/victim/v1/bundle.zip?source=storybook-rn:ios', init: { headers: {} } },
   { name: 'POST /upload/:project/:version/bundle/complete', method: 'POST', path: '/upload/victim/v1/bundle/complete', init: JSON_BODY({ buildId: 'b1', zipKey: 'victim/v1/builds/1/bundle.zip' }) },

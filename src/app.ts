@@ -821,6 +821,44 @@ const BuildProvenanceQuerySchema = z.object({
   branch: z.string().min(1).max(255).optional().openapi({ example: 'main' }),
 });
 
+/** The old metadata route buffers the body in the Worker: its ceiling is the old deployer's own cap. */
+const METADATA_ZIP_OLD_ROUTE_MAX_BYTES = 100 * 1024 * 1024;
+/** Processing safety limit for a metadata ZIP uploaded straight to storage (enforced in complete). */
+const METADATA_ZIP_MAX_BYTES = 2 * 1024 * 1024 * 1024;
+const METADATA_ZIP_FILE = 'metadata-screenshots.zip';
+
+/** The one key a build's metadata ZIP lives at, for the old route and for presign / complete alike. */
+function metadataZipKeyFor(project: string, version: string, buildNumber: number): string {
+  return `${project}/${version}/builds/${buildNumber}/${METADATA_ZIP_FILE}`;
+}
+
+/** The 400 for an empty body, or the 413 for one over the old route's ceiling. */
+function rejectMetadataBody(c: Context<AppEnv>, body: ArrayBuffer | undefined) {
+  if (body && body.byteLength > METADATA_ZIP_OLD_ROUTE_MAX_BYTES) return metadataZipTooLargeForOldRoute(c);
+  return c.json({ error: 'No file provided' }, 400);
+}
+
+// A declared length over the ceiling is refused before the body is read (POST only; auth already ran).
+app.use('/upload/:project/:version/metadata', async (c, next) => {
+  const declared = Number(c.req.header('content-length'));
+  if (c.req.method === 'POST' && Number.isFinite(declared) && declared > METADATA_ZIP_OLD_ROUTE_MAX_BYTES) {
+    return metadataZipTooLargeForOldRoute(c);
+  }
+  await next();
+});
+
+function metadataZipTooLargeForOldRoute(c: Context<AppEnv>) {
+  log.warn('metadata zip over old route limit', reqFields(c, { err_code: 'metadata_zip_too_large' }));
+  return c.json(
+    {
+      error:
+        'The metadata ZIP is over 100 MiB, the limit of this upload route. Use @scrymore/scry-deployer 0.12.0 or later: ' +
+        'the metadata ZIP now uploads directly to storage (POST /upload/:project/:version/metadata/presign, then /complete).',
+    },
+    413
+  );
+}
+
 const metadataUploadRoute = createRoute({
   method: 'post',
   path: '/upload/:project/:version/metadata',
@@ -853,6 +891,14 @@ const metadataUploadRoute = createRoute({
         },
       },
     },
+    413: {
+      description: 'Body over 100 MiB: use the direct upload (metadata/presign then metadata/complete)',
+      content: {
+        'application/json': {
+          schema: ErrorResponseSchema,
+        },
+      },
+    },
     500: {
       description: 'Internal server error',
       content: {
@@ -873,9 +919,12 @@ app.openapi(metadataUploadRoute, async (c) => {
     const queue = c.var.processingQueue;
     const requestId = c.var.requestId;
 
+    // metadata-zip-100mb-limit: this route buffers the whole body in the Worker, so it keeps a
+    // 100 MiB ceiling (the old deployer's own cap). A declared length over it was already refused
+    // by the guard above the route; a body that turns out larger is refused before it is stored.
     const body = await c.req.arrayBuffer();
-    if (!body || body.byteLength === 0) {
-      return c.json({ error: 'No file provided' }, 400);
+    if (!body || body.byteLength === 0 || body.byteLength > METADATA_ZIP_OLD_ROUTE_MAX_BYTES) {
+      return rejectMetadataBody(c, body);
     }
 
     if (!firestore) {
@@ -892,7 +941,7 @@ app.openapi(metadataUploadRoute, async (c) => {
       );
     }
 
-    const zipKey = `${project}/${version}/builds/${build.buildNumber}/metadata-screenshots.zip`;
+    const zipKey = metadataZipKeyFor(project, version, build.buildNumber);
     await storage.upload(zipKey, new Blob([body]).stream(), 'application/zip');
     emitBuildStep(c, { step: 'upload_received', outcome: 'ok', buildId: build.id });
 
@@ -1678,6 +1727,322 @@ app.openapi(bundleCompleteRoute, async (c) => {
       { error: `Bundle complete failed: ${error instanceof Error ? error.message : 'Unknown error'}` },
       500
     );
+  }
+});
+
+// ============= Metadata ZIP, direct upload (metadata-zip-100mb-limit, ISSUES.md #74) =============
+//
+// The deployer asks for a signed link, PUTs the ZIP straight to storage (no size cap, no Worker in the
+// path), then tells us it arrived. Same R2 key and same queue message as POST /upload/:p/:v/metadata,
+// so nothing downstream changes. All three routes sit under /upload/:project/*, so the project-scoped
+// API key check (upload-project-key-scope) covers them; `complete` and `failed` additionally pin the
+// build id and the exact object key issued for it.
+
+const MetadataPresignResponseSchema = z.object({
+  url: z.string(),
+  key: z.string(),
+  buildId: z.string(),
+  buildNumber: z.number(),
+});
+
+const metadataPresignRoute = createRoute({
+  method: 'post',
+  path: '/upload/:project/:version/metadata/presign',
+  request: { params: ProjectVersionParamsSchema },
+  responses: {
+    200: {
+      description: 'A signed PUT link for this build\'s metadata ZIP',
+      content: { 'application/json': { schema: MetadataPresignResponseSchema } },
+    },
+    400: { description: 'No build for this project and version yet', content: { 'application/json': { schema: ErrorResponseSchema } } },
+    401: { description: 'Unauthorized', content: { 'application/json': { schema: AuthErrorResponseSchema } } },
+    403: { description: 'API key does not belong to the requested project', content: { 'application/json': { schema: AuthErrorResponseSchema } } },
+    500: { description: 'Internal server error', content: { 'application/json': { schema: ErrorResponseSchema } } },
+  },
+});
+
+app.openapi(metadataPresignRoute, async (c) => {
+  try {
+    const { project, version } = c.req.valid('param');
+    const storage = c.var.storage;
+    const firestore = c.var.firestore;
+    if (!firestore) {
+      return c.json({ error: 'Firestore not configured' }, 500);
+    }
+    const build = await firestore.getLatestBuild(project, version);
+    if (!build) {
+      return c.json({ error: 'No build found for this project and version. Upload storybook.zip first.' }, 400);
+    }
+    c.set('buildId', build.id);
+    const key = metadataZipKeyFor(project, version, build.buildNumber);
+    const data = await storage.getPresignedUploadUrl(key, 'application/zip');
+    emitBuildStep(c, { step: 'presign', outcome: 'ok', buildId: build.id });
+    return c.json({ url: data.url, key, buildId: build.id, buildNumber: build.buildNumber }, 200);
+  } catch (error) {
+    reportError(c, error, 'metadata presign failed', 'metadata_presign_failed');
+    return c.json({ error: `Metadata presign failed: ${error instanceof Error ? error.message : 'Unknown error'}` }, 500);
+  }
+});
+
+const MetadataCompleteBodySchema = z.object({
+  buildId: z.string().min(1).max(128).openapi({ description: 'The build id metadata/presign returned.' }),
+  zipKey: z.string().min(1).max(512).openapi({ description: 'The key metadata/presign returned (the object the client PUT).' }),
+});
+
+const MetadataCompleteResponseSchema = z.object({
+  success: z.boolean(),
+  message: z.string(),
+  queued: z.boolean(),
+  buildNumber: z.number(),
+  zipKey: z.string(),
+});
+
+const metadataCompleteRoute = createRoute({
+  method: 'post',
+  path: '/upload/:project/:version/metadata/complete',
+  request: {
+    params: ProjectVersionParamsSchema,
+    query: BuildProvenanceQuerySchema,
+    body: { content: { 'application/json': { schema: MetadataCompleteBodySchema } } },
+  },
+  responses: {
+    200: { description: 'Metadata ZIP accepted and queued (a repeat for a queued build answers the same)', content: { 'application/json': { schema: MetadataCompleteResponseSchema } } },
+    400: { description: 'Wrong key or version, or the object was never uploaded', content: { 'application/json': { schema: ErrorResponseSchema } } },
+    401: { description: 'Unauthorized', content: { 'application/json': { schema: AuthErrorResponseSchema } } },
+    403: { description: 'API key does not belong to the requested project', content: { 'application/json': { schema: AuthErrorResponseSchema } } },
+    404: { description: 'Build not found', content: { 'application/json': { schema: ErrorResponseSchema } } },
+    409: { description: 'Build is not awaiting a metadata ZIP', content: { 'application/json': { schema: ErrorResponseSchema } } },
+    413: { description: 'Object over the 2 GiB processing limit', content: { 'application/json': { schema: ErrorResponseSchema } } },
+    500: { description: 'Internal server error', content: { 'application/json': { schema: ErrorResponseSchema } } },
+  },
+});
+
+/** Cheap shape check on the caller-supplied key before any read; the exact per-build equality follows. */
+function isExpectedMetadataZipKey(zipKey: string, project: string, version: string): boolean {
+  return (
+    zipKey.startsWith(`${project}/${version}/builds/`) &&
+    zipKey.endsWith(`/${METADATA_ZIP_FILE}`) &&
+    !zipKey.includes('..') &&
+    !zipKey.includes('//')
+  );
+}
+
+type MetadataCompleteTarget =
+  | { build: Build }
+  | { accepted: true; buildNumber: number }
+  | { error: string; status: 400 | 404 | 409 };
+
+/**
+ * Everything `complete` checks about the build before it looks at the object: the key shape, that the
+ * build exists for this version, that the key is exactly the one issued for it, and its status.
+ * Nothing is read from storage or written here.
+ */
+async function checkMetadataCompleteTarget(
+  firestore: FirestoreService,
+  project: string,
+  version: string,
+  buildId: string,
+  zipKey: string
+): Promise<MetadataCompleteTarget> {
+  if (!isExpectedMetadataZipKey(zipKey, project, version)) {
+    return { error: `zipKey must be ${project}/${version}/builds/<n>/${METADATA_ZIP_FILE}`, status: 400 };
+  }
+  const build = await firestore.getBuild(project, buildId);
+  if (!build) return { error: 'Build not found', status: 404 };
+  if (build.versionId !== version) return { error: 'Build does not belong to this project/version', status: 400 };
+  // Only the object issued for this build: another build's valid key, or another artifact, is refused.
+  if (zipKey !== metadataZipKeyFor(project, version, build.buildNumber)) {
+    return { error: 'zipKey is not the object issued for this build', status: 400 };
+  }
+  // A repeat after a success (a retry whose first response was lost) answers the same success and
+  // touches nothing. A build already resolved another way (failed) is not awaiting a metadata ZIP.
+  if (build.processingStatus && RESOLVED_OK_STATUSES.has(build.processingStatus)) {
+    return { accepted: true, buildNumber: build.buildNumber };
+  }
+  if (build.processingStatus) return { error: 'Build is not awaiting a metadata ZIP', status: 409 };
+  return { build };
+}
+
+/** An object over the 2 GiB processing limit: delete it and mark the build failed (both best effort). */
+async function discardOversizedMetadataZip(
+  c: Context<AppEnv>,
+  storage: StorageService,
+  firestore: FirestoreService,
+  project: string,
+  buildId: string,
+  zipKey: string
+): Promise<void> {
+  await storage.delete(zipKey).catch(() => {
+    logWarn(c, 'could not delete oversized metadata zip', 'metadata_delete_failed');
+  });
+  await firestore
+    .updateBuild(project, buildId, {
+      processingStatus: 'failed',
+      processingError: 'metadata ZIP is over the 2 GiB processing limit',
+      stepSummary: stepSummaryFor('upload_received', 'fail'),
+    })
+    .catch(() => {
+      logWarn(c, 'could not mark build failed', 'metadata_mark_failed');
+    });
+  emitBuildStep(c, { step: 'upload_received', outcome: 'fail', buildId, reason: 'validation' });
+}
+
+/** Same order and effects as the old route: provenance, queue message, then the queued status. Returns whether it was queued. */
+async function queueMetadataZip(
+  c: Context<AppEnv>,
+  firestore: FirestoreService,
+  project: string,
+  version: string,
+  build: Build,
+  zipKey: string,
+  git: { commitSha?: string; branch?: string }
+): Promise<boolean> {
+  const queue = c.var.processingQueue;
+  if (git.commitSha || git.branch) {
+    await recordBuildProvenance(firestore, project, build, 'metadata', {
+      ...(git.commitSha ? { commitSha: git.commitSha } : {}),
+      ...(git.branch ? { branch: git.branch } : {}),
+    }, c);
+  }
+
+  let queued = false;
+  if (queue) {
+    await sendToQueue(c, firestore, project, build.id, () =>
+      queue.send({
+        projectId: project,
+        versionId: version,
+        buildId: build.id,
+        zipKey,
+        timestamp: Date.now(),
+        trace: currentTraceContext(),
+        requestId: c.var.requestId,
+      })
+    );
+    queued = true;
+    log.info('build queued', reqFields(c, { build_id: build.id }));
+  }
+
+  const queuedStatus: BuildProcessingStatus = 'queued';
+  if (firestore.updateProcessingStatus) {
+    await firestore.updateProcessingStatus(project, build.id, queuedStatus, queuedSummary(queued, 'upload_received'));
+  } else {
+    await firestore.updateBuild(project, build.id, { processingStatus: queuedStatus });
+  }
+  return queued;
+}
+
+app.openapi(metadataCompleteRoute, async (c) => {
+  try {
+    const { project, version } = c.req.valid('param');
+    const { commitSha, branch } = c.req.valid('query');
+    const { buildId, zipKey } = c.req.valid('json');
+    const storage = c.var.storage;
+    const firestore = c.var.firestore;
+
+    if (!firestore) {
+      return c.json({ error: 'Firestore not configured' }, 500);
+    }
+
+    const checked = await checkMetadataCompleteTarget(firestore, project, version, buildId, zipKey);
+    if ('error' in checked) return c.json({ error: checked.error }, checked.status);
+    if ('accepted' in checked) {
+      return c.json(
+        { success: true, message: 'Metadata ZIP already accepted', queued: true, buildNumber: checked.buildNumber, zipKey },
+        200
+      );
+    }
+    const { build } = checked;
+    c.set('buildId', build.id);
+
+    const meta = await storage.head(zipKey);
+    if (!hasBundleObjectMeta(meta)) {
+      emitBuildStep(c, { step: 'upload_received', outcome: 'fail', buildId: build.id, reason: 'validation' });
+      return c.json({ error: 'Metadata ZIP object not found. PUT it to the presigned URL first.' }, 400);
+    }
+    if (meta.size > METADATA_ZIP_MAX_BYTES) {
+      await discardOversizedMetadataZip(c, storage, firestore, project, build.id, zipKey);
+      return c.json(
+        { error: `Metadata ZIP is ${meta.size} bytes, over the 2 GiB (${METADATA_ZIP_MAX_BYTES} byte) processing limit.` },
+        413
+      );
+    }
+    emitBuildStep(c, { step: 'upload_received', outcome: 'ok', buildId: build.id });
+
+    const queued = await queueMetadataZip(c, firestore, project, version, build, zipKey, { commitSha, branch });
+    return c.json(
+      {
+        success: true,
+        message: queued ? 'Metadata ZIP uploaded and processing queued' : 'Metadata ZIP uploaded',
+        queued,
+        buildNumber: build.buildNumber,
+        zipKey,
+      },
+      200
+    );
+  } catch (error) {
+    reportError(c, error, 'metadata complete failed', 'metadata_complete_failed');
+    return c.json({ error: `Metadata complete failed: ${error instanceof Error ? error.message : 'Unknown error'}` }, 500);
+  }
+});
+
+const MetadataFailedBodySchema = z.object({
+  buildId: z.string().min(1).max(128),
+  reason: z.string().optional().openapi({ description: 'Why the deployer gave up (bounded and stored on the build).' }),
+});
+
+const metadataFailedRoute = createRoute({
+  method: 'post',
+  path: '/upload/:project/:version/metadata/failed',
+  request: {
+    params: ProjectVersionParamsSchema,
+    body: { content: { 'application/json': { schema: MetadataFailedBodySchema } } },
+  },
+  responses: {
+    200: { description: 'Build marked failed', content: { 'application/json': { schema: z.object({ success: z.boolean(), buildId: z.string() }) } } },
+    401: { description: 'Unauthorized', content: { 'application/json': { schema: AuthErrorResponseSchema } } },
+    403: { description: 'API key does not belong to the requested project', content: { 'application/json': { schema: AuthErrorResponseSchema } } },
+    404: { description: 'Build not found', content: { 'application/json': { schema: ErrorResponseSchema } } },
+    409: { description: 'Build already queued or resolved: left untouched', content: { 'application/json': { schema: ErrorResponseSchema } } },
+    500: { description: 'Internal server error', content: { 'application/json': { schema: ErrorResponseSchema } } },
+  },
+});
+
+/** One bounded line for the stored processingError: control characters collapsed, 300 characters at most. */
+function metadataFailureText(reason: string | undefined): string {
+  const prefix = 'metadata upload failed';
+  const oneLine = (reason ?? '').replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return (oneLine ? `${prefix}: ${oneLine}` : prefix).slice(0, 300);
+}
+
+app.openapi(metadataFailedRoute, async (c) => {
+  try {
+    const { project, version } = c.req.valid('param');
+    const { buildId, reason } = c.req.valid('json');
+    const firestore = c.var.firestore;
+    if (!firestore) {
+      return c.json({ error: 'Firestore not configured' }, 500);
+    }
+    const build = await firestore.getBuild(project, buildId);
+    if (!build || build.versionId !== version) {
+      return c.json({ error: 'Build not found' }, 404);
+    }
+    c.set('buildId', build.id);
+    // Never overwrite a build that was queued or resolved: the deployer reports a failed upload only
+    // when no complete succeeded, so a later state means the metadata did arrive some other way.
+    if (build.processingStatus && build.processingStatus !== 'failed') {
+      return c.json({ error: 'Build is not awaiting a metadata ZIP' }, 409);
+    }
+    await firestore.updateBuild(project, build.id, {
+      processingStatus: 'failed',
+      processingError: metadataFailureText(reason),
+      stepSummary: stepSummaryFor('upload_received', 'fail'),
+    });
+    emitBuildStep(c, { step: 'upload_received', outcome: 'fail', buildId: build.id, reason: 'unknown' });
+    log.warn('metadata upload failed', reqFields(c, { err_code: 'metadata_upload_failed_by_client', build_id: build.id }));
+    return c.json({ success: true, buildId: build.id }, 200);
+  } catch (error) {
+    reportError(c, error, 'metadata failed route failed', 'metadata_failed_route_failed');
+    return c.json({ error: `Metadata failed route failed: ${error instanceof Error ? error.message : 'Unknown error'}` }, 500);
   }
 });
 
