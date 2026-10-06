@@ -1005,6 +1005,8 @@ export class FirestoreServiceWorker implements FirestoreService {
       width: data.width,
       height: data.height,
       bytes: data.bytes,
+      previewBytes: data.previewBytes,
+      agentBytes: data.agentBytes,
       sha256: data.sha256,
       scale: data.scale,
       os: data.os,
@@ -1030,17 +1032,22 @@ export class FirestoreServiceWorker implements FirestoreService {
     return doc ? this.convertDocToCapture(captureId, doc.fields) : null;
   }
 
-  async markCaptureReady(projectId: string, captureId: string): Promise<Capture> {
+  async markCaptureReady(projectId: string, captureId: string): Promise<Capture | null> {
     const token = await this.getAccessToken();
     const path = `projects/${projectId}/captures/${captureId}`;
     const doc = await this.getDocument(path, token);
-    if (!doc) throw new Error('Capture not found');
+    if (!doc) return null;
     const receivedAt = new Date();
-    await this.patchDocument(
+    // exists=true: if the document was deleted between the read and this write, Firestore refuses
+    // instead of recreating a stub with only status and receivedAt.
+    const patched = await this.patchDocument(
       path,
       { status: { stringValue: 'ready' }, receivedAt: { timestampValue: receivedAt.toISOString() } },
-      token
+      token,
+      undefined,
+      { ifExists: true }
     );
+    if (patched.preconditionFailed) return null;
     return { ...this.convertDocToCapture(captureId, doc.fields), status: 'ready', receivedAt };
   }
 
@@ -1106,6 +1113,8 @@ export class FirestoreServiceWorker implements FirestoreService {
       width: { integerValue: String(c.width) },
       height: { integerValue: String(c.height) },
       bytes: { integerValue: String(c.bytes) },
+      ...(c.previewBytes !== undefined ? { previewBytes: { integerValue: String(c.previewBytes) } } : {}),
+      ...(c.agentBytes !== undefined ? { agentBytes: { integerValue: String(c.agentBytes) } } : {}),
       sha256: { stringValue: c.sha256 },
       scale: this.toFirestoreValue(c.scale),
       os: { stringValue: c.os },
@@ -1134,6 +1143,8 @@ export class FirestoreServiceWorker implements FirestoreService {
       width: num(fields.width),
       height: num(fields.height),
       bytes: num(fields.bytes),
+      ...(fields.previewBytes ? { previewBytes: num(fields.previewBytes) } : {}),
+      ...(fields.agentBytes ? { agentBytes: num(fields.agentBytes) } : {}),
       sha256: fields.sha256?.stringValue || '',
       scale: num(fields.scale),
       os: (fields.os?.stringValue || 'mac') as CaptureOs,
@@ -1210,7 +1221,7 @@ export class FirestoreServiceWorker implements FirestoreService {
     fields: FirestoreFields,
     token: string,
     maskFieldPaths?: string[],
-    opts?: { ifUpdateTime?: string }
+    opts?: { ifUpdateTime?: string; ifExists?: boolean }
   ): Promise<{ preconditionFailed: boolean }> {
     const url = `${this.baseUrl}/${path}`;
 
@@ -1238,6 +1249,9 @@ export class FirestoreServiceWorker implements FirestoreService {
     if (opts?.ifUpdateTime) {
       params.append('currentDocument.updateTime', opts.ifUpdateTime);
     }
+    if (opts?.ifExists) {
+      params.append('currentDocument.exists', 'true');
+    }
 
     // Idempotent write: every field here is a fixed value the caller already
     // computed (never a Firestore increment transform), so resending the same
@@ -1253,7 +1267,9 @@ export class FirestoreServiceWorker implements FirestoreService {
 
     if (!response.ok) {
       const errorBody = await response.text().catch(() => '');
-      if (opts?.ifUpdateTime && isPreconditionFailure(response.status, errorBody)) {
+      // `ifExists` on a document that is gone answers 404 NOT_FOUND (or FAILED_PRECONDITION): the same "refused, nothing written".
+      const gone = opts?.ifExists && (response.status === 404 || isPreconditionFailure(response.status, errorBody));
+      if (gone || (opts?.ifUpdateTime && isPreconditionFailure(response.status, errorBody))) {
         // Not a failure to surface as an error (F92): the document changed since the caller's read,
         // which is exactly the condition `ifUpdateTime` exists to catch. The caller decides what a
         // stale write means for it (the orphan sweep counts this as skipped, never retried).

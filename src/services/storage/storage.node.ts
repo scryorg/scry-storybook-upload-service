@@ -11,7 +11,8 @@ import {
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { Upload } from '@aws-sdk/lib-storage';
-import { StorageService, StorageObjectMeta, StorageObjectRange, UploadResult } from './storage.service.js';
+import { createCapturePresignClient, presignCapturePut } from './storage.capture-presign.js';
+import { StorageService, CapturePresignOptions, StorageObjectMeta, StorageObjectRange, UploadResult } from './storage.service.js';
 import { Readable } from 'stream';
 
 /** True for the S3/R2 "not found" errors both HeadObject and GetObject can throw. */
@@ -34,6 +35,7 @@ type R2Config = {
  */
 export class R2S3StorageService implements StorageService {
   private readonly s3: S3Client;
+  private readonly captureS3: S3Client;
   private readonly bucketName: string;
   private readonly publicUrlBase: string;
 
@@ -47,6 +49,7 @@ export class R2S3StorageService implements StorageService {
       },
     });
     this.bucketName = config.bucketName;
+    this.captureS3 = createCapturePresignClient(config);
     // This assumes a public bucket or a custom domain is configured for serving assets.
     this.publicUrlBase = `https://pub-${config.bucketName}.${config.accountId}.r2.dev`;
   }
@@ -87,6 +90,11 @@ export class R2S3StorageService implements StorageService {
     const signedUrl = await getSignedUrl(this.s3, command, { expiresIn: 3600 }); // URL valid for 1 hour
 
     return { url: signedUrl, key: key };
+  }
+
+  /** Capture rendition PUT: signed content-type and content-length, short expiry, no default checksum. */
+  getPresignedCaptureUploadUrl(key: string, opts: CapturePresignOptions): Promise<{ url: string; key: string }> {
+    return presignCapturePut(this.captureS3, this.bucketName, key, opts);
   }
 
   /**

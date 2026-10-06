@@ -91,7 +91,8 @@ export class FakeFirestore {
     return c ? { ...c } : null;
   }
   async markCaptureReady(projectId: string, captureId: string) {
-    const c = this.captures.get(`${projectId}/${captureId}`)!;
+    const c = this.captures.get(`${projectId}/${captureId}`);
+    if (!c) return null;
     c.status = 'ready';
     c.receivedAt = new Date();
     this.writes.push(`projects/${projectId}/captures/${captureId}`);
@@ -186,6 +187,8 @@ export function presignBody(png: Uint8Array, overrides: Record<string, unknown> 
     width,
     height,
     bytes: png.byteLength,
+    previewBytes: fakeJpeg().byteLength,
+    agentBytes: fakeWebp().byteLength,
     sha256: sha256(png),
     scale: 2,
     os: 'mac',

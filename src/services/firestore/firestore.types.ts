@@ -464,6 +464,9 @@ export interface Capture {
   width: number;
   height: number;
   bytes: number;
+  /** Declared size of the preview / agent renditions (signed into their PUT URLs). Absent on documents written before the signed-length change. */
+  previewBytes?: number;
+  agentBytes?: number;
   sha256: string;
   scale: number;
   os: CaptureOs;
@@ -485,4 +488,4 @@ export interface Capture {
 export type CreateCaptureData = Pick<
   Capture,
   'captureId' | 'capturedByUid' | 'deviceId' | 'width' | 'height' | 'bytes' | 'sha256' | 'scale' | 'os' | 'mode' | 'sendMode'
-> & { note?: string; expiresAt: Date };
+> & { previewBytes: number; agentBytes: number; note?: string; expiresAt: Date };

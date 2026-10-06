@@ -241,8 +241,11 @@ export interface FirestoreService {
   /** One capture, or null. */
   getCapture(projectId: string, captureId: string): Promise<Capture | null>;
 
-  /** Marks a capture `ready` and stamps `receivedAt` with the server's clock. Returns the updated capture. */
-  markCaptureReady(projectId: string, captureId: string): Promise<Capture>;
+  /**
+   * Marks a capture `ready` and stamps `receivedAt` with the server's clock. Returns the updated capture,
+   * or null when the document is gone (it is never recreated).
+   */
+  markCaptureReady(projectId: string, captureId: string): Promise<Capture | null>;
 
   /**
    * Atomically adds 1 to a counter document and returns the new count (`projects/{p}/captureLimits/{id}`).

@@ -159,7 +159,7 @@ function logAuth(
  * the raw path or c.req.param: a client-chosen path segment must not reach the log store
  * (guarantee G1, UAT F47, same class as the CDN F41).
  */
-const VERIFIED_PROJECT = /^[A-Za-z0-9_-]{1,128}$/;
+export const VERIFIED_PROJECT = /^[A-Za-z0-9_-]{1,128}$/;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function markVerifiedProject(c: Context<any>, projectId: string): void {
   if (VERIFIED_PROJECT.test(projectId)) c.set('projectId', projectId);

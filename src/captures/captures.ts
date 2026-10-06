@@ -17,11 +17,11 @@ import { createRoute, z, type OpenAPIHono } from '@hono/zod-openapi';
 import type { Context } from 'hono';
 import { createHash } from 'node:crypto';
 import { log, reqFields, reportError } from '../lib/log.js';
-import { DEVICE_KEY_KIND } from '../middleware/auth.js';
+import { DEVICE_KEY_KIND, VERIFIED_PROJECT } from '../middleware/auth.js';
 import type { AppEnv } from '../app.js';
 import type { Capture } from '../services/firestore/firestore.types.js';
 import { HEADER_BYTES, pngDimensions, sniffImage, type ImageKind } from './image-check.js';
-import { checkPresignRate } from './rate-limit.js';
+import { checkCompleteRate, checkPresignRate } from './rate-limit.js';
 
 /** The original may be at most 20 MB (the SCF per-image bound). */
 export const MAX_ORIGINAL_BYTES = 20 * 1024 * 1024;
@@ -32,6 +32,8 @@ export const MAX_AGENT_BYTES = 512 * 1024;
 export const MAX_DIMENSION = 16384;
 export const MAX_NOTE_CHARS = 2000;
 export const CAPTURE_TTL_DAYS = 30;
+/** Presigned PUT URLs live 15 minutes: long enough for three uploads, short enough that a ready capture's objects cannot be replaced for long. */
+export const CAPTURE_URL_EXPIRES_SECONDS = 900;
 const MAX_BODY_CHARS = 8192;
 
 const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -39,6 +41,9 @@ const SHA256_HEX = /^[0-9a-f]{64}$/;
 const SAFE_KEY_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
 type Rendition = { name: 'original.png' | 'preview.jpg' | 'agent.webp'; field: 'original' | 'preview' | 'agent'; contentType: string; kind: ImageKind; maxBytes: number };
+/** The size the client declared for a rendition at presign (the original's is `bytes`). */
+const declaredBytes = (capture: Pick<Capture, 'bytes' | 'previewBytes' | 'agentBytes'>, r: Rendition): number | undefined =>
+  ({ original: capture.bytes, preview: capture.previewBytes, agent: capture.agentBytes })[r.field];
 const RENDITIONS: ReadonlyArray<Rendition> = [
   { name: 'original.png', field: 'original', contentType: 'image/png', kind: 'png', maxBytes: MAX_ORIGINAL_BYTES },
   { name: 'preview.jpg', field: 'preview', contentType: 'image/jpeg', kind: 'jpeg', maxBytes: MAX_PREVIEW_BYTES },
@@ -53,6 +58,8 @@ const PresignBody = z.object({
   height: z.number().int().min(1).max(MAX_DIMENSION),
   // The size cap is a 413, not a 400, so it is checked after validation.
   bytes: z.number().int().min(1),
+  previewBytes: z.number().int().min(1),
+  agentBytes: z.number().int().min(1),
   sha256: z.string().regex(SHA256_HEX),
   scale: z.number().min(0.5).max(8),
   os: z.enum(['mac', 'win']),
@@ -82,7 +89,9 @@ export const presignCaptureRoute = createRoute({
   path: '/captures/{project}/presign',
   description:
     'Device key only. JSON body: captureId (UUIDv7, lowercase), width, height, bytes (<= 20 MB), sha256 (hex of the original), ' +
+    'previewBytes (<= 2 MB) and agentBytes (<= 512 KB) as the exact sizes of the other two files, ' +
     'scale, os (mac|win), mode (region|window|screen), sendMode (review|auto), optional note (<= 2000 chars). Idempotent on captureId. ' +
+    'The three URLs sign Content-Type (image/png, image/jpeg, image/webp) and Content-Length, so the PUTs must send exactly those, and they expire after 15 minutes. ' +
     'Limits: 30 per minute and 2,000 per day per key.',
   request: { params: z.object({ project: z.string() }) },
   responses: {
@@ -108,7 +117,8 @@ export const completeCaptureRoute = createRoute({
   path: '/captures/{project}/complete',
   description:
     'Device key only. JSON body: { captureId }. Checks the three R2 objects (present, sizes, magic bytes, PNG dimensions, ' +
-    'sha256 of the original) and marks the capture ready. Idempotent: a ready capture answers 200 again.',
+    'sha256 of the original, stored Content-Type and declared size of each file) and marks the capture ready. Idempotent: a ready capture answers 200 again. ' +
+    'Limit: 60 per minute per key.',
   request: { params: z.object({ project: z.string() }) },
   responses: {
     200: { description: 'The capture is ready', content: { 'application/json': { schema: z.object({ capture: CaptureSummary }) } } },
@@ -118,8 +128,9 @@ export const completeCaptureRoute = createRoute({
     404: errorResponse('No pending capture with this id for this key owner'),
     409: errorResponse('One or more of the three objects has not been uploaded yet'),
     413: errorResponse('An uploaded object is larger than its limit'),
-    415: errorResponse('An uploaded object is not the image type it must be'),
+    415: errorResponse('An uploaded object is not the image type it must be (bad bytes or a different stored Content-Type)'),
     422: errorResponse('Declared size, dimensions or sha256 do not match what was uploaded'),
+    429: errorResponse('Per-key limit reached; Retry-After says when to retry'),
   },
 });
 
@@ -150,7 +161,7 @@ function deviceContext(c: Ctx) {
   if (!key || key.kind !== DEVICE_KEY_KIND) {
     return { refusal: refuse(c, 403, 'device_key_only', 'Captures are uploaded with a Scry Sync device key') };
   }
-  if (!key.createdBy || !SAFE_KEY_ID.test(key.id)) {
+  if (!key.createdBy || !SAFE_KEY_ID.test(key.id) || !VERIFIED_PROJECT.test(key.projectId)) {
     return { refusal: refuse(c, 403, 'key_has_no_owner', 'This key cannot upload captures') };
   }
   return { key: { id: key.id, uid: key.createdBy, project: key.projectId } };
@@ -176,6 +187,36 @@ function badFields(error: z.ZodError): string[] {
   return [...names];
 }
 
+type PresignBodyData = z.infer<typeof PresignBody>;
+type UploadMap = Record<string, { url: string; key: string; contentType: string }>;
+
+/** A retry of the same presign by the same person, with the same declared values. */
+function sameDeclaration(capture: Capture, uid: string, body: PresignBodyData): boolean {
+  return (
+    capture.capturedByUid === uid &&
+    capture.width === body.width &&
+    capture.height === body.height &&
+    capture.bytes === body.bytes &&
+    capture.previewBytes === body.previewBytes &&
+    capture.agentBytes === body.agentBytes &&
+    capture.sha256 === body.sha256
+  );
+}
+
+/** One short-lived PUT URL per rendition, signed with the stored sizes (what `complete` checks) so a repeat can never widen them. */
+async function presignUploads(storage: AppEnv['Variables']['storage'], project: string, capture: Capture): Promise<UploadMap> {
+  const uploads: UploadMap = {};
+  for (const r of RENDITIONS) {
+    const signed = await storage.getPresignedCaptureUploadUrl(keyFor(project, capture.captureId, r), {
+      contentType: r.contentType,
+      contentLength: declaredBytes(capture, r) ?? capture.bytes,
+      expiresIn: CAPTURE_URL_EXPIRES_SECONDS,
+    });
+    uploads[r.field] = { url: signed.url, key: signed.key, contentType: r.contentType };
+  }
+  return uploads;
+}
+
 export function registerCaptures(app: OpenAPIHono<AppEnv>): void {
   app.openapi(presignCaptureRoute, (async (c: Ctx) => {
     try {
@@ -197,8 +238,8 @@ export function registerCaptures(app: OpenAPIHono<AppEnv>): void {
         return c.json({ error: 'invalid_request', message: 'The request body is not valid', fields: badFields(parsed.error) }, 400);
       }
       const body = parsed.data;
-      if (body.bytes > MAX_ORIGINAL_BYTES) {
-        return refuse(c, 413, 'too_large', 'The original must be at most 20 MB', body.captureId);
+      if (body.bytes > MAX_ORIGINAL_BYTES || body.previewBytes > MAX_PREVIEW_BYTES || body.agentBytes > MAX_AGENT_BYTES) {
+        return refuse(c, 413, 'too_large', 'An image is larger than its limit (original 20 MB, preview 2 MB, agent 512 KB)', body.captureId);
       }
 
       const expiresAt = new Date(Date.now() + CAPTURE_TTL_DAYS * 86_400_000);
@@ -209,6 +250,8 @@ export function registerCaptures(app: OpenAPIHono<AppEnv>): void {
         width: body.width,
         height: body.height,
         bytes: body.bytes,
+        previewBytes: body.previewBytes,
+        agentBytes: body.agentBytes,
         sha256: body.sha256,
         scale: body.scale,
         os: body.os,
@@ -221,24 +264,11 @@ export function registerCaptures(app: OpenAPIHono<AppEnv>): void {
       if (!created) {
         // A retry of the same presign by the same person, with the same declared values, is fine.
         // Anything else under an existing id is a conflict, and says nothing about the other capture.
-        const same =
-          capture.capturedByUid === key.uid &&
-          capture.width === body.width &&
-          capture.height === body.height &&
-          capture.bytes === body.bytes &&
-          capture.sha256 === body.sha256;
-        if (!same) return refuse(c, 409, 'id_conflict', 'This captureId is already in use', body.captureId);
+        if (!sameDeclaration(capture, key.uid, body)) return refuse(c, 409, 'id_conflict', 'This captureId is already in use', body.captureId);
       }
 
       // A ready capture is final: handing out PUT URLs again would let the verified objects be replaced.
-      let uploads: Record<string, { url: string; key: string; contentType: string }> | null = null;
-      if (capture.status === 'pending') {
-        uploads = {};
-        for (const r of RENDITIONS) {
-          const signed = await storage.getPresignedUploadUrl(keyFor(key.project, body.captureId, r), r.contentType);
-          uploads[r.field] = { url: signed.url, key: signed.key, contentType: r.contentType };
-        }
-      }
+      const uploads = capture.status === 'pending' ? await presignUploads(storage, key.project, capture) : null;
 
       if (created) log.info('capture presigned', reqFields(c, { run_id: body.captureId, status: 200 }));
       else log.info('capture presign repeated', reqFields(c, { run_id: body.captureId, status: 200 }));
@@ -256,6 +286,12 @@ export function registerCaptures(app: OpenAPIHono<AppEnv>): void {
       const { key } = ctx;
       const { storage, firestore } = c.var;
       if (!firestore) return refuse(c, 500, 'store_unavailable', 'Captures are not available right now');
+
+      const limit = await checkCompleteRate(firestore, key.project, key.id);
+      if (!limit.ok) {
+        c.header('Retry-After', String(limit.retryAfterSeconds));
+        return refuse(c, 429, 'rate_limited', 'Too many requests from this key; retry after the time in Retry-After');
+      }
 
       const parsed = CompleteBody.safeParse(await readJson(c));
       if (!parsed.success) {
@@ -283,6 +319,7 @@ export function registerCaptures(app: OpenAPIHono<AppEnv>): void {
       }
 
       const ready = await firestore.markCaptureReady(key.project, captureId);
+      if (!ready) return refuse(c, 404, 'not_found', 'No pending capture with this id', captureId);
       log.info('capture completed', reqFields(c, { run_id: captureId, status: 200 }));
       return c.json({ capture: summary(ready) }, 200);
     } catch (error) {
@@ -306,23 +343,38 @@ function sniffAll(headers: Array<Uint8Array | null>): Failure | null {
   return null;
 }
 
-/** HEAD, magic bytes, declared size, PNG dimensions and sha256 of the three objects. Null when everything matches. */
+/** `image/png; charset=x` -> `image/png`. */
+const mediaType = (contentType: string | undefined): string => (contentType ?? '').split(';')[0].trim().toLowerCase();
+
+/** Size cap and stored Content-Type of each object. The PUT URL signs the type, so R2 stores exactly the one we named; anything else did not come through it. */
+function checkStoredMetadata(heads: Array<{ size: number; contentType?: string }>): Failure | null {
+  for (let i = 0; i < RENDITIONS.length; i++) {
+    if (heads[i].size > RENDITIONS[i].maxBytes) return { status: 413, code: 'too_large', message: 'An uploaded image is larger than its limit' };
+    if (heads[i].size === 0) return NOT_AN_IMAGE;
+    if (mediaType(heads[i].contentType) !== RENDITIONS[i].contentType) return NOT_AN_IMAGE;
+  }
+  return null;
+}
+
+/** HEAD, content type, magic bytes, declared size, PNG dimensions and sha256 of the three objects. Null when everything matches. */
 async function verifyObjects(storage: AppEnv['Variables']['storage'], project: string, capture: Capture): Promise<Failure | null> {
   const keys = RENDITIONS.map((r) => keyFor(project, capture.captureId, r));
   const heads = await Promise.all(keys.map((k) => storage.head(k)));
   if (heads.some((h) => h === null)) return MISSING;
   const sizes = heads.map((h) => h!.size);
 
-  for (let i = 0; i < RENDITIONS.length; i++) {
-    if (sizes[i] > RENDITIONS[i].maxBytes) return { status: 413, code: 'too_large', message: 'An uploaded image is larger than its limit' };
-    if (sizes[i] === 0) return NOT_AN_IMAGE;
-  }
+  const stored = checkStoredMetadata(heads.map((h) => h!));
+  if (stored) return stored;
 
   const headers = await Promise.all(keys.map((k) => storage.getObjectRange(k, { offset: 0, length: HEADER_BYTES })));
   const sniffed = sniffAll(headers);
   if (sniffed) return sniffed;
 
-  if (sizes[0] !== capture.bytes) return { status: 422, code: 'size_mismatch', message: 'The uploaded original does not match the declared size' };
+  const sizeMismatch = RENDITIONS.some((r, i) => {
+    const declared = declaredBytes(capture, r);
+    return declared !== undefined && sizes[i] !== declared;
+  });
+  if (sizeMismatch) return { status: 422, code: 'size_mismatch', message: 'An uploaded image does not match its declared size' };
   const dims = pngDimensions(headers[0]!);
   if (!dims) return NOT_AN_IMAGE;
   if (dims.width !== capture.width || dims.height !== capture.height) {

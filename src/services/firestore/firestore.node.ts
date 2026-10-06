@@ -402,6 +402,8 @@ export class FirestoreServiceNode implements FirestoreService {
       width: data.width,
       height: data.height,
       bytes: data.bytes,
+      previewBytes: data.previewBytes,
+      agentBytes: data.agentBytes,
       sha256: data.sha256,
       scale: data.scale,
       os: data.os,
@@ -430,12 +432,17 @@ export class FirestoreServiceNode implements FirestoreService {
     return snap.exists ? this.convertDocToCapture(snap.id, snap.data()!) : null;
   }
 
-  async markCaptureReady(projectId: string, captureId: string): Promise<Capture> {
+  async markCaptureReady(projectId: string, captureId: string): Promise<Capture | null> {
     const ref = this.db.doc(`projects/${projectId}/captures/${captureId}`);
     const snap = await ref.get();
-    if (!snap.exists) throw new Error('Capture not found');
+    if (!snap.exists) return null;
     const receivedAt = new Date();
-    await ref.update({ status: 'ready', receivedAt });
+    try {
+      await ref.update({ status: 'ready', receivedAt }); // update() fails on a missing document, never recreates it
+    } catch (error) {
+      if ((error as { code?: number }).code === 5) return null; // 5 = NOT_FOUND: deleted since the read
+      throw error;
+    }
     return { ...this.convertDocToCapture(snap.id, snap.data()!), status: 'ready', receivedAt };
   }
 
@@ -459,6 +466,8 @@ export class FirestoreServiceNode implements FirestoreService {
       width: data.width,
       height: data.height,
       bytes: data.bytes,
+      ...(typeof data.previewBytes === 'number' ? { previewBytes: data.previewBytes } : {}),
+      ...(typeof data.agentBytes === 'number' ? { agentBytes: data.agentBytes } : {}),
       sha256: data.sha256,
       scale: data.scale,
       os: data.os,

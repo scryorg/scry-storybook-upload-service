@@ -22,6 +22,8 @@ const data = {
   width: 1200,
   height: 800,
   bytes: 600,
+  previewBytes: 300,
+  agentBytes: 200,
   sha256: 'a'.repeat(64),
   scale: 2,
   os: 'mac' as const,
@@ -90,17 +92,39 @@ describe('FirestoreServiceWorker captures', () => {
     const doc = { fields: { captureId: { stringValue: ID }, status: { stringValue: 'pending' }, capturedByUid: { stringValue: 'uid-ada' } } };
     vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => { calls.push({ url, init }); return json(200, doc); }));
     const ready = await createSvc().markCaptureReady('proj1', ID);
-    expect(ready.status).toBe('ready');
-    expect(ready.receivedAt).toBeInstanceOf(Date);
+    expect(ready?.status).toBe('ready');
+    expect(ready?.receivedAt).toBeInstanceOf(Date);
     const patch = calls.find((c) => c.init?.method === 'PATCH')!;
+    expect(patch.url).toContain('currentDocument.exists=true');
     expect(patch.url).toContain('updateMask.fieldPaths=status');
     expect(patch.url).toContain('updateMask.fieldPaths=receivedAt');
     expect(Object.keys(JSON.parse(String(patch.init?.body)).fields).sort()).toEqual(['receivedAt', 'status']);
   });
 
-  it('markCaptureReady throws when the capture is gone', async () => {
+  it('markCaptureReady returns null when the capture is gone', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => json(404)));
-    await expect(createSvc().markCaptureReady('proj1', ID)).rejects.toThrow('Capture not found');
+    expect(await createSvc().markCaptureReady('proj1', ID)).toBeNull();
+  });
+
+  it.each([[404, '{"error":{"status":"NOT_FOUND"}}'], [400, '{"error":{"status":"FAILED_PRECONDITION"}}']])(
+    'markCaptureReady does not recreate a document deleted after the read (PATCH answers %i): null, no second write',
+    async (status, body) => {
+      const doc = { fields: { captureId: { stringValue: ID }, status: { stringValue: 'pending' }, capturedByUid: { stringValue: 'uid-ada' } } };
+      const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => (init?.method === 'PATCH' ? { ...json(status), text: async () => body } : json(200, doc)));
+      vi.stubGlobal('fetch', fetchMock);
+      expect(await createSvc().markCaptureReady('proj1', ID)).toBeNull();
+      expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'PATCH')).toHaveLength(1);
+    }
+  );
+
+  it('previewBytes and agentBytes are stored and read back', async () => {
+    const calls: Array<{ init?: RequestInit }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => { calls.push({ init }); return json(200); }));
+    const { capture } = await createSvc().createCaptureIfAbsent('proj1', data);
+    expect(capture).toMatchObject({ previewBytes: 300, agentBytes: 200 });
+    const fields = JSON.parse(String(calls[0].init?.body)).fields;
+    expect(fields.previewBytes).toEqual({ integerValue: '300' });
+    expect(fields.agentBytes).toEqual({ integerValue: '200' });
   });
 
   it('incrementCaptureCounter sends one atomic increment transform and returns the new count', async () => {

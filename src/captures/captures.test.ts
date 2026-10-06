@@ -19,7 +19,7 @@ vi.mock('@sentry/cloudflare', () => ({
 }));
 
 import { ALLOWED_KEYS } from '../lib/scry-log/schema.js';
-import { PRESIGNS_PER_DAY, PRESIGNS_PER_MINUTE } from './rate-limit.js';
+import { COMPLETES_PER_MINUTE, PRESIGNS_PER_DAY, PRESIGNS_PER_MINUTE } from './rate-limit.js';
 import {
   CAPTURE_ID,
   CAPTURE_ID_2,
@@ -67,7 +67,7 @@ async function record(name: string, path: string, requestBody: unknown, res: Res
 function redactUrl(u: string): string {
   // Keep the host, path and every parameter name; replace the values that vary per request.
   const url = new URL(u);
-  const placeholder: Record<string, string> = { 'X-Amz-Credential': '<credential>', 'X-Amz-Date': '<date>', 'X-Amz-Signature': '<signature>', 'x-amz-checksum-crc32': '<crc32>' };
+  const placeholder: Record<string, string> = { 'X-Amz-Credential': '<credential>', 'X-Amz-Date': '<date>', 'X-Amz-Signature': '<signature>' };
   for (const [name, value] of Object.entries(placeholder)) url.searchParams.set(name, value);
   return url.toString();
 }
@@ -132,6 +132,42 @@ describe('presign', () => {
     await record('presign-200-created', presignPath, presignBody(PNG, { note: 'the spacing is off' }), res, ['retry-after']);
   });
 
+  it('the three PUT URLs sign content-type and content-length, expire in 15 minutes and carry no checksum params', async () => {
+    const env = setup();
+    const { json } = await presign(env);
+    const expected = { original: PNG.byteLength, preview: JPEG.byteLength, agent: WEBP.byteLength };
+    for (const field of ['original', 'preview', 'agent'] as const) {
+      const url = new URL(json.uploads[field].url);
+      expect(url.searchParams.get('X-Amz-SignedHeaders')).toBe('content-length;content-type;host');
+      expect(url.searchParams.get('X-Amz-Expires')).toBe('900');
+      expect([...url.searchParams.keys()].filter((k) => /checksum/i.test(k))).toEqual([]);
+      // the signature covers the exact length: the same URL for a different declared size differs
+      expect(expected[field]).toBeGreaterThan(0);
+    }
+    // R2 enforces the signed headers, so a different declared size gives a different signature for the same key
+    const other = setup();
+    const { json: json2 } = await presign(other, { previewBytes: JPEG.byteLength + 1 });
+    expect(new URL(json2.uploads.preview.url).searchParams.get('X-Amz-Signature')).not.toBe(new URL(json.uploads.preview.url).searchParams.get('X-Amz-Signature'));
+  });
+
+  it('the SCF bundle presign is unchanged: host-only signed headers and the 1 h expiry', async () => {
+    const { storage } = setup();
+    const url = new URL((await storage.getPresignedUploadUrl(`${PROJECT}/v1/storybook.zip`, 'application/zip')).url);
+    expect(url.searchParams.get('X-Amz-SignedHeaders')).toBe('host');
+    expect(url.searchParams.get('X-Amz-Expires')).toBe('3600');
+  });
+
+  it('413 when a preview or agent size is over its cap, before anything is written', async () => {
+    const env = setup();
+    for (const override of [{ previewBytes: 2 * 1024 * 1024 + 1 }, { agentBytes: 512 * 1024 + 1 }]) {
+      const { res, json } = await presign(env, override);
+      expect(res.status).toBe(413);
+      expect(json.error).toBe('too_large');
+    }
+    expect(env.firestore.captures.size).toBe(0);
+    expect((await presign(env, { previewBytes: 0 })).res.status).toBe(400);
+  });
+
   it('idempotency: the same captureId returns the same document with fresh URLs, never a second doc', async () => {
     const env = setup();
     const first = await presign(env);
@@ -162,6 +198,7 @@ describe('presign', () => {
     await presign(env);
     const other = await presign(env, { width: 999 });
     expect(other.res.status).toBe(409);
+    expect((await presign(env, { previewBytes: JPEG.byteLength + 1 })).res.status).toBe(409);
     expect(other.json.error).toBe('id_conflict');
     const stranger = await presign(env, {}, PNG, SECOND_DEVICE_KEY);
     expect(stranger.res.status).toBe(409);
@@ -257,6 +294,40 @@ describe('complete', () => {
     await record('complete-415-not-an-image', completePath, { captureId: CAPTURE_ID }, await complete(env));
   });
 
+  it('415 when an object was stored with a Content-Type other than its rendition\'s; the objects are removed', async () => {
+    for (const wrong of ['text/html', 'image/gif', undefined]) {
+      for (const field of ['original', 'preview', 'agent'] as const) {
+        const env = setup();
+        const { json } = await presign(env);
+        await putAll(env, json);
+        const put = { original: PNG, preview: JPEG, agent: WEBP }[field];
+        await env.bucket.put(json.uploads[field].key, put, wrong);
+        const res = await complete(env);
+        expect(res.status, `${field} as ${wrong}`).toBe(415);
+        expect(((await res.clone().json()) as { error: string }).error).toBe('not_an_image');
+        expect(env.bucket.objects.size).toBe(0);
+      }
+    }
+    // a parameter after the media type is still the same type
+    const env = setup();
+    const { json } = await presign(env);
+    await putAll(env, json);
+    await env.bucket.put(json.uploads.preview.key, JPEG, 'Image/JPEG; q=1');
+    expect((await complete(env)).status).toBe(200);
+  });
+
+  it('422 when the preview or agent differs in size from what was declared; the objects are removed', async () => {
+    for (const override of [{ previewBytes: JPEG.byteLength + 1 }, { agentBytes: WEBP.byteLength - 1 }]) {
+      const env = setup();
+      const { json } = await presign(env, override);
+      await putAll(env, json);
+      const res = await complete(env);
+      expect(res.status).toBe(422);
+      expect(((await res.clone().json()) as { error: string }).error).toBe('size_mismatch');
+      expect(env.bucket.objects.size).toBe(0);
+    }
+  });
+
   it('422 when the declared size, dimensions or sha256 do not match the upload', async () => {
     const cases: Array<[string, Record<string, unknown>]> = [
       ['size_mismatch', { bytes: 601 }],
@@ -283,6 +354,16 @@ describe('complete', () => {
     expect((await complete(env)).status).toBe(422);
   });
 
+  it('404 when the capture document is deleted between verification and marking ready (never recreated)', async () => {
+    const env = setup();
+    const { json } = await presign(env);
+    await putAll(env, json);
+    env.firestore.markCaptureReady = async () => null;
+    const res = await complete(env);
+    expect(res.status).toBe(404);
+    expect(((await res.clone().json()) as { error: string }).error).toBe('not_found');
+  });
+
   it('404 for an unknown capture and for another person\'s capture; 400 for a bad body', async () => {
     const env = setup();
     await presign(env);
@@ -299,8 +380,51 @@ describe('complete', () => {
   });
 });
 
+describe('concurrency', () => {
+  it('two simultaneous presigns of one captureId: exactly one document and one created:true', async () => {
+    const env = setup();
+    const results = await Promise.all([presign(env), presign(env), presign(env)]);
+    expect(results.every((r) => r.res.status === 200)).toBe(true);
+    expect(results.filter((r) => r.json.created)).toHaveLength(1);
+    expect(env.firestore.captures.size).toBe(1);
+    expect(new Set(results.map((r) => r.json.uploads.original.key)).size).toBe(1);
+  });
+
+  it('two simultaneous presigns by different owners: one wins, the other is 409', async () => {
+    const env = setup();
+    const results = await Promise.all([presign(env), presign(env, {}, PNG, SECOND_DEVICE_KEY)]);
+    expect(results.map((r) => r.res.status).sort()).toEqual([200, 409]);
+    expect(env.firestore.captures.size).toBe(1);
+  });
+
+  it('two simultaneous completes both end ready', async () => {
+    const env = setup();
+    const { json } = await presign(env);
+    await putAll(env, json);
+    const results = await Promise.all([complete(env), complete(env)]);
+    expect(results.map((r) => r.status)).toEqual([200, 200]);
+    expect((await env.firestore.getCapture(PROJECT, CAPTURE_ID))?.status).toBe('ready');
+  });
+});
+
 describe('rate limits', () => {
   const minute = Math.floor(NOW.getTime() / 60_000);
+
+  it('60 completes per minute per key: the 61st is 429 with Retry-After, on its own counter', async () => {
+    const env = setup();
+    env.firestore.counters.set(`${PROJECT}/deviceKey1_c_${minute}`, COMPLETES_PER_MINUTE);
+    const res = await complete(env);
+    expect(res.status).toBe(429);
+    expect(((await res.clone().json()) as { error: string }).error).toBe('rate_limited');
+    expect(res.headers.get('retry-after')).toBe('40');
+    // the presign budget is separate and untouched
+    expect((await presign(env)).res.status).toBe(200);
+    // another key is not affected, and the window moves on
+    expect((await complete(env, SECOND_DEVICE_KEY)).status).toBe(404);
+    vi.setSystemTime(new Date(NOW.getTime() + 60_000));
+    expect((await complete(env)).status).not.toBe(429);
+    await record('complete-429-rate-limited', completePath, { captureId: CAPTURE_ID }, res, ['retry-after']);
+  });
 
   it('30 presigns per minute per key: the 31st is 429 with Retry-After to the end of the minute', async () => {
     const env = setup();
@@ -373,6 +497,28 @@ describe('guarantee-4-capture-upload-keys', () => {
       expect(res.status).toBe(403);
     }
     expect(env.firestore.captures.size).toBe(0);
+  });
+
+  it('a key whose project id has an unexpected shape is refused before any lookup or R2 key is built', async () => {
+    const { OpenAPIHono } = await import('@hono/zod-openapi');
+    const { registerCaptures } = await import('./captures.js');
+    const env = setup();
+    for (const projectId of ['a/b', '../x', '', 'p'.repeat(129)]) {
+      const app = new OpenAPIHono<any>(); // eslint-disable-line @typescript-eslint/no-explicit-any
+      app.use('*', async (c, next) => {
+        c.set('storage', env.storage);
+        c.set('firestore', env.firestore);
+        c.set('authenticatedApiKey', { id: 'deviceKey1', projectId, kind: 'device', createdBy: 'uid-ada' });
+        await next();
+      });
+      registerCaptures(app);
+      for (const [path, body] of [['presign', presignBody(PNG)], ['complete', { captureId: CAPTURE_ID }]] as const) {
+        const res = await app.request(`/captures/x/${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        expect(res.status, `${projectId} ${path}`).toBe(403);
+      }
+    }
+    expect(env.firestore.captures.size).toBe(0);
+    expect(env.firestore.counters.size).toBe(0);
   });
 
   it('a device key reaches only its own captures: another owner\'s capture answers 404', async () => {

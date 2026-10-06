@@ -19,6 +19,14 @@ export interface UploadResult {
 /**
  * Metadata returned by a HEAD check, without downloading the object body.
  */
+export interface CapturePresignOptions {
+  contentType: string;
+  /** Exact body length the PUT must carry. */
+  contentLength: number;
+  /** Seconds the URL stays valid. */
+  expiresIn: number;
+}
+
 export interface StorageObjectMeta {
   size: number;
   contentType?: string;
@@ -60,6 +68,15 @@ export interface StorageService {
    * @returns A promise that resolves to an object containing the upload URL and the final key.
    */
   getPresignedUploadUrl(key: string, contentType: string): Promise<{ url: string; key: string }>;
+
+  /**
+   * Presigned PUT for a Scry Snip capture rendition (feature snip-capture). Stricter than
+   * `getPresignedUploadUrl`: `content-type` and `content-length` are SIGNED, so R2 refuses a PUT whose
+   * type or length differs, the URL is short-lived, and it carries no `x-amz-checksum-*` query
+   * parameters (the SDK default would add the CRC32 of an empty body). The SCF bundle presign above
+   * is deliberately unchanged.
+   */
+  getPresignedCaptureUploadUrl(key: string, opts: CapturePresignOptions): Promise<{ url: string; key: string }>;
 
   /**
    * HEADs an object: its size and content type, without downloading the body.

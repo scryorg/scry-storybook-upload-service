@@ -40,6 +40,11 @@ export class MockStorageService implements StorageService {
     };
   }
 
+  async getPresignedCaptureUploadUrl(key: string, opts: { contentType: string; contentLength: number; expiresIn: number }): Promise<{ url: string; key: string }> {
+    const url = `https://test-bucket.s3.amazonaws.com/${key}?X-Amz-SignedHeaders=content-length%3Bcontent-type%3Bhost&X-Amz-Expires=${opts.expiresIn}&X-Amz-Signature=test`;
+    return { url, key };
+  }
+
   async head(key: string): Promise<StorageObjectMeta | null> {
     const object = this.objects.get(key);
     if (!object) return null;
