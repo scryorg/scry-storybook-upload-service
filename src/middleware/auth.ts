@@ -78,6 +78,8 @@ export interface AuthVariables {
      * restricted class (see `isRestrictedKeyKind`); absent only for a key minted before scry-sync.
      */
     kind?: string;
+    /** User id of the person who minted the key (the device sign-in's user); '' when the key document has none. */
+    createdBy?: string;
   };
 }
 
@@ -127,6 +129,10 @@ export function isRestrictedKeyKind(kind: string | undefined): boolean {
 const DEVICE_KEY_ROUTES: ReadonlyArray<{ method: string; path: RegExp }> = [
   { method: 'POST', path: /^\/presigned-url\/[^/]+\/[^/]+\/bundle\.zip$/ },
   { method: 'POST', path: /^\/upload\/[^/]+\/[^/]+\/bundle\/complete$/ },
+  // snip-capture: a Scry Snip picture is presigned and completed on its own pair of routes (a capture
+  // is never a build, G3). These two are the only additions; every other route stays refused.
+  { method: 'POST', path: /^\/captures\/[^/]+\/presign$/ },
+  { method: 'POST', path: /^\/captures\/[^/]+\/complete$/ },
 ];
 
 export function deviceKeyMayUse(method: string, path: string): boolean {
@@ -153,7 +159,7 @@ function logAuth(
  * the raw path or c.req.param: a client-chosen path segment must not reach the log store
  * (guarantee G1, UAT F47, same class as the CDN F41).
  */
-const VERIFIED_PROJECT = /^[A-Za-z0-9_-]{1,128}$/;
+export const VERIFIED_PROJECT = /^[A-Za-z0-9_-]{1,128}$/;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function markVerifiedProject(c: Context<any>, projectId: string): void {
   if (VERIFIED_PROJECT.test(projectId)) c.set('projectId', projectId);
@@ -282,6 +288,7 @@ export function apiKeyAuth(options: ApiKeyAuthOptions = {}) {
       prefix: result.apiKey!.prefix,
       projectId,
       keyProjectId,
+      createdBy: result.apiKey!.createdBy,
       ...(keyKind !== undefined ? { kind: keyKind } : {}),
     });
 

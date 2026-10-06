@@ -10,6 +10,8 @@ import type {
   UpdateBuildData,
   Upload,
   CreateUploadData,
+  Capture,
+  CreateCaptureData,
 } from './firestore.types.js';
 import type { StepSummaryUpdate } from '../../lib/build-steps.js';
 
@@ -383,6 +385,102 @@ export class FirestoreServiceNode implements FirestoreService {
   ): Promise<void> {
     const ref = this.db.doc(`projects/${projectId}/uploads/${uploadId}`);
     await ref.delete();
+  }
+
+  // ============= SNIP CAPTURES (feature snip-capture) =============
+
+  async createCaptureIfAbsent(
+    projectId: string,
+    data: CreateCaptureData
+  ): Promise<{ capture: Capture; created: boolean }> {
+    const ref = this.db.doc(`projects/${projectId}/captures/${data.captureId}`);
+    const capture: Capture = {
+      captureId: data.captureId,
+      capturedByUid: data.capturedByUid,
+      deviceId: data.deviceId,
+      status: 'pending',
+      width: data.width,
+      height: data.height,
+      bytes: data.bytes,
+      previewBytes: data.previewBytes,
+      agentBytes: data.agentBytes,
+      sha256: data.sha256,
+      scale: data.scale,
+      os: data.os,
+      mode: data.mode,
+      sendMode: data.sendMode,
+      ...(data.note ? { note: data.note } : {}),
+      sharedWith: [],
+      sharedWithOrgIds: [],
+      sharedWithProject: false,
+      createdAt: new Date(),
+      expiresAt: data.expiresAt,
+    };
+    try {
+      await ref.create(capture);
+      return { capture, created: true };
+    } catch (error) {
+      if ((error as { code?: number }).code !== 6) throw error; // 6 = ALREADY_EXISTS
+    }
+    const snap = await ref.get();
+    if (!snap.exists) throw new Error('Capture vanished after an exists conflict');
+    return { capture: this.convertDocToCapture(snap.id, snap.data()!), created: false };
+  }
+
+  async getCapture(projectId: string, captureId: string): Promise<Capture | null> {
+    const snap = await this.db.doc(`projects/${projectId}/captures/${captureId}`).get();
+    return snap.exists ? this.convertDocToCapture(snap.id, snap.data()!) : null;
+  }
+
+  async markCaptureReady(projectId: string, captureId: string): Promise<Capture | null> {
+    const ref = this.db.doc(`projects/${projectId}/captures/${captureId}`);
+    const snap = await ref.get();
+    if (!snap.exists) return null;
+    const receivedAt = new Date();
+    try {
+      await ref.update({ status: 'ready', receivedAt }); // update() fails on a missing document, never recreates it
+    } catch (error) {
+      if ((error as { code?: number }).code === 5) return null; // 5 = NOT_FOUND: deleted since the read
+      throw error;
+    }
+    return { ...this.convertDocToCapture(snap.id, snap.data()!), status: 'ready', receivedAt };
+  }
+
+  async incrementCaptureCounter(projectId: string, counterId: string, expireAt: Date): Promise<number> {
+    const ref = this.db.doc(`projects/${projectId}/captureLimits/${counterId}`);
+    return this.db.runTransaction(async (transaction) => {
+      const snap = await transaction.get(ref);
+      const next = (snap.exists ? Number(snap.data()!.count) || 0 : 0) + 1;
+      transaction.set(ref, { count: next, expireAt });
+      return next;
+    });
+  }
+
+  private convertDocToCapture(id: string, data: DocumentData): Capture {
+    const date = (v: unknown): Date => (v && typeof (v as { toDate?: unknown }).toDate === 'function' ? (v as { toDate(): Date }).toDate() : new Date(v as string | number | Date));
+    return {
+      captureId: id,
+      capturedByUid: data.capturedByUid || '',
+      deviceId: data.deviceId || '',
+      status: data.status === 'ready' ? 'ready' : 'pending',
+      width: data.width,
+      height: data.height,
+      bytes: data.bytes,
+      ...(typeof data.previewBytes === 'number' ? { previewBytes: data.previewBytes } : {}),
+      ...(typeof data.agentBytes === 'number' ? { agentBytes: data.agentBytes } : {}),
+      sha256: data.sha256,
+      scale: data.scale,
+      os: data.os,
+      mode: data.mode,
+      sendMode: data.sendMode,
+      ...(data.note ? { note: data.note } : {}),
+      sharedWith: data.sharedWith ?? [],
+      sharedWithOrgIds: data.sharedWithOrgIds ?? [],
+      sharedWithProject: data.sharedWithProject === true,
+      createdAt: date(data.createdAt),
+      ...(data.receivedAt ? { receivedAt: date(data.receivedAt) } : {}),
+      expiresAt: date(data.expiresAt),
+    };
   }
 
   private convertDocToUpload(id: string, data: DocumentData): Upload {

@@ -440,3 +440,52 @@ export interface UpdateBuildData {
    */
   stepSummary?: StepSummaryUpdate;
 }
+
+// ============= SNIP CAPTURES (feature snip-capture) =============
+
+/** Lifecycle of a capture document: `pending` after presign, `ready` once `complete` verified the objects. */
+export type CaptureStatus = 'pending' | 'ready';
+export type CaptureOs = 'mac' | 'win';
+export type CaptureMode = 'region' | 'window' | 'screen';
+export type CaptureSendMode = 'review' | 'auto';
+
+/**
+ * `projects/{p}/captures/{captureId}`. A capture is NOT a build (guarantee G3): no build row, no
+ * story, no Milvus entry. `appName` is never written by this service (the person's opt-in is a
+ * later slice); `note` is stored and never logged (G6).
+ */
+export interface Capture {
+  captureId: string;
+  /** Owner of the device key that presigned it. Powers "my latest" and the owner-only rules. */
+  capturedByUid: string;
+  /** The key document id (never the key or its hash). */
+  deviceId: string;
+  status: CaptureStatus;
+  width: number;
+  height: number;
+  bytes: number;
+  /** Declared size of the preview / agent renditions (signed into their PUT URLs). Absent on documents written before the signed-length change. */
+  previewBytes?: number;
+  agentBytes?: number;
+  sha256: string;
+  scale: number;
+  os: CaptureOs;
+  mode: CaptureMode;
+  sendMode: CaptureSendMode;
+  note?: string;
+  sharedWith: string[];
+  sharedWithOrgIds: string[];
+  sharedWithProject: boolean;
+  /** Server time the pending doc was created. */
+  createdAt: Date;
+  /** Server time `complete` verified the objects; used for "latest". Absent while pending. */
+  receivedAt?: Date;
+  /** createdAt + 30 days. */
+  expiresAt: Date;
+}
+
+/** What presign supplies; the service adds status, sharing defaults and the timestamps. */
+export type CreateCaptureData = Pick<
+  Capture,
+  'captureId' | 'capturedByUid' | 'deviceId' | 'width' | 'height' | 'bytes' | 'sha256' | 'scale' | 'os' | 'mode' | 'sendMode'
+> & { previewBytes: number; agentBytes: number; note?: string; expiresAt: Date };
