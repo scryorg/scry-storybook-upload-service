@@ -91,6 +91,7 @@ Reason codes (closed list `BUILD_STEP_REASONS`, the same list in both repos; the
 | `stories_dropped` | stories the archive declared were not captured |
 | `stories_failed` | stories inside a chunk that ran produced no row |
 | `content_policy` | every failed story was refused by the model provider's content policy |
+| `inspect_refusal_storm` | the provider refused at least 10 stories and more than 25% of those inspected so far in the build; the build was stopped and ends `failed` |
 | `chunks_missing` | chunks never ran (circuit breaker or terminated instance) |
 | `stalled_no_story` | stalled before the story count was known |
 | `stalled_no_heartbeat` | stalled with no stage progress ever recorded |
