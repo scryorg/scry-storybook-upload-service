@@ -54,6 +54,8 @@ export const BUILD_STEP_REASONS = [
   'empty_archive', // the archive listed no stories
   'stories_dropped', // the archive declared stories that were not captured
   'stories_failed', // stories inside a chunk that ran produced no row
+  'content_policy', // every failed story was refused by the model provider's content policy
+  'inspect_refusal_storm', // the provider refused too large a share of the build's stories; the build was stopped
   'chunks_missing', // chunks never ran (circuit breaker or terminated instance)
   'stalled_no_story', // stalled before the story count was known
   'stalled_no_heartbeat', // stalled with no stage progress ever recorded
@@ -88,6 +90,8 @@ interface FailureFacts {
 
 /** First match wins, so the order is the precedence. */
 const REASON_RULES: ReadonlyArray<readonly [BuildStepReason, (f: FailureFacts) => boolean]> = [
+  ['inspect_refusal_storm', (f) => /inspect_refusal_storm|RefusalStormError/.test(f.text)],
+  ['content_policy', (f) => /ContentPolicyError|content_policy/.test(f.text)],
   ['http_429', (f) => f.status === 429 || /\b429\b|rate.?limit/i.test(f.text)],
   ['credits_unavailable', (f) => /CreditsUnavailable/i.test(f.text)],
   ['credits_exhausted', (f) => /insufficient credits|credits? (?:exhausted|insufficient)|out of credits|credits_exhausted/i.test(f.text)],

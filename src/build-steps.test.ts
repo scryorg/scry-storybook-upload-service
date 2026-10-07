@@ -235,6 +235,27 @@ describe('guarantee-3-no-pii-in-events', () => {
     }
   });
 
+  it('F80: content_policy is a member of the closed list, survives emitBuildStep, and is named before the generic 4xx', () => {
+    expect(BUILD_STEP_REASONS).toContain('content_policy');
+    expect(isReasonCode('content_policy')).toBe(true);
+    emitBuildStep(undefined, { step: 'enqueue', outcome: 'fail', buildId: 'build-100', reason: 'content_policy' });
+    expect(steps().map((l) => l.reason)).toEqual(['content_policy']);
+    expect(classifyReason('content_policy')).toBe('content_policy');
+    expect(classifyReason(Object.assign(new Error('OpenAI API error 403: content_policy (the provider rejected the input)'), { status: 403 }))).toBe('content_policy');
+    expect(classifyReason(Object.assign(new Error('Forbidden'), { status: 403 }))).toBe('http_4xx');
+  });
+
+  it('F88: inspect_refusal_storm is in the closed list, survives emitBuildStep, and wins over content_policy in the classifier', () => {
+    expect(BUILD_STEP_REASONS).toContain('inspect_refusal_storm');
+    expect(BUILD_STEP_REASONS).toHaveLength(23);
+    expect(isReasonCode('inspect_refusal_storm')).toBe(true);
+    emitBuildStep(undefined, { step: 'enqueue', outcome: 'fail', buildId: 'build-100', reason: 'inspect_refusal_storm' });
+    expect(steps().map((l) => l.reason)).toEqual(['inspect_refusal_storm']);
+    expect(classifyReason('inspect_refusal_storm')).toBe('inspect_refusal_storm');
+    expect(classifyReason('RefusalStormError: inspect_refusal_storm: 12 of 30 stories refused by the provider')).toBe('inspect_refusal_storm');
+    expect(classifyReason('OpenAI API error 403: content_policy (the provider rejected the input)')).toBe('content_policy');
+  });
+
   it('an email in a header or in the error text never reaches a build.step line', async () => {
     const queue: Queue = {
       send: vi.fn(async () => {
