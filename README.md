@@ -90,6 +90,7 @@ Reason codes (closed list `BUILD_STEP_REASONS`, the same list in both repos; the
 | `empty_archive` | the archive listed no stories |
 | `stories_dropped` | stories the archive declared were not captured |
 | `stories_failed` | stories inside a chunk that ran produced no row |
+| `content_policy` | every failed story was refused by the model provider's content policy |
 | `chunks_missing` | chunks never ran (circuit breaker or terminated instance) |
 | `stalled_no_story` | stalled before the story count was known |
 | `stalled_no_heartbeat` | stalled with no stage progress ever recorded |

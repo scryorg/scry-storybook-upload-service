@@ -235,6 +235,17 @@ describe('guarantee-3-no-pii-in-events', () => {
     }
   });
 
+  it('F80: content_policy is a member of the closed list, survives emitBuildStep, and is named before the generic 4xx', () => {
+    expect(BUILD_STEP_REASONS).toContain('content_policy');
+    expect(BUILD_STEP_REASONS).toHaveLength(22);
+    expect(isReasonCode('content_policy')).toBe(true);
+    emitBuildStep(undefined, { step: 'enqueue', outcome: 'fail', buildId: 'build-100', reason: 'content_policy' });
+    expect(steps().map((l) => l.reason)).toEqual(['content_policy']);
+    expect(classifyReason('content_policy')).toBe('content_policy');
+    expect(classifyReason(Object.assign(new Error('OpenAI API error 403: content_policy (the provider rejected the input)'), { status: 403 }))).toBe('content_policy');
+    expect(classifyReason(Object.assign(new Error('Forbidden'), { status: 403 }))).toBe('http_4xx');
+  });
+
   it('an email in a header or in the error text never reaches a build.step line', async () => {
     const queue: Queue = {
       send: vi.fn(async () => {
