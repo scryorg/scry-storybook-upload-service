@@ -1,4 +1,4 @@
-import { log, reqFields, reportError } from '../lib/log.js';
+import { log, reqFields, reportError, logWarn } from '../lib/log.js';
 import { Context, Next } from 'hono';
 import type { ApiKeyService } from '../services/apikey/apikey.service.js';
 import { extractProjectIdFromKey } from '../services/apikey/apikey.utils.js';
@@ -311,14 +311,39 @@ export function apiKeyAuth(options: ApiKeyAuthOptions = {}) {
 
     // Update lastUsedAt timestamp (fire-and-forget to avoid latency)
     if (config.trackUsage && result.apiKey) {
-      apiKeyService.updateLastUsed(projectId, result.apiKey.id).catch(() => {
-        log.warn('could not update key last used', reqFields(c as never, { err_code: 'apikey_touch_failed' }));
+      apiKeyService.updateLastUsed(projectId, result.apiKey.id).catch((touchError: unknown) => {
+        reportKeyTouchFailure(c as never, touchError);
       });
     }
 
     // Continue to the next handler
     return next();
   };
+}
+
+/** Sentry gets at most one `apikey_touch_failed` per isolate per window; the log line is per failure. */
+export const TOUCH_REPORT_WINDOW_MS = 10 * 60 * 1000;
+let lastTouchReportAt: number | undefined;
+
+/** Test hook: forget when the last touch failure was sent to Sentry. */
+export function resetKeyTouchReportGate(): void {
+  lastTouchReportAt = undefined;
+}
+
+/**
+ * The key `lastUsedAt` touch is fire-and-forget on every authenticated request, so a persistent
+ * failure would send one Sentry event per request. Log every failure; report to Sentry once per window.
+ * `now` is injectable so tests need no real waiting.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function reportKeyTouchFailure(c: Context<any> | undefined, err: unknown, now: () => number = Date.now): void {
+  const t = now();
+  if (lastTouchReportAt === undefined || t - lastTouchReportAt >= TOUCH_REPORT_WINDOW_MS) {
+    lastTouchReportAt = t;
+    reportError(c, err, 'could not update key last used', 'apikey_touch_failed');
+  } else {
+    logWarn(c, 'could not update key last used', 'apikey_touch_failed');
+  }
 }
 
 /**
