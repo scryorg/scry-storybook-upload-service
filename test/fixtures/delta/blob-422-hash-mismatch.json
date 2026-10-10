@@ -1,0 +1,19 @@
+{
+  "name": "blob-422-hash-mismatch",
+  "request": {
+    "method": "PUT",
+    "path": "/delta/<project>/blobs/<oid>?build=<buildId>",
+    "body": "<bytes that do not hash to the oid>"
+  },
+  "response": {
+    "status": 422,
+    "headers": {
+      "x-scry-request-id": "<request id>"
+    },
+    "body": {
+      "error": "hash_mismatch",
+      "message": "The bytes do not hash to the object id; nothing was stored",
+      "request_id": "<request id>"
+    }
+  }
+}

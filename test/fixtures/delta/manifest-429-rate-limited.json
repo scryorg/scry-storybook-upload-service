@@ -1,0 +1,20 @@
+{
+  "name": "manifest-429-rate-limited",
+  "request": {
+    "method": "POST",
+    "path": "/delta/<project>/manifest",
+    "body": "<manifest>"
+  },
+  "response": {
+    "status": 429,
+    "headers": {
+      "x-scry-request-id": "<request id>",
+      "retry-after": "60"
+    },
+    "body": {
+      "error": "rate_limited",
+      "message": "Too many delta calls from this key; retry after the time in Retry-After",
+      "request_id": "<request id>"
+    }
+  }
+}

@@ -12,7 +12,7 @@ import {
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { Upload } from '@aws-sdk/lib-storage';
 import { createCapturePresignClient, presignCapturePut } from './storage.capture-presign.js';
-import { StorageService, CapturePresignOptions, StorageObjectMeta, StorageObjectRange, UploadResult } from './storage.service.js';
+import { StorageService, CapturePresignOptions, StorageKeyPage, StorageObjectMeta, StorageObjectRange, UploadResult } from './storage.service.js';
 import { Readable } from 'stream';
 
 /** True for the S3/R2 "not found" errors both HeadObject and GetObject can throw. */
@@ -145,6 +145,36 @@ export class R2S3StorageService implements StorageService {
       if (isNotFoundError(error)) return null;
       throw error;
     }
+  }
+
+  /** Writes bytes with the S3 API; `sha256` becomes the checksum R2 verifies (sync-delta-upload G3). */
+  async putObject(key: string, bytes: Uint8Array, opts: { contentType: string; sha256?: string }): Promise<void> {
+    await this.s3.send(
+      new PutObjectCommand({
+        Bucket: this.bucketName,
+        Key: key,
+        Body: bytes,
+        ContentType: opts.contentType,
+        ...(opts.sha256 ? { ChecksumSHA256: Buffer.from(opts.sha256, 'hex').toString('base64') } : {}),
+      })
+    );
+  }
+
+  /** One page of a prefix listing via ListObjectsV2 (at most 1000 keys). */
+  async listKeys(prefix: string, opts: { cursor?: string; limit?: number; startAfter?: string } = {}): Promise<StorageKeyPage> {
+    const result = await this.s3.send(
+      new ListObjectsV2Command({
+        Bucket: this.bucketName,
+        Prefix: prefix,
+        ContinuationToken: opts.cursor,
+        ...(opts.startAfter && !opts.cursor ? { StartAfter: opts.startAfter } : {}),
+        MaxKeys: Math.min(opts.limit ?? 1000, 1000),
+      })
+    );
+    return {
+      keys: (result.Contents ?? []).map((o) => ({ key: o.Key ?? '', size: o.Size ?? 0, uploaded: o.LastModified ?? new Date() })),
+      ...(result.IsTruncated && result.NextContinuationToken ? { cursor: result.NextContinuationToken } : {}),
+    };
   }
 
   /**

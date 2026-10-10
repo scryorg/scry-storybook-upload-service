@@ -108,7 +108,7 @@ export interface OrphanSweepResult {
   /** A candidate this run deliberately left alone because it was no longer a genuine orphan by the
    *  time of the fresh re-check or the write — resolved elsewhere, or raced (ledger F92). Never an
    *  error: this is the sweep working as designed. */
-  skipped: Array<{ projectId: string; buildId: string; reason: 'resolved-before-write' | 'deleted-before-write' | 'precondition-failed' }>;
+  skipped: Array<{ projectId: string; buildId: string; reason: 'resolved-before-write' | 'deleted-before-write' | 'precondition-failed' | 'delta-open' }>;
   /** Builds (or the candidate query itself) whose read/write threw. Scanned/marked/skipped counts
    *  exclude these. */
   errors: Array<{ projectId?: string; buildId?: string; error: string }>;
@@ -208,6 +208,12 @@ export async function sweepOrphanBundleBuilds(
   for (const candidate of candidates) {
     // See the doc comment above — the store's query already enforces this; kept as a guard.
     if (!candidate.hasSource || candidate.hasProcessingStatus) continue;
+    // sync-delta-upload: a delta build stays open while pictures keep arriving; every accepted PUT pushes
+    // `deltaDeadline` out, so the sweep fails one only once that instant has passed (never 60 min after creation).
+    if (candidate.deltaDeadline && candidate.deltaDeadline.getTime() > now.getTime()) {
+      result.skipped.push({ projectId: candidate.projectId, buildId: candidate.buildId, reason: 'delta-open' });
+      continue;
+    }
     await resolveOrphanCandidate(store, candidate, result);
   }
 

@@ -1,0 +1,22 @@
+{
+  "name": "manifest-400-delta-pictures-only",
+  "request": {
+    "method": "POST",
+    "path": "/delta/<project>/manifest",
+    "body": "<a capture with structure>"
+  },
+  "response": {
+    "status": 400,
+    "headers": {
+      "x-scry-request-id": "<request id>"
+    },
+    "body": {
+      "error": "delta_pictures_only",
+      "message": "A delta build carries pictures only: remove structure and sourceText from the captures, or upload this build as a zip",
+      "captures": [
+        "pic-0"
+      ],
+      "request_id": "<request id>"
+    }
+  }
+}

@@ -142,6 +142,11 @@ const DEVICE_KEY_ROUTES: ReadonlyArray<{ method: string; path: RegExp }> = [
   // is never a build, G3). These two are the only additions; every other route stays refused.
   { method: 'POST', path: /^\/captures\/[^/]+\/presign$/ },
   { method: 'POST', path: /^\/captures\/[^/]+\/complete$/ },
+  // sync-delta-upload: the three delta routes (manifest, one blob PUT, commit). The source pin is applied
+  // by the route itself (src/delta/routes.ts) exactly as the zip routes apply it.
+  { method: 'POST', path: /^\/delta\/[^/]+\/manifest$/ },
+  { method: 'PUT', path: /^\/delta\/[^/]+\/blobs\/[^/]+$/ },
+  { method: 'POST', path: /^\/delta\/[^/]+\/builds\/[^/]+\/commit$/ },
 ];
 
 export function deviceKeyMayUse(method: string, path: string): boolean {

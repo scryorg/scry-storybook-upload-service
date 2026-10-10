@@ -1,0 +1,19 @@
+{
+  "name": "manifest-503-delta-disabled",
+  "request": {
+    "method": "POST",
+    "path": "/delta/<project>/manifest",
+    "body": "<manifest>"
+  },
+  "response": {
+    "status": 503,
+    "headers": {
+      "x-scry-request-id": "<request id>"
+    },
+    "body": {
+      "error": "delta_disabled",
+      "message": "Delta upload is not enabled; use the zip upload",
+      "request_id": "<request id>"
+    }
+  }
+}

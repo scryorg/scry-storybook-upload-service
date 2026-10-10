@@ -1,7 +1,7 @@
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createCapturePresignClient, presignCapturePut } from './storage.capture-presign.js';
-import { StorageService, CapturePresignOptions, StorageObjectMeta, StorageObjectRange, UploadResult } from './storage.service.js';
+import { StorageService, CapturePresignOptions, StorageKeyPage, StorageObjectMeta, StorageObjectRange, UploadResult } from './storage.service.js';
 
 // Define the shape of the configuration object, similar to the Node.js version.
 type R2Config = {
@@ -107,6 +107,26 @@ export class R2S3StorageService implements StorageService {
     const object = await this.bucket.get(key, { range: { offset: range.offset, length: range.length } });
     if (!object) return null;
     return new Uint8Array(await object.arrayBuffer());
+  }
+
+  /**
+   * Writes bytes through the native binding. R2 checks `sha256` itself and refuses a write whose
+   * content does not hash to it, so a mismatched blob is never stored (sync-delta-upload G3).
+   */
+  async putObject(key: string, bytes: Uint8Array, opts: { contentType: string; sha256?: string }): Promise<void> {
+    await this.bucket.put(key, bytes, {
+      httpMetadata: { contentType: opts.contentType },
+      ...(opts.sha256 ? { sha256: opts.sha256 } : {}),
+    });
+  }
+
+  /** One page of a prefix listing via the native binding (at most 1000 keys). */
+  async listKeys(prefix: string, opts: { cursor?: string; limit?: number; startAfter?: string } = {}): Promise<StorageKeyPage> {
+    const list = await this.bucket.list({ prefix, cursor: opts.cursor, ...(opts.startAfter && !opts.cursor ? { startAfter: opts.startAfter } : {}), limit: Math.min(opts.limit ?? 1000, 1000) });
+    return {
+      keys: list.objects.map((o) => ({ key: o.key, size: o.size, uploaded: o.uploaded })),
+      ...(list.truncated && list.cursor ? { cursor: list.cursor } : {}),
+    };
   }
 
   /**

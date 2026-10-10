@@ -35,6 +35,7 @@ const MCP: ReadonlyArray<Service> = ['mcp'];
 const SEARCH: ReadonlyArray<Service> = ['search'];
 const BUILD: ReadonlyArray<Service> = ['build'];
 const LOGS: ReadonlyArray<Service> = ['logs'];
+const UPLOAD: ReadonlyArray<Service> = ['upload'];
 
 export const ATTRS: Readonly<Record<string, AttrDef>> = {
   // --- mcp (feature mcp-analytics): one mcp_tool_call line per tool call; see scry-mcp src/analytics/event.ts ---
@@ -81,4 +82,8 @@ export const ATTRS: Readonly<Record<string, AttrDef>> = {
   'thumb.p50_kb_in': { type: 'int', services: BUILD, description: 'Backfill: median original size in KB for the batch or run' },
   'thumb.p50_kb_out': { type: 'int', services: BUILD, description: 'Backfill: median thumbnail size in KB for the batch or run' },
   'thumb.log_post_fail': { type: 'int', services: BUILD, description: 'Backfill: log requests that failed so far (the run continues)' },
+  // --- upload (feature sync-delta-upload): the `delta manifest` / `delta blob` / `delta commit` lines; counts only, never a name, hash or path ---
+  'delta.bytes': { type: 'int', services: UPLOAD, description: 'Delta upload: bytes of the pictures the call asked for (manifest), stored (blob PUT) or referenced (commit)' },
+  'delta.items': { type: 'int', services: UPLOAD, description: 'Delta upload: pictures in the list (manifest, commit) or 1 (blob PUT)' },
+  'delta.items_skipped': { type: 'int', services: UPLOAD, description: 'Delta upload: pictures already held, so not asked for (manifest), or dropped with a per-picture error' },
 };

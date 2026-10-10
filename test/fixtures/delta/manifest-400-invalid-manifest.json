@@ -1,0 +1,30 @@
+{
+  "name": "manifest-400-invalid-manifest",
+  "request": {
+    "method": "POST",
+    "path": "/delta/<project>/manifest",
+    "headers": {
+      "Idempotency-Key": "invalid-manifest-1"
+    },
+    "body": "<a picture with no entry>"
+  },
+  "response": {
+    "status": 400,
+    "headers": {
+      "x-scry-request-id": "<request id>"
+    },
+    "body": {
+      "error": "invalid_manifest",
+      "message": "The manifest is not a valid SCF bundle",
+      "errors": [
+        {
+          "code": "IMAGE_FILE_MISSING",
+          "id": "pic-1",
+          "path": "images/pic-2.png",
+          "message": "Image file not found in bundle: images/pic-2.png"
+        }
+      ],
+      "request_id": "<request id>"
+    }
+  }
+}

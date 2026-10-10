@@ -1,4 +1,5 @@
-import { StorageService, StorageObjectMeta, StorageObjectRange, UploadResult } from './storage.service.js';
+import { createHash } from 'node:crypto';
+import { StorageService, StorageKeyPage, StorageObjectMeta, StorageObjectRange, UploadResult } from './storage.service.js';
 
 /**
  * A mock StorageService implementation for testing that returns
@@ -10,7 +11,7 @@ import { StorageService, StorageObjectMeta, StorageObjectRange, UploadResult } f
  */
 export class MockStorageService implements StorageService {
   private readonly baseUrl: string;
-  private readonly objects = new Map<string, { bytes: Uint8Array; contentType: string }>();
+  private readonly objects = new Map<string, { bytes: Uint8Array; contentType: string; uploaded: Date }>();
 
   constructor(options?: { baseUrl?: string }) {
     this.baseUrl = options?.baseUrl || 'https://test-bucket.s3.amazonaws.com';
@@ -21,7 +22,7 @@ export class MockStorageService implements StorageService {
     await new Promise(resolve => setTimeout(resolve, 10));
 
     const bytes = await toBytes(body);
-    this.objects.set(key, { bytes, contentType });
+    this.objects.set(key, { bytes, contentType, uploaded: new Date() });
 
     return {
       url: `${this.baseUrl}/${key}`,
@@ -71,6 +72,30 @@ export class MockStorageService implements StorageService {
     return object.bytes.subarray(start, end);
   }
 
+  async putObject(key: string, bytes: Uint8Array, opts: { contentType: string; sha256?: string }): Promise<void> {
+    // Like R2: a write whose content does not hash to the stated sha256 is refused and stores nothing.
+    if (opts.sha256 && createHash('sha256').update(bytes).digest('hex') !== opts.sha256) {
+      throw new Error('checksum mismatch');
+    }
+    this.objects.set(key, { bytes, contentType: opts.contentType, uploaded: new Date() });
+  }
+
+  async listKeys(prefix: string, opts: { cursor?: string; limit?: number; startAfter?: string } = {}): Promise<StorageKeyPage> {
+    const limit = Math.min(opts.limit ?? 1000, 1000);
+    const all = [...this.objects.keys()].filter((k) => k.startsWith(prefix)).sort();
+    const after = opts.cursor ?? opts.startAfter;
+    const start = after ? all.findIndex((k) => k > after) : 0;
+    const page = start < 0 ? [] : all.slice(start, start + limit);
+    const more = start >= 0 && start + limit < all.length;
+    return {
+      keys: page.map((key) => {
+        const o = this.objects.get(key) as { bytes: Uint8Array; uploaded: Date };
+        return { key, size: o.bytes.byteLength, uploaded: o.uploaded };
+      }),
+      ...(more ? { cursor: page[page.length - 1] } : {}),
+    };
+  }
+
   async delete(key: string): Promise<void> {
     this.objects.delete(key);
   }
@@ -84,8 +109,13 @@ export class MockStorageService implements StorageService {
   }
 
   /** Test helper: seed an object directly, without going through upload(). */
-  seed(key: string, bytes: Uint8Array, contentType = 'application/zip'): void {
-    this.objects.set(key, { bytes, contentType });
+  seed(key: string, bytes: Uint8Array, contentType = 'application/zip', uploaded: Date = new Date()): void {
+    this.objects.set(key, { bytes, contentType, uploaded });
+  }
+
+  /** Test helper: every key currently held (sync-delta-upload asserts what was and was not stored). */
+  keys(): string[] {
+    return [...this.objects.keys()];
   }
 }
 

@@ -1,0 +1,22 @@
+{
+  "name": "manifest-409-idempotency-conflict",
+  "request": {
+    "method": "POST",
+    "path": "/delta/<project>/manifest",
+    "headers": {
+      "Idempotency-Key": "sync-attempt-0001"
+    },
+    "body": "<a different manifest>"
+  },
+  "response": {
+    "status": 409,
+    "headers": {
+      "x-scry-request-id": "<request id>"
+    },
+    "body": {
+      "error": "idempotency_conflict",
+      "message": "This Idempotency-Key was used with a different manifest",
+      "request_id": "<request id>"
+    }
+  }
+}

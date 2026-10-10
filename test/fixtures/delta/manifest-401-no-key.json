@@ -1,0 +1,22 @@
+{
+  "name": "manifest-401-no-key",
+  "request": {
+    "method": "POST",
+    "path": "/delta/<project>/manifest",
+    "headers": {
+      "Idempotency-Key": "sync-attempt-0001"
+    },
+    "body": "<manifest>"
+  },
+  "response": {
+    "status": 401,
+    "headers": {
+      "x-scry-request-id": "<request id>"
+    },
+    "body": {
+      "error": "Authentication required",
+      "message": "Missing X-API-Key header",
+      "request_id": "<request id>"
+    }
+  }
+}
