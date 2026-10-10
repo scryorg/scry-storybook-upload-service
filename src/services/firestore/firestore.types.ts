@@ -255,6 +255,11 @@ export interface Build {
    * `/bundle/complete` call never arrived.
    */
   processingError?: string;
+
+  /** sync-delta-upload: true on a build opened by `POST /delta/:project/manifest` (no zip is ever written for it). */
+  delta?: true;
+  /** sync-delta-upload: the build stays open until this instant; every accepted blob PUT pushes it out. */
+  deltaDeadline?: Date;
 }
 
 /**
@@ -274,6 +279,20 @@ export interface OrphanBundleCandidate {
   /** Any processingStatus at all — queued, processing, completed, partial or failed — means
    *  `/bundle/complete` already ran and resolved this build; never true for a genuine orphan. */
   hasProcessingStatus: boolean;
+  /** sync-delta-upload: a delta build is not an orphan until this instant has passed (absent on a zip build). */
+  deltaDeadline?: Date;
+}
+
+/**
+ * Idempotency record for `POST /delta/:project/manifest` (`projects/{p}/deltaKeys/{sha256(key)}`):
+ * the build a client's `Idempotency-Key` opened and the digest of the manifest it was opened with.
+ * The key itself is never stored, only its hash; `expireAt` rides on the document for a TTL policy.
+ */
+export interface DeltaKey {
+  buildId: string;
+  digest: string;
+  createdAt: Date;
+  expireAt: Date;
 }
 
 /**
@@ -339,6 +358,10 @@ export interface CreateBuildData {
    */
   requestId?: string;
   firstStep?: BuildStep;
+
+  /** sync-delta-upload: marks a delta build and sets the first deadline (see `Build.deltaDeadline`). */
+  delta?: boolean;
+  deltaDeadline?: Date;
 }
 
 // ============= UPLOAD TYPES =============
@@ -368,6 +391,9 @@ export interface CreateUploadData {
  * Data that can be updated in a build record
  */
 export interface UpdateBuildData {
+  /** sync-delta-upload: push the open-until instant of a delta build out. */
+  deltaDeadline?: Date;
+
   /**
    * New status for the build
    */

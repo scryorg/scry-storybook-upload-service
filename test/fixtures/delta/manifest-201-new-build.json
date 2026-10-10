@@ -1,0 +1,115 @@
+{
+  "name": "manifest-201-new-build",
+  "request": {
+    "method": "POST",
+    "path": "/delta/<project>/manifest",
+    "headers": {
+      "Idempotency-Key": "sync-attempt-0001"
+    },
+    "body": {
+      "protocol": 1,
+      "hash": "sha256",
+      "version": "sync-1760000000000",
+      "source": "x-scry-sync:other",
+      "scf": {
+        "scf": "1.0",
+        "source": {
+          "kind": "x-scry-sync",
+          "platform": "other"
+        },
+        "createdAt": "2026-10-10T00:00:00Z",
+        "counts": {
+          "declared": 2,
+          "captured": 2,
+          "skipped": []
+        },
+        "captures": [
+          {
+            "id": "pic-0",
+            "image": "images/pic-1.png",
+            "kind": "component",
+            "title": [
+              "Folder"
+            ],
+            "name": "Picture 0",
+            "capture": {
+              "method": "manual",
+              "viewport": {
+                "width": 64,
+                "height": 48
+              },
+              "scale": 1
+            }
+          },
+          {
+            "id": "pic-1",
+            "image": "images/pic-2.png",
+            "kind": "component",
+            "title": [
+              "Folder"
+            ],
+            "name": "Picture 1",
+            "capture": {
+              "method": "manual",
+              "viewport": {
+                "width": 64,
+                "height": 48
+              },
+              "scale": 1
+            }
+          }
+        ]
+      },
+      "images": {
+        "images/pic-1.png": {
+          "oid": "6bf29de53398442edb45142612726e80a7274b1e8c28031c70ae2fe92e4759a4",
+          "size": 400
+        },
+        "images/pic-2.png": {
+          "oid": "18d27ea28594e2c58713d26b9811e1529fd0233b91c44eaf0faa9f8c19e77a77",
+          "size": 400
+        }
+      }
+    }
+  },
+  "response": {
+    "status": 201,
+    "headers": {
+      "x-scry-request-id": "<request id>"
+    },
+    "body": {
+      "buildId": "build_A_1",
+      "buildNumber": 1,
+      "expiresAt": "<iso time>",
+      "maxBlobBytes": 20971520,
+      "objects": [
+        {
+          "oid": "6bf29de53398442edb45142612726e80a7274b1e8c28031c70ae2fe92e4759a4",
+          "size": 400,
+          "actions": {
+            "upload": {
+              "href": "http://localhost/delta/projAAAAAAAAAAAAAAAA/blobs/6bf29de53398442edb45142612726e80a7274b1e8c28031c70ae2fe92e4759a4?build=build_A_1",
+              "header": {
+                "Content-Type": "application/octet-stream"
+              },
+              "expires_at": "<iso time>"
+            }
+          }
+        },
+        {
+          "oid": "18d27ea28594e2c58713d26b9811e1529fd0233b91c44eaf0faa9f8c19e77a77",
+          "size": 400,
+          "actions": {
+            "upload": {
+              "href": "http://localhost/delta/projAAAAAAAAAAAAAAAA/blobs/18d27ea28594e2c58713d26b9811e1529fd0233b91c44eaf0faa9f8c19e77a77?build=build_A_1",
+              "header": {
+                "Content-Type": "application/octet-stream"
+              },
+              "expires_at": "<iso time>"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

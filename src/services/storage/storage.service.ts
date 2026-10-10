@@ -32,6 +32,20 @@ export interface StorageObjectMeta {
   contentType?: string;
 }
 
+/** One entry of a prefix listing (sync-delta-upload: the `_blobs/` existence check and the clean-up pass). */
+export interface StorageListedKey {
+  key: string;
+  size: number;
+  /** When the object was written; the clean-up pass only deletes objects older than its retention. */
+  uploaded: Date;
+}
+
+export interface StorageKeyPage {
+  keys: StorageListedKey[];
+  /** Present when more keys follow; pass it back as `cursor`. */
+  cursor?: string;
+}
+
 /**
  * A byte range to read from an object, relative to its start. Used by the capture-sources bundle
  * route (ledger F49) to read just a ZIP's tail (its end-of-central-directory record, then its
@@ -97,6 +111,18 @@ export interface StorageService {
    *   object is shorter than that), or `null` if the object does not exist.
    */
   getObjectRange(key: string, range: StorageObjectRange): Promise<Uint8Array | null>;
+
+  /**
+   * Writes a small object from bytes already in memory (sync-delta-upload blobs, manifests). When
+   * `sha256` (lowercase hex) is given the store also verifies it, so a corrupted write stores nothing.
+   */
+  putObject(key: string, bytes: Uint8Array, opts: { contentType: string; sha256?: string }): Promise<void>;
+
+  /**
+   * Lists one page of keys under `prefix`, in key order, with size and write time.
+   * `limit` is at most 1000 (the R2 page size).
+   */
+  listKeys(prefix: string, opts?: { cursor?: string; limit?: number }): Promise<StorageKeyPage>;
 
   /**
    * Deletes a single object. A no-op if it does not already exist.

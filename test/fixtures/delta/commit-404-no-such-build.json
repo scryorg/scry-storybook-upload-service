@@ -1,0 +1,19 @@
+{
+  "name": "commit-404-no-such-build",
+  "request": {
+    "method": "POST",
+    "path": "/delta/<project>/builds/<buildId>/commit",
+    "body": {}
+  },
+  "response": {
+    "status": 404,
+    "headers": {
+      "x-scry-request-id": "<request id>"
+    },
+    "body": {
+      "error": "build_not_found",
+      "message": "No such build",
+      "request_id": "<request id>"
+    }
+  }
+}

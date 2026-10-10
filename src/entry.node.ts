@@ -104,6 +104,7 @@ nodeApp.use('*', async (c, next) => {
   if (process.env.CLEANUP_TOKEN) {
     c.set('cleanupToken', process.env.CLEANUP_TOKEN);
   }
+  c.set('syncDelta', process.env.SYNC_DELTA === '1');
   
   await next();
 });

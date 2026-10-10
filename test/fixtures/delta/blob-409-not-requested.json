@@ -1,0 +1,19 @@
+{
+  "name": "blob-409-not-requested",
+  "request": {
+    "method": "PUT",
+    "path": "/delta/<project>/blobs/<oid>",
+    "body": "<picture bytes>"
+  },
+  "response": {
+    "status": 409,
+    "headers": {
+      "x-scry-request-id": "<request id>"
+    },
+    "body": {
+      "error": "not_requested",
+      "message": "No open build of this project asks for this picture",
+      "request_id": "<request id>"
+    }
+  }
+}

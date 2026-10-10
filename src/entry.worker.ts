@@ -18,6 +18,7 @@ import {
 } from './bundle/orphan-sweep.js';
 import type { StorageService } from './services/storage/storage.service.js';
 import { mintRequestId } from './lib/request-id.js';
+import { gcDue, runBlobGc } from './delta/gc.js';
 import { requestIdMiddleware, errorHandler } from './middleware/request-id.js';
 import { configureLog, log, type LogBindings } from './lib/log.js';
 
@@ -63,6 +64,10 @@ type Bindings = StampBindings & {
   // bundle routes. A Worker secret (`wrangler secret put SCRY_UPLOAD_ASSERTION_SECRET --env <env>`);
   // unset keeps the door closed.
   SCRY_UPLOAD_ASSERTION_SECRET?: string;
+
+  // sync-delta-upload: '1' turns the /delta routes on (503 delta_disabled otherwise). A wrangler.toml var per
+  // environment so a CI deploy keeps it; staging "1", production "0".
+  SYNC_DELTA?: string;
 };
 
 // Create a new Hono instance specifically for the Worker, extending the shared AppEnv.
@@ -167,6 +172,7 @@ workerApp.use('*', async (c, next) => {
   if (c.env.CLEANUP_TOKEN) {
     c.set('cleanupToken', c.env.CLEANUP_TOKEN);
   }
+  c.set('syncDelta', c.env.SYNC_DELTA === '1');
 
   await next();
 });
@@ -199,8 +205,37 @@ const handler: ExportedHandler<Bindings> = {
       log.request({ msg: 'job', request_id: jobId, route: '/cron/orphan-sweep', status: 500, ms: Date.now() - started, err_code: 'orphan_sweep_failed' });
       throw error;
     }
+    // sync-delta-upload (D2): once a day, in the 03:00 UTC run, drop pictures nothing has used for 30 days.
+    if (env.SYNC_DELTA === '1' && gcDue(new Date())) {
+      const gcStarted = Date.now();
+      try {
+        await runDeltaBlobGc(env);
+        log.request({ msg: 'job', request_id: mintRequestId(), route: '/cron/delta-gc', status: 200, ms: Date.now() - gcStarted });
+      } catch (error) {
+        log.request({ msg: 'job', request_id: mintRequestId(), route: '/cron/delta-gc', status: 500, ms: Date.now() - gcStarted, err_code: 'delta_gc_failed' });
+        Sentry.captureException(error, { tags: { path: 'cron', kind: 'delta-gc' } });
+      }
+    }
   },
 };
+
+/** Daily clean-up of the project-scoped picture store (src/delta/gc.ts). A failure is reported but does not fail the cron: the sweep above already ran. */
+async function runDeltaBlobGc(env: Bindings) {
+  if (!env.FIREBASE_PROJECT_ID || !env.FIREBASE_CLIENT_EMAIL || !env.FIREBASE_PRIVATE_KEY) return;
+  const firestore = new FirestoreServiceWorker({
+    projectId: env.FIREBASE_PROJECT_ID,
+    clientEmail: env.FIREBASE_CLIENT_EMAIL,
+    privateKey: env.FIREBASE_PRIVATE_KEY,
+    serviceAccountId: env.FIRESTORE_SERVICE_ACCOUNT_ID || 'upload-service',
+  });
+  const storage = new R2S3StorageService(env.STORYBOOK_BUCKET, {
+    accountId: env.R2_ACCOUNT_ID,
+    accessKeyId: env.R2_S3_ACCESS_KEY_ID,
+    secretAccessKey: env.R2_S3_SECRET_ACCESS_KEY,
+    bucketName: env.R2_BUCKET_NAME,
+  });
+  await runBlobGc({ firestore, storage });
+}
 
 /**
  * Sweep for bundle builds whose upload never completed and mark them `failed` (ledger F80).

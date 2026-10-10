@@ -1,5 +1,6 @@
 import { log } from '../../lib/log.js';
 import { scrubString } from '../../lib/scry-log/index.js';
+import { deltaBuildFields } from './delta-fields.js';
 import type { StepSummaryUpdate } from '../../lib/build-steps.js';
 import type { FirestoreService } from './firestore.service.js';
 import type {
@@ -16,6 +17,7 @@ import type {
   Upload,
   CreateUploadData,
   OrphanBundleCandidate,
+  DeltaKey,
   Capture,
   CreateCaptureData,
   CaptureOs,
@@ -218,6 +220,14 @@ function stepSummarySeed(data: CreateBuildData, at: Date): Record<string, unknow
   };
 }
 
+/** sync-delta-upload: the delta marker and deadline as Firestore fields (create and update share it). */
+function deltaWriteFields(data: { delta?: boolean; deltaDeadline?: Date }): FirestoreFields {
+  return {
+    ...(data.delta ? { delta: { booleanValue: true } } : {}),
+    ...(data.deltaDeadline ? { deltaDeadline: { timestampValue: data.deltaDeadline.toISOString() } } : {}),
+  };
+}
+
 export class FirestoreServiceWorker implements FirestoreService {
   private config: FirestoreConfig;
   private baseUrl: string;
@@ -325,6 +335,8 @@ export class FirestoreServiceWorker implements FirestoreService {
       // (`findOrphanBundleCandidates`) instead of scanning every project's builds looking for one
       // with `source` set and no `processingStatus` — see that method's doc comment.
       ...(data.source ? { bundlePending: { booleanValue: true } } : {}),
+      // sync-delta-upload: a delta build (no zip) stays open until `deltaDeadline`; the orphan sweep honours it.
+      ...deltaWriteFields(data),
       // staff-builds-view: the creating request and the first step, in the create write itself.
       ...stepSummarySeed(data, now),
     };
@@ -346,6 +358,7 @@ export class FirestoreServiceWorker implements FirestoreService {
       createdBy: this.config.serviceAccountId,
       ...(data.ciTimings ? { ciTimings: data.ciTimings } : {}),
       ...(data.source ? { source: data.source } : {}),
+      ...deltaBuildFields(data),
     };
   }
 
@@ -471,6 +484,7 @@ export class FirestoreServiceWorker implements FirestoreService {
           createdAt: new Date(fields.createdAt?.timestampValue || new Date().toISOString()),
           hasSource: fields.source !== undefined,
           hasProcessingStatus: fields.processingStatus !== undefined,
+          ...(fields.deltaDeadline?.timestampValue ? { deltaDeadline: new Date(fields.deltaDeadline.timestampValue) } : {}),
         };
       })
       .filter((c): c is OrphanBundleCandidate => c !== null);
@@ -654,6 +668,7 @@ export class FirestoreServiceWorker implements FirestoreService {
     if (updates.ciTimings) fields.ciTimings = this.toFirestoreValue(updates.ciTimings);
     if (updates.validationErrors) fields.validationErrors = this.toFirestoreValue(updates.validationErrors);
     if (updates.processingError) fields.processingError = { stringValue: updates.processingError };
+    Object.assign(fields, deltaWriteFields(updates));
 
     const maskFieldPaths = Object.keys(fields);
     if (updates.provenanceError !== undefined) {
@@ -1051,6 +1066,60 @@ export class FirestoreServiceWorker implements FirestoreService {
     return { ...this.convertDocToCapture(captureId, doc.fields), status: 'ready', receivedAt };
   }
 
+  // ============= SYNC DELTA UPLOAD (feature sync-delta-upload) =============
+
+  /** Every delta build of a project (equality filter on `delta`, so no composite index), newest first by number. */
+  async listDeltaBuilds(projectId: string, limit = 5000): Promise<Build[]> {
+    const token = await this.getAccessToken();
+    const docs = await this.queryDocuments(
+      `projects/${projectId}`,
+      {
+        from: [{ collectionId: 'builds' }],
+        where: { fieldFilter: { field: { fieldPath: 'delta' }, op: 'EQUAL', value: { booleanValue: true } } },
+        limit,
+      },
+      token
+    );
+    return docs
+      .map((doc) => this.convertDocToBuild(doc.name.split('/').pop()!, doc.fields))
+      .sort((a, b) => b.buildNumber - a.buildNumber);
+  }
+
+  async getDeltaKey(projectId: string, keyHash: string): Promise<DeltaKey | null> {
+    const token = await this.getAccessToken();
+    const doc = await this.getDocument(`projects/${projectId}/deltaKeys/${keyHash}`, token);
+    return doc ? this.convertDocToDeltaKey(doc.fields) : null;
+  }
+
+  async createDeltaKeyIfAbsent(projectId: string, keyHash: string, data: DeltaKey): Promise<boolean> {
+    const token = await this.getAccessToken();
+    return this.createDocumentIfAbsent(`projects/${projectId}/deltaKeys/${keyHash}`, this.deltaKeyToFields(data), token);
+  }
+
+  /** Replaces the record (a key whose build was failed opens a new build under the same key). */
+  async putDeltaKey(projectId: string, keyHash: string, data: DeltaKey): Promise<void> {
+    const token = await this.getAccessToken();
+    await this.setDocument(`projects/${projectId}/deltaKeys/${keyHash}`, this.deltaKeyToFields(data), token);
+  }
+
+  private deltaKeyToFields(d: DeltaKey): FirestoreFields {
+    return {
+      buildId: { stringValue: d.buildId },
+      digest: { stringValue: d.digest },
+      createdAt: { timestampValue: d.createdAt.toISOString() },
+      expireAt: { timestampValue: d.expireAt.toISOString() },
+    };
+  }
+
+  private convertDocToDeltaKey(fields: FirestoreFields): DeltaKey {
+    return {
+      buildId: fields.buildId?.stringValue || '',
+      digest: fields.digest?.stringValue || '',
+      createdAt: new Date(fields.createdAt?.timestampValue || new Date()),
+      expireAt: new Date(fields.expireAt?.timestampValue || new Date()),
+    };
+  }
+
   /**
    * One `:commit` carrying an `increment` field transform, which Firestore applies atomically and
    * answers with the new value. NOT sent through `retryFetch`: a blind resend of an increment would
@@ -1357,6 +1426,8 @@ export class FirestoreServiceWorker implements FirestoreService {
       ...(fields.validationErrors ? { validationErrors: this.fromFirestoreValue(fields.validationErrors) as BuildValidationIssue[] } : {}),
       ...(fields.provenanceError ? { provenanceError: this.fromFirestoreValue(fields.provenanceError) as BuildProvenanceError } : {}),
       ...(fields.processingError?.stringValue ? { processingError: fields.processingError.stringValue } : {}),
+      ...(fields.delta?.booleanValue ? { delta: true as const } : {}),
+      ...(fields.deltaDeadline?.timestampValue ? { deltaDeadline: new Date(fields.deltaDeadline.timestampValue) } : {}),
     };
   }
 

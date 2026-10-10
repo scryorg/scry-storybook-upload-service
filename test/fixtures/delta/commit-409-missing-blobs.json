@@ -1,0 +1,22 @@
+{
+  "name": "commit-409-missing-blobs",
+  "request": {
+    "method": "POST",
+    "path": "/delta/<project>/builds/<buildId>/commit",
+    "body": {}
+  },
+  "response": {
+    "status": 409,
+    "headers": {
+      "x-scry-request-id": "<request id>"
+    },
+    "body": {
+      "error": "missing_blobs",
+      "message": "Some pictures have not arrived",
+      "missing": [
+        "18d27ea28594e2c58713d26b9811e1529fd0233b91c44eaf0faa9f8c19e77a77"
+      ],
+      "request_id": "<request id>"
+    }
+  }
+}

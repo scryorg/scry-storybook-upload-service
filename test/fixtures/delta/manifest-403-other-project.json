@@ -1,0 +1,22 @@
+{
+  "name": "manifest-403-other-project",
+  "request": {
+    "method": "POST",
+    "path": "/delta/<project>/manifest",
+    "headers": {
+      "Idempotency-Key": "sync-attempt-0001"
+    },
+    "body": "<manifest>"
+  },
+  "response": {
+    "status": 403,
+    "headers": {
+      "x-scry-request-id": "<request id>"
+    },
+    "body": {
+      "error": "Project mismatch",
+      "message": "The API key does not belong to the requested project",
+      "request_id": "<request id>"
+    }
+  }
+}

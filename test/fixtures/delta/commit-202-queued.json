@@ -1,0 +1,19 @@
+{
+  "name": "commit-202-queued",
+  "request": {
+    "method": "POST",
+    "path": "/delta/<project>/builds/<buildId>/commit",
+    "body": {}
+  },
+  "response": {
+    "status": 202,
+    "headers": {
+      "x-scry-request-id": "<request id>"
+    },
+    "body": {
+      "buildId": "build_A_1",
+      "buildNumber": 1,
+      "queued": true
+    }
+  }
+}

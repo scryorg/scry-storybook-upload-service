@@ -42,6 +42,8 @@ SCRY_ENV = "production"
 # Non-sensitive configuration values
 # NOTE: R2_ACCOUNT_ID is set via secrets for security (even though it's not highly sensitive)
 R2_BUCKET_NAME = "my-storybooks-production"
+# sync-delta-upload kill switch: "1" turns the /delta routes on. Off in production until the feature is released.
+SYNC_DELTA = "0"
 
 # IMPORTANT: The following secrets MUST be set via `wrangler secret put`:
 # - R2_ACCOUNT_ID (your Cloudflare account ID)
@@ -65,6 +67,7 @@ name = "storybook-deployment-service"
 [env.production.vars]
 R2_BUCKET_NAME = "my-storybooks-production"
 SCRY_ENV = "production"
+SYNC_DELTA = "0"
 
 # Orphan-bundle sweep (ledger F80): a bundle build's presigned-url call creates its Firestore
 # document immediately, before any bytes move; if the client's later `/bundle/complete` call never
@@ -99,6 +102,7 @@ name = "storybook-deployment-service-preview"
 [env.staging.vars]
 R2_BUCKET_NAME = "my-storybooks-staging"
 SCRY_ENV = "staging"
+SYNC_DELTA = "1"
 
 # Orphan-bundle sweep (ledger F80/F91) — see the matching comment under [env.production.triggers].
 [env.staging.triggers]

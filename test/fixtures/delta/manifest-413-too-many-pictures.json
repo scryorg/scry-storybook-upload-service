@@ -1,0 +1,19 @@
+{
+  "name": "manifest-413-too-many-pictures",
+  "request": {
+    "method": "POST",
+    "path": "/delta/<project>/manifest",
+    "body": "<10,001 pictures>"
+  },
+  "response": {
+    "status": 413,
+    "headers": {
+      "x-scry-request-id": "<request id>"
+    },
+    "body": {
+      "error": "too_many_pictures",
+      "message": "A build lists at most 10000 pictures",
+      "request_id": "<request id>"
+    }
+  }
+}

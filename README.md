@@ -470,6 +470,9 @@ Actions logs if validation or the post-deploy commit check fails.
 | `POST /presigned-url/:project/:version/:filename` | API key | Presigned R2 PUT URL + Firestore build record |
 | `POST /upload-images/:project`, `.../complete` | API key | Presigned image-set upload for image indexing |
 | `DELETE /cleanup/:project/:version` | `CLEANUP_TOKEN` | Delete a build (disabled when the secret is unset) |
+| `POST /delta/:project/manifest` | API key (device keys allowed) | Delta upload (flag `SYNC_DELTA`): body is the SCF plus `{ oid, size }` per picture; answers which pictures the project still needs |
+| `PUT /delta/:project/blobs/:oid?build=` | API key (device keys allowed) | Store one picture under its SHA-256 |
+| `POST /delta/:project/builds/:buildId/commit` | API key (device keys allowed) | Queue the build once every listed picture is held |
 | `GET /docs` | none | Swagger UI |
 
 Bindings (`wrangler.toml`): R2 `STORYBOOK_BUCKET` (`my-storybooks-{staging,production}`)
@@ -609,6 +612,31 @@ Retrieves file information (no authentication required).
       "available": true
     }
     ```
+
+## `/delta` (picture-level upload)
+
+A build can be sent as the SCF plus only the pictures the project does not already hold, instead of a zip of everything.
+The whole group is behind `SYNC_DELTA` (`"1"` on staging, `"0"` in the default and production vars): with it off every route answers
+`503 {"error":"delta_disabled"}` after the key check, and clients fall back to the zip. The shapes follow the Git-LFS batch API so the
+route adapters (`src/delta/routes.ts`) can be swapped for a real LFS store later; all logic lives in `src/delta/delta-build.ts` and
+`src/delta/blob-store.ts`.
+
+1. `POST /delta/:project/manifest` with header `Idempotency-Key` (8-128 of `A-Za-z0-9_-`) and body
+   `{ "protocol": 1, "hash": "sha256", "version": "...", "source": "kind:platform", "scf": {...}, "images": { "images/a.png": { "oid": "<sha256>", "size": 123 } } }`.
+   An unknown `protocol` or `hash` answers `400 unsupported_protocol` (use the zip). A capture carrying `structure` or `sourceText`
+   answers `400 delta_pictures_only` (a delta carries pictures only). `201` opens a build; the same key and body while it is open answers `200` with the same build;
+   the same key with a different body is `409 idempotency_conflict`. Answer: `{ buildId, buildNumber, expiresAt, maxBlobBytes, objects: [{ oid, size, actions?: { upload: { href, header, expires_at } }, error? }] }`.
+   An object with no `actions` is already held; one with `error` (`too_big`, `bad_type`) is refused alone and its capture leaves the build.
+2. `PUT` each `href` (it carries `?build=<buildId>`) with `Content-Length` and the raw bytes. `201` stored, `200` already held, `422 hash_mismatch` /
+   `bad_type` / `size_mismatch` store nothing, `409 not_requested` when no open build of this project lists the oid. Each accepted PUT moves the 60-minute build deadline.
+3. `POST /delta/:project/builds/:buildId/commit`: `202 {buildId, buildNumber, queued}` once every picture is held, `409 missing_blobs {missing}` otherwise,
+   `200` on a repeat. The queue message has `format: "scf-delta"` plus `manifestKey` / `imagesKey` (shared fixtures in `test/fixtures/delta/`).
+
+Limits: 10,000 pictures and 16 MiB list per build, 20 MiB per picture, 1 GiB of new pictures per build, 30 manifests per minute and 500 per day,
+600 picture PUTs per minute (per key; `429` with `Retry-After`). Pictures live at `_blobs/<projectId>/<sha256>` and are never shared across projects.
+A build that is still receiving pictures is not swept as an orphan until its deadline passes. The hourly cron deletes stored pictures older than 30 days that no
+protected build lists once a day (03:00 UTC hour); it skips a project whenever it cannot be sure. Log lines (`delta manifest`, `delta blob`, `delta commit`, `delta gc`)
+carry the counts `delta.bytes`, `delta.items`, `delta.items_skipped`. Tests: `src/delta/delta.test.ts` (`SCRY_RECORD_FIXTURES=1` re-records `test/fixtures/delta/`).
 
 ## Enhanced Setup Guide
 

@@ -38,6 +38,7 @@ import { readBoundedZip, DEFAULT_BOUNDED_ZIP_LIMITS } from './bundle/bounded-zip
 import { validateBundle } from './vendor/scf/dist/index.js';
 import { registerSelfRevoke } from './keys/self-revoke.js';
 import { registerCaptures } from './captures/captures.js';
+import { registerDelta } from './delta/routes.js';
 
 // Define the application's environment, including injectable variables.
 export type AppEnv = {
@@ -50,6 +51,8 @@ export type AppEnv = {
     cleanupToken?: string;
     /** SCRY_UPLOAD_ASSERTION_SECRET; unset keeps the dashboard door closed (dashboard-import). */
     assertionSecret?: string;
+    /** SYNC_DELTA: the /delta routes answer 503 delta_disabled unless this is true (sync-delta-upload). */
+    syncDelta?: boolean;
   } & AuthVariables;
 };
 
@@ -80,6 +83,8 @@ app.use('/presigned-url/:project/*', dashboardDoor(apiKeyAuth()));
 app.use('/upload-images/:project/*', apiKeyAuth());
 // snip-capture: device-key routes for Scry Snip pictures (a capture is never a build).
 app.use('/captures/:project/*', apiKeyAuth());
+// sync-delta-upload: send only the pictures the project does not hold yet (flag SYNC_DELTA).
+app.use('/delta/:project/*', apiKeyAuth());
 
 /**
  * Which key created a build (upload-project-key-scope): the key's Firestore doc
@@ -2422,6 +2427,7 @@ app.openapi(imageUploadCompleteRoute, async (c) => {
 // scry-sync: the desktop app's "Disconnect" revokes its own key (guarantee-5).
 registerSelfRevoke(app);
 registerCaptures(app);
+registerDelta(app);
 
 // Serve OpenAPI spec
 app.doc('/openapi.json', {

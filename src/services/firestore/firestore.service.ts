@@ -10,6 +10,7 @@ import type {
   OrphanBundleCandidate,
   Capture,
   CreateCaptureData,
+  DeltaKey,
 } from './firestore.types.js';
 import type { StepSummaryUpdate } from '../../lib/build-steps.js';
 
@@ -252,4 +253,18 @@ export interface FirestoreService {
    * `expireAt` rides on the document so a Firestore TTL policy on the field can remove old windows.
    */
   incrementCaptureCounter(projectId: string, counterId: string, expireAt: Date): Promise<number>;
+
+  // ============= SYNC DELTA UPLOAD (feature sync-delta-upload) =============
+
+  /** Every delta build of a project (up to `limit`), newest build number first. Used by the blob clean-up. */
+  listDeltaBuilds(projectId: string, limit?: number): Promise<Build[]>;
+
+  /** The idempotency record for a hashed `Idempotency-Key`, or null. */
+  getDeltaKey(projectId: string, keyHash: string): Promise<DeltaKey | null>;
+
+  /** Creates the record only if absent; false means another request got there first. */
+  createDeltaKeyIfAbsent(projectId: string, keyHash: string, data: DeltaKey): Promise<boolean>;
+
+  /** Replaces the record: a key whose build was failed opens a new build under the same key. */
+  putDeltaKey(projectId: string, keyHash: string, data: DeltaKey): Promise<void>;
 }

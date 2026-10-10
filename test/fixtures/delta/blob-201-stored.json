@@ -1,0 +1,18 @@
+{
+  "name": "blob-201-stored",
+  "request": {
+    "method": "PUT",
+    "path": "/delta/<project>/blobs/<oid>?build=<buildId>",
+    "body": "<picture bytes>"
+  },
+  "response": {
+    "status": 201,
+    "headers": {
+      "x-scry-request-id": "<request id>"
+    },
+    "body": {
+      "oid": "6bf29de53398442edb45142612726e80a7274b1e8c28031c70ae2fe92e4759a4",
+      "size": 400
+    }
+  }
+}

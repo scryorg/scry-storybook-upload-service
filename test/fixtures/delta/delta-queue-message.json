@@ -1,0 +1,11 @@
+{
+  "projectId": "proj_fixture_a",
+  "versionId": "sync-1760000000000",
+  "buildId": "build_fixture_1",
+  "format": "scf-delta",
+  "manifestKey": "proj_fixture_a/sync-1760000000000/builds/7/scf.json",
+  "imagesKey": "proj_fixture_a/sync-1760000000000/builds/7/images.json",
+  "timestamp": 1760000000000,
+  "trace": null,
+  "requestId": "req_fixture_1"
+}

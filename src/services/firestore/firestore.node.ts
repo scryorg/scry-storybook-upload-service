@@ -1,4 +1,5 @@
 import admin from 'firebase-admin';
+import { deltaBuildFields } from './delta-fields.js';
 import type { Firestore, DocumentData } from 'firebase-admin/firestore';
 import type { FirestoreService } from './firestore.service.js';
 import type {
@@ -12,6 +13,7 @@ import type {
   CreateUploadData,
   Capture,
   CreateCaptureData,
+  DeltaKey,
 } from './firestore.types.js';
 import type { StepSummaryUpdate } from '../../lib/build-steps.js';
 
@@ -99,6 +101,8 @@ export class FirestoreServiceNode implements FirestoreService {
         ...(data.ciTimings ? { ciTimings: data.ciTimings } : {}),
         // Where this build's captures came from (capture-sources); absent = legacy Storybook web.
         ...(data.source ? { source: data.source } : {}),
+        // sync-delta-upload: delta build marker and its first deadline.
+        ...deltaBuildFields(data),
         // staff-builds-view: the creating request and the first step, in the create write itself.
         ...nodeStepSummarySeed(data),
       };
@@ -120,6 +124,7 @@ export class FirestoreServiceNode implements FirestoreService {
         coverage: data.coverage,
         ...(data.ciTimings ? { ciTimings: data.ciTimings } : {}),
         ...(data.source ? { source: data.source } : {}),
+        ...deltaBuildFields(data),
       };
     });
   }
@@ -446,6 +451,37 @@ export class FirestoreServiceNode implements FirestoreService {
     return { ...this.convertDocToCapture(snap.id, snap.data()!), status: 'ready', receivedAt };
   }
 
+  // ============= SYNC DELTA UPLOAD (feature sync-delta-upload) =============
+
+  async listDeltaBuilds(projectId: string, limit = 5000): Promise<Build[]> {
+    const snapshot = await this.db.collection(`projects/${projectId}/builds`).where('delta', '==', true).limit(limit).get();
+    return snapshot.docs.map((doc) => this.convertDocToBuild(doc.id, doc.data())).sort((a, b) => b.buildNumber - a.buildNumber);
+  }
+
+  async getDeltaKey(projectId: string, keyHash: string): Promise<DeltaKey | null> {
+    const snap = await this.db.doc(`projects/${projectId}/deltaKeys/${keyHash}`).get();
+    return snap.exists ? this.convertDocToDeltaKey(snap.data()!) : null;
+  }
+
+  async createDeltaKeyIfAbsent(projectId: string, keyHash: string, data: DeltaKey): Promise<boolean> {
+    try {
+      await this.db.doc(`projects/${projectId}/deltaKeys/${keyHash}`).create({ ...data });
+      return true;
+    } catch (error) {
+      if ((error as { code?: number }).code === 6) return false; // 6 = ALREADY_EXISTS
+      throw error;
+    }
+  }
+
+  async putDeltaKey(projectId: string, keyHash: string, data: DeltaKey): Promise<void> {
+    await this.db.doc(`projects/${projectId}/deltaKeys/${keyHash}`).set({ ...data });
+  }
+
+  private convertDocToDeltaKey(data: DocumentData): DeltaKey {
+    const date = (v: unknown): Date => (v && typeof (v as { toDate?: unknown }).toDate === 'function' ? (v as { toDate(): Date }).toDate() : new Date(v as string | number | Date));
+    return { buildId: data.buildId || '', digest: data.digest || '', createdAt: date(data.createdAt), expireAt: date(data.expireAt) };
+  }
+
   async incrementCaptureCounter(projectId: string, counterId: string, expireAt: Date): Promise<number> {
     const ref = this.db.doc(`projects/${projectId}/captureLimits/${counterId}`);
     return this.db.runTransaction(async (transaction) => {
@@ -526,6 +562,8 @@ export class FirestoreServiceNode implements FirestoreService {
       ...(data.ciTimings ? { ciTimings: data.ciTimings } : {}),
       ...(data.source ? { source: data.source } : {}),
       ...(data.validationErrors ? { validationErrors: data.validationErrors } : {}),
+      ...(data.delta === true ? { delta: true as const } : {}),
+      ...(data.deltaDeadline?.toDate?.() ? { deltaDeadline: data.deltaDeadline.toDate() as Date } : {}),
     };
   }
 }

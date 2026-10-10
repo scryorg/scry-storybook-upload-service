@@ -1,0 +1,65 @@
+{
+  "name": "manifest-400-unsupported-protocol",
+  "request": {
+    "method": "POST",
+    "path": "/delta/<project>/manifest",
+    "headers": {
+      "Idempotency-Key": "sync-attempt-0001"
+    },
+    "body": {
+      "protocol": 2,
+      "hash": "sha256",
+      "version": "sync-1760000000000",
+      "source": "x-scry-sync:other",
+      "scf": {
+        "scf": "1.0",
+        "source": {
+          "kind": "x-scry-sync",
+          "platform": "other"
+        },
+        "createdAt": "2026-10-10T00:00:00Z",
+        "counts": {
+          "declared": 1,
+          "captured": 1,
+          "skipped": []
+        },
+        "captures": [
+          {
+            "id": "pic-0",
+            "image": "images/pic-1.png",
+            "kind": "component",
+            "title": [
+              "Folder"
+            ],
+            "name": "Picture 0",
+            "capture": {
+              "method": "manual",
+              "viewport": {
+                "width": 64,
+                "height": 48
+              },
+              "scale": 1
+            }
+          }
+        ]
+      },
+      "images": {
+        "images/pic-1.png": {
+          "oid": "6bf29de53398442edb45142612726e80a7274b1e8c28031c70ae2fe92e4759a4",
+          "size": 400
+        }
+      }
+    }
+  },
+  "response": {
+    "status": 400,
+    "headers": {
+      "x-scry-request-id": "<request id>"
+    },
+    "body": {
+      "error": "unsupported_protocol",
+      "message": "This server speaks protocol 1 with sha256 only; use the zip upload",
+      "request_id": "<request id>"
+    }
+  }
+}
