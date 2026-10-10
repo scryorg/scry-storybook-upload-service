@@ -1097,7 +1097,7 @@ export class FirestoreServiceWorker implements FirestoreService {
   async getDeltaKey(projectId: string, keyHash: string): Promise<DeltaKey | null> {
     const token = await this.getAccessToken();
     const doc = await this.getDocument(`projects/${projectId}/deltaKeys/${keyHash}`, token);
-    return doc ? this.convertDocToDeltaKey(doc.fields) : null;
+    return doc ? { ...this.convertDocToDeltaKey(doc.fields), version: doc.updateTime } : null;
   }
 
   async createDeltaKeyIfAbsent(projectId: string, keyHash: string, data: DeltaKey): Promise<boolean> {
@@ -1109,6 +1109,13 @@ export class FirestoreServiceWorker implements FirestoreService {
   async putDeltaKey(projectId: string, keyHash: string, data: DeltaKey): Promise<void> {
     const token = await this.getAccessToken();
     await this.setDocument(`projects/${projectId}/deltaKeys/${keyHash}`, this.deltaKeyToFields(data), token);
+  }
+
+  /** sync-delta-upload: see `FirestoreService.replaceDeltaKeyIfUnchanged`. `currentDocument.updateTime` makes the check atomic with the write. */
+  async replaceDeltaKeyIfUnchanged(projectId: string, keyHash: string, data: DeltaKey, version: string): Promise<boolean> {
+    const token = await this.getAccessToken();
+    const result = await this.patchDocument(`projects/${projectId}/deltaKeys/${keyHash}`, this.deltaKeyToFields(data), token, undefined, { ifUpdateTime: version });
+    return !result.preconditionFailed;
   }
 
   private deltaKeyToFields(d: DeltaKey): FirestoreFields {
@@ -1393,8 +1400,8 @@ export class FirestoreServiceWorker implements FirestoreService {
 
     if (!response.ok) {
       const errorBody = await response.text().catch(() => '');
-      // `ifExists` on a document that is gone answers 404 NOT_FOUND (or FAILED_PRECONDITION): the same "refused, nothing written".
-      const gone = opts?.ifExists && (response.status === 404 || isPreconditionFailure(response.status, errorBody));
+      // `ifExists` / `ifUpdateTime` on a document that is gone answers 404 NOT_FOUND (or FAILED_PRECONDITION): the same "refused, nothing written".
+      const gone = (opts?.ifExists || opts?.ifUpdateTime) && (response.status === 404 || isPreconditionFailure(response.status, errorBody));
       if (gone || (opts?.ifUpdateTime && isPreconditionFailure(response.status, errorBody))) {
         // Not a failure to surface as an error (F92): the document changed since the caller's read,
         // which is exactly the condition `ifUpdateTime` exists to catch. The caller decides what a

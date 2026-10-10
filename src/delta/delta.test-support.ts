@@ -302,8 +302,8 @@ export interface ManifestAnswer {
 }
 
 /** Open a build and send every missing picture, the way the client does (PUT to the href as given). */
-export async function openAndUpload(server: Server, project: string, key: string, pics: ReadonlyArray<Picture>, idempotency = IDEMPOTENCY) {
-  const res = await postManifest(server, project, key, manifestBody(pics), { 'Idempotency-Key': idempotency });
+export async function openAndUpload(server: Server, project: string, key: string, pics: ReadonlyArray<Picture>, idempotency = IDEMPOTENCY, overrides: Record<string, unknown> = {}) {
+  const res = await postManifest(server, project, key, manifestBody(pics, overrides), { 'Idempotency-Key': idempotency });
   const answer = (await res.json()) as ManifestAnswer;
   const byOid = new Map(pics.map((p) => [p.oid, p]));
   for (const o of answer.objects) {

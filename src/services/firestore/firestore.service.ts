@@ -278,4 +278,10 @@ export interface FirestoreService {
 
   /** Replaces the record: a key whose build was failed opens a new build under the same key. */
   putDeltaKey(projectId: string, keyHash: string, data: DeltaKey): Promise<void>;
+
+  /**
+   * Replaces the record only if it is still the version `getDeltaKey` returned (`DeltaKey.version`); false when another request
+   * replaced or removed it first. Makes taking over a stale "same pictures" record exclusive. Optional: without it the takeover is a plain put.
+   */
+  replaceDeltaKeyIfUnchanged?(projectId: string, keyHash: string, data: DeltaKey, version: string): Promise<boolean>;
 }

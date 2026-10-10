@@ -289,6 +289,11 @@ export function registerDelta(app: OpenAPIHono<AppEnv>): void {
       const gate = await gateBlob(deps, key.project, buildId, oid, key.restricted);
       if (!gate.ok) return fromRefusal(c, gate);
       c.set('buildId', buildId);
+      if (gate.committedHeld) {
+        // Idempotent: the build was committed by the client it was shared with and Scry already holds these bytes. Not stored again, no new deadline.
+        log.info('delta blob', reqFields(c, { attrs: { 'delta.bytes': 0, 'delta.items': 1, 'delta.items_skipped': 1 } }));
+        return c.json({ oid, size: gate.size }, 200);
+      }
 
       const bytes = new Uint8Array(await c.req.arrayBuffer());
       if (bytes.byteLength > MAX_BLOB_BYTES) return refuse(c, 413, 'too_large', 'A picture is at most 20 MiB');

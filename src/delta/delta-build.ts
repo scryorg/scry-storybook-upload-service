@@ -95,15 +95,38 @@ export const sha256OfText = (text: string): string => createHash('sha256').updat
 export const keyHash = (idempotencyKey: string): string => createHash('sha256').update(idempotencyKey).digest('hex');
 
 /**
- * "The same pictures from the same source": version + source + every path with its hash and size, in a fixed order. Two
- * manifests with this hash are one piece of work, so only one build (and one charge) is made for them while it is in flight.
+ * Fields of the SCF that differ on every run of the Sync app for identical content, so they must not tell two manifests apart.
+ * Only `createdAt`: scry-node's `buildBundle` stamps `new Date()` into the top level of every bundle it writes (folder and Creative
+ * Cloud engines alike), while the SCF's captures, counts and tool version are a function of the files. (The manifest's `version`
+ * label, `sync-<UTC timestamp>`, is also per run but sits outside the SCF and stays in the key as before.)
  */
-export const contentKeyHash = (input: Pick<ManifestInput, 'version' | 'source' | 'images'>): string => {
+const VOLATILE_SCF_FIELDS: ReadonlySet<string> = new Set(['createdAt']);
+
+/** The value with every object's keys in sorted order (arrays keep theirs), so equal data prints equal. */
+const byCodeUnit = (a: string, b: string): number => Number(a > b) - Number(a < b);
+
+const canonical = (value: unknown): unknown => {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (!value || typeof value !== 'object') return value;
+  const byKey = Object.entries(value as Record<string, unknown>).sort(([a], [b]) => byCodeUnit(a, b));
+  return Object.fromEntries(byKey.map(([k, v]) => [k, canonical(v)]));
+};
+
+/** SHA-256 of the key-sorted SCF without its per-run fields: the same metadata prints the same, an edited keyword does not. */
+export const scfPrint = (scf: Record<string, unknown>): string =>
+  sha256OfText(JSON.stringify(canonical(Object.fromEntries(Object.entries(scf).filter(([k]) => !VOLATILE_SCF_FIELDS.has(k))))));
+
+/**
+ * "The same work from the same source": version + source + every path with its hash and size, in a fixed order, + the print of the
+ * SCF (titles, keywords, tags: a metadata edit over the same pictures is different work and must not join an earlier build that
+ * lacks it). Two manifests with this hash are one piece of work, so only one build (and one charge) is made for them while it is in flight.
+ */
+export const contentKeyHash = (input: Pick<ManifestInput, 'version' | 'source' | 'images' | 'scf'>): string => {
   const { kind, platform, framework } = input.source;
   const pictures = Object.entries(input.images)
     .map(([path, e]) => [path, e.oid, e.size] as const)
     .sort((a, b) => a[0].localeCompare(b[0], 'en'));
-  return `content-${sha256OfText(JSON.stringify([input.version, kind, platform ?? null, framework ?? null, pictures]))}`;
+  return `content-${sha256OfText(JSON.stringify([input.version, kind, platform ?? null, framework ?? null, pictures, scfPrint(input.scf)]))}`;
 };
 
 const extOf = (path: string): string => {
@@ -294,7 +317,13 @@ async function claimContent(deps: DeltaDeps, project: string, contentHash: strin
     const winner = await lookUpContent(deps, project, contentHash, now);
     if (winner.joinable) return winner.joinable;
   }
-  // The earlier record's build is finished, failed or expired: this build takes the record over.
+  // The earlier record's build is finished, failed or expired: this build takes the record over. Exclusively when the store can say
+  // "still the version I read": of two manifests taking over together, one wins and the other joins the winner's build.
+  if (existing?.version && firestore.replaceDeltaKeyIfUnchanged) {
+    if (await firestore.replaceDeltaKeyIfUnchanged(project, contentHash, record, existing.version)) return null;
+    const winner = await lookUpContent(deps, project, contentHash, now);
+    if (winner.joinable) return winner.joinable;
+  }
   await firestore.putDeltaKey(project, contentHash, record);
   return null;
 }
@@ -396,20 +425,33 @@ export interface BlobGate {
   /** Declared families of every path that uses this oid (all must match the bytes), and the declared size. */
   families: Array<PictureFamily>;
   size: number;
+  /**
+   * True when the build has already been committed (queued, processing, finished) and Scry holds this picture: a client that joined
+   * the build and was still sending when the other client's commit landed. Nothing is stored or extended; the route answers 200.
+   */
+  committedHeld: boolean;
 }
 
-/** A picture may be stored only for a live delta build of this project that lists its hash. */
+const NOT_REQUESTED = 'No open build of this project asks for this picture';
+
+/**
+ * A picture may be stored only for a live delta build of this project that lists its hash. A build that was committed meanwhile
+ * (two clients joined one build and the faster one committed) still answers a PUT for a picture Scry already holds with `committedHeld`,
+ * so the slower client finishes instead of being refused; a picture that is not held is refused as before.
+ */
 export async function gateBlob(deps: DeltaDeps, project: string, buildId: string, oid: string, restrictedKey: boolean): Promise<BlobGate | DeltaRefusal> {
   const now = (deps.now ?? (() => new Date()))();
   const build = buildId ? await deps.firestore.getBuild(project, buildId) : null;
-  if (!build?.delta || !isLive(build, now) || build.processingStatus) return refuse(409, 'not_requested', 'No open build of this project asks for this picture');
+  if (!build?.delta || !isLive(build, now)) return refuse(409, 'not_requested', NOT_REQUESTED);
   if (restrictedKey && !isDeviceKeySource(build.source)) return refuse(403, 'device_key_source', 'This key can only upload Scry Sync pictures');
   const raw = await deps.storage.getObjectStream(buildFileKey(project, build.versionId, build.buildNumber, 'images.json'));
-  if (!raw) return refuse(409, 'not_requested', 'No open build of this project asks for this picture');
+  if (!raw) return refuse(409, 'not_requested', NOT_REQUESTED);
   const images = JSON.parse(await new Response(raw).text()) as Record<string, PictureEntry>;
   const uses = Object.entries(images).filter(([, e]) => e.oid === oid);
-  if (uses.length === 0) return refuse(409, 'not_requested', 'No open build of this project asks for this picture');
-  return { ok: true, build, families: uses.map(([path]) => ALLOWED_PICTURE_EXT[extOf(path)]).filter(Boolean), size: uses[0][1].size };
+  if (uses.length === 0) return refuse(409, 'not_requested', NOT_REQUESTED);
+  const committed = !!build.processingStatus;
+  if (committed && !(await deps.blobs.has(project, [oid])).has(oid)) return refuse(409, 'not_requested', NOT_REQUESTED);
+  return { ok: true, build, families: uses.map(([path]) => ALLOWED_PICTURE_EXT[extOf(path)]).filter(Boolean), size: uses[0][1].size, committedHeld: committed };
 }
 
 /** Pushes the build's deadline out after an accepted PUT. */
