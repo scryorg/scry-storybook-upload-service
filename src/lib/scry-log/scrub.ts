@@ -31,6 +31,7 @@ export const SECRET_PATTERNS: ReadonlyArray<RegExp> = [
   /\bAIza[0-9A-Za-z_-]{20,}/g,
   /\bnpm_[A-Za-z0-9]{10,}/g,
   /\bhf_[A-Za-z0-9]{10,}/g,
+  /\bph[cx]_[A-Za-z0-9]{10,}/g, // PostHog project (phc_) and personal (phx_) keys
   /\bdop_v1_[A-Za-z0-9]{10,}/g,
   /\bSG\.[A-Za-z0-9_-]{1,256}\.[A-Za-z0-9_-]{1,256}/g, // SendGrid
   /\bya29\.[A-Za-z0-9_-]{10,}/g, // Google OAuth access token
