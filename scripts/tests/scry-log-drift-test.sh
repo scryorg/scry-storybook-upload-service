@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Tests for scripts/scry-log-drift.sh (log-core-hardening plan rows 32-33): ahead fails with "deploy logs-service first",
 # network error passes with a warning, plus the in-sync / behind / changed-definition / no-hash cases.
-# The stage Worker is faked with a file:// URL (curl reads <dir>/healthz), so no network or server is needed.
+# The stage Worker is faked with a file:// URL (curl reads <dir>/healthz; file:// has no HTTP status, so curl prints 000 there), so no network or server is needed.
 # Run from the repo root (or anywhere): scripts/tests/scry-log-drift-test.sh
 set -uo pipefail
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -38,6 +38,21 @@ run "store without a schema hash (predates S2) fails" 1 "Deploy logs-service fir
 run "network error passes with a warning" 0 "unreachable or unreadable" -
 run "garbage body passes with a warning" 0 "unreachable or unreadable" 'not json at all'
 run "missing vendored dir is a usage error" 2 "cannot read the vendored scry-log" "$(hz 1111111111 "$vhash" "$vcount")" "$tmp/nope"
+
+# An HTTP 403 (the Cloudflare bot-fight challenge a hosted runner got in F59) must pass with a warning that names the status.
+if command -v python3 >/dev/null 2>&1; then
+    port=$((20000 + RANDOM % 20000))
+    python3 -c "import http.server,sys
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(s): s.send_response(403); s.end_headers(); s.wfile.write(b'challenge')
+    def log_message(*a): pass
+http.server.HTTPServer(('127.0.0.1', $port), H).handle_request()" & srv=$!
+    sleep 1; n=$((n + 1))
+    out=$(SCRY_LOGS_STAGE_URL=http://127.0.0.1:$port "$drift" "$dir" 2>&1); rc=$?
+    kill "$srv" 2>/dev/null; wait "$srv" 2>/dev/null
+    if [[ $rc == 0 && $out == *"unreachable or unreadable (HTTP 403"* ]]; then echo "ok   [$n] HTTP 403 passes with a warning naming the status"
+    else echo "FAIL [$n] HTTP 403 warning: rc=$rc, output: $out"; fail=1; fi
+fi
 
 # A vendored copy that gained an entry the store lacks: add one allowed key to a temp copy and compare against the
 # store as it was before (the real hash and count of the unmodified copy).

@@ -16,12 +16,16 @@
 # lacks" when a copy is only ever extended, which is how lib/scry-log changes. A same-count hash difference is a changed
 # definition (warning only, as in logs-deploy-check.sh).
 #
-# Env: SCRY_LOGS_STAGE_URL (default https://logs-stage.scrymore.com), SCRY_LOG_TS_DIR (where `typescript` lives).
+# Env: SCRY_LOGS_STAGE_URL (default https://scry-logs-staging.epinnock.workers.dev, the same Worker as
+# logs-stage.scrymore.com), SCRY_LOG_TS_DIR (where `typescript` lives).
+# Why workers.dev, not logs-stage.scrymore.com (F59): the zone's Bot Fight Mode answers GitHub-hosted runners (Azure,
+# AS8075) with a managed challenge, HTTP 403, so the check passed vacuously on every hosted run. Bot Fight Mode cannot be
+# skipped by a WAF custom rule on the Free plan, so the check reads the Worker's workers.dev host, which has no zone in front.
 set -uo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 dir=${1:-src/lib/scry-log}
-url=${SCRY_LOGS_STAGE_URL:-https://logs-stage.scrymore.com}
+url=${SCRY_LOGS_STAGE_URL:-https://scry-logs-staging.epinnock.workers.dev}
 name=${SCRY_LOG_DRIFT_NAME:-$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")}
 
 warn() { printf 'scry-log-drift: warning: %s\n' "$*"; if [[ -n ${GITHUB_ACTIONS:-} ]]; then printf '::warning title=scry-log-drift::%s\n' "$*"; fi; }
@@ -34,9 +38,18 @@ if ! vjson=$(node "$here/scry-log-schema.mjs" "$dir" 2>&1); then
 fi
 vhash=$(jq -r .hash <<< "$vjson"); vcount=$(jq -r .entries <<< "$vjson")
 
-if ! body=$(curl -4 -fsS --max-time 10 --retry 2 --retry-delay 2 "${url%/}/healthz" 2>/dev/null) \
+# Fetch /healthz, keeping the HTTP status and curl's own error so a failure says why (F59: a hosted runner got a Cloudflare
+# bot-fight challenge, 403, and the old one-line warning hid it).
+tmpb=$(mktemp); tmpe=$(mktemp); trap 'rm -f "$tmpb" "$tmpe"' EXIT
+code=$(curl -4 -sS --max-time 10 --retry 2 --retry-delay 2 -A 'scry-log-drift/1 (+https://scrymore.com)' -o "$tmpb" -w '%{http_code}' "${url%/}/healthz" 2>"$tmpe"); crc=$?
+curl_err=$(head -c 200 "$tmpe" | tr '\n' ' ')
+body=$(cat "$tmpb")
+# curl exits 0 on any HTTP status; file:// (the tests) reports 000. Only a 4xx/5xx or a curl error is a failed fetch.
+if (( crc != 0 )) || [[ $code == [45]* ]] \
     || ! hz=$(jq -ce 'select(type == "object") | {commit: (.commit // null), hash: (.schema.hash // null), entries: (.entries // null)}' <<< "$body" 2>/dev/null); then
-    warn "$url/healthz is unreachable or unreadable; not checking this copy against the stage log store (passing)"
+    why="HTTP ${code:-000}"; [[ -n $curl_err ]] && why="$why, curl: $curl_err"
+    (( crc == 0 )) && [[ $code != [45]* ]] && why="$why, body is not the /healthz JSON: $(head -c 80 <<< "$body" | tr '\n' ' ')"
+    warn "$url/healthz is unreachable or unreadable ($why); not checking this copy against the stage log store (passing)"
     exit 0
 fi
 shash=$(jq -r '.hash // empty' <<< "$hz"); scount=$(jq -r '.entries // empty' <<< "$hz"); scommit=$(jq -r '.commit // "unknown"' <<< "$hz")
