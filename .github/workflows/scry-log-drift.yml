@@ -1,0 +1,44 @@
+name: scry-log-drift
+
+# Fails a PR whose vendored scry-log (src/lib/scry-log) is AHEAD of the stage log store: the store would drop the
+# new fields. Warns when behind, passes with a warning when the stage Worker's /healthz cannot be read.
+# Fix an "ahead" failure by deploying logs-service to stage first (scry-management: promote.sh logs-service).
+# See scripts/scry-log-drift.sh. Drafts skip it; ready_for_review gives a PR its first run.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - 'src/lib/scry-log/**'
+      - 'scripts/scry-log-drift.sh'
+      - 'scripts/scry-log-schema.mjs'
+      - 'scripts/tests/scry-log-drift-test.sh'
+      - '.github/workflows/scry-log-drift.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  drift:
+    name: Vendored scry-log vs stage log store
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    runs-on: ${{ vars.RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # typescript only, to read the vendored .ts schema files; no project install.
+      - name: Install typescript
+        run: |
+          npm install --prefix "$RUNNER_TEMP/ts" --no-audit --no-fund --silent typescript@5.9.2
+          echo "SCRY_LOG_TS_DIR=$RUNNER_TEMP/ts" >> "$GITHUB_ENV"
+      - name: Drift check tests
+        run: bash scripts/tests/scry-log-drift-test.sh
+      - name: Vendored scry-log is not ahead of the stage log store
+        run: bash scripts/scry-log-drift.sh src/lib/scry-log

@@ -379,6 +379,8 @@ npm run deploy:worker
 
 This will upload the worker and configure it according to your `wrangler.toml` file.
 
+**Log schema drift check.** The `scry-log-drift` workflow (`scripts/scry-log-drift.sh`) fails a PR when the vendored `src/lib/scry-log/` is ahead of the stage log store ("deploy logs-service first"), warns when behind, and passes with a warning if the stage `/healthz` cannot be read; refresh the copy with `scry-management/lib/scry-log/sync.sh <repo>`.
+
 ## CI/CD Workflows
 
 `.github/workflows/deploy.yml` is the entry point for validation and deployment.
