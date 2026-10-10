@@ -293,6 +293,8 @@ export interface DeltaKey {
   digest: string;
   createdAt: Date;
   expireAt: Date;
+  /** Set by `getDeltaKey` only: the document's version, to pass to `replaceDeltaKeyIfUnchanged`. Never written. */
+  version?: string;
 }
 
 /**

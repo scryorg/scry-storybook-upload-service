@@ -458,9 +458,28 @@ export class FirestoreServiceNode implements FirestoreService {
     return snapshot.docs.map((doc) => this.convertDocToBuild(doc.id, doc.data())).sort((a, b) => b.buildNumber - a.buildNumber);
   }
 
+  /** sync-delta-upload: see `FirestoreService.claimDeltaCommit`. The transaction reads and flips in one atomic step. */
+  async claimDeltaCommit(projectId: string, buildId: string, stepSummary?: StepSummaryUpdate): Promise<'claimed' | 'already' | 'missing'> {
+    const ref = this.db.doc(`projects/${projectId}/builds/${buildId}`);
+    return this.db.runTransaction(async (transaction) => {
+      const snap = await transaction.get(ref);
+      if (!snap.exists) return 'missing' as const;
+      if (snap.data()!.processingStatus !== undefined) return 'already' as const;
+      transaction.update(ref, { processingStatus: 'queued', ...nodeStepSummary(stepSummary) });
+      return 'claimed' as const;
+    });
+  }
+
+  /** sync-delta-upload: see `FirestoreService.releaseDeltaCommit`. */
+  async releaseDeltaCommit(projectId: string, buildId: string): Promise<void> {
+    await this.db.doc(`projects/${projectId}/builds/${buildId}`).update({ processingStatus: admin.firestore.FieldValue.delete() });
+  }
+
   async getDeltaKey(projectId: string, keyHash: string): Promise<DeltaKey | null> {
     const snap = await this.db.doc(`projects/${projectId}/deltaKeys/${keyHash}`).get();
-    return snap.exists ? this.convertDocToDeltaKey(snap.data()!) : null;
+    if (!snap.exists) return null;
+    const stamp = snap.updateTime;
+    return { ...this.convertDocToDeltaKey(snap.data()!), ...(stamp ? { version: `${stamp.seconds}.${stamp.nanoseconds}` } : {}) };
   }
 
   async createDeltaKeyIfAbsent(projectId: string, keyHash: string, data: DeltaKey): Promise<boolean> {
@@ -475,6 +494,19 @@ export class FirestoreServiceNode implements FirestoreService {
 
   async putDeltaKey(projectId: string, keyHash: string, data: DeltaKey): Promise<void> {
     await this.db.doc(`projects/${projectId}/deltaKeys/${keyHash}`).set({ ...data });
+  }
+
+  /** sync-delta-upload: see `FirestoreService.replaceDeltaKeyIfUnchanged`. The `lastUpdateTime` precondition makes the check atomic with the write. */
+  async replaceDeltaKeyIfUnchanged(projectId: string, keyHash: string, data: DeltaKey, version: string): Promise<boolean> {
+    const [seconds, nanoseconds] = version.split('.').map(Number);
+    try {
+      await this.db.doc(`projects/${projectId}/deltaKeys/${keyHash}`).update({ buildId: data.buildId, digest: data.digest, createdAt: data.createdAt, expireAt: data.expireAt }, { lastUpdateTime: new admin.firestore.Timestamp(seconds, nanoseconds) });
+      return true;
+    } catch (error) {
+      const code = (error as { code?: number }).code;
+      if (code === 5 || code === 9) return false; // 5 = NOT_FOUND (removed since), 9 = FAILED_PRECONDITION (replaced since)
+      throw error;
+    }
   }
 
   private convertDocToDeltaKey(data: DocumentData): DeltaKey {

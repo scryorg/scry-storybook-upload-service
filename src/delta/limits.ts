@@ -15,6 +15,12 @@ export const BUILD_DEADLINE_MS = 60 * 60 * 1000;
 /** An Idempotency-Key record outlives its build deadline by a day (TTL policy on `expireAt`). */
 export const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * A build's "same pictures" record (see `contentKeyHash`) joins a second manifest to the build only this long after the build
+ * was created, so a build stuck in flight cannot swallow the same pictures forever.
+ */
+export const CONTENT_KEY_TTL_MS = 2 * BUILD_DEADLINE_MS;
+
 /** The only protocol and hash this server speaks; anything else is `400 unsupported_protocol`. */
 export const PROTOCOL_VERSION = 1;
 export const HASH_ALGORITHM = 'sha256';
