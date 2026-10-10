@@ -111,7 +111,7 @@ const extOf = (path: string): string => {
   return dot < 0 ? '' : path.slice(dot + 1).toLowerCase();
 };
 
-export const buildFileKey = (project: string, versionId: string, buildNumber: number, name: 'scf.json' | 'images.json'): string =>
+export const buildFileKey = (project: string, versionId: string, buildNumber: number, name: 'scf.json' | 'images.json' | 'delta-sent.json'): string =>
   `${project}/${versionId}/builds/${buildNumber}/${name}`;
 
 type Dropped = Map<string, { code: PictureErrorCode; message: string }>;
