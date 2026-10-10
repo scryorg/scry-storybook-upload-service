@@ -35,6 +35,7 @@ const MCP: ReadonlyArray<Service> = ['mcp'];
 const SEARCH: ReadonlyArray<Service> = ['search'];
 const BUILD: ReadonlyArray<Service> = ['build'];
 const LOGS: ReadonlyArray<Service> = ['logs'];
+const STOCK: ReadonlyArray<Service> = ['stock'];
 const UPLOAD: ReadonlyArray<Service> = ['upload'];
 
 export const ATTRS: Readonly<Record<string, AttrDef>> = {
@@ -82,8 +83,22 @@ export const ATTRS: Readonly<Record<string, AttrDef>> = {
   'thumb.p50_kb_in': { type: 'int', services: BUILD, description: 'Backfill: median original size in KB for the batch or run' },
   'thumb.p50_kb_out': { type: 'int', services: BUILD, description: 'Backfill: median thumbnail size in KB for the batch or run' },
   'thumb.log_post_fail': { type: 'int', services: BUILD, description: 'Backfill: log requests that failed so far (the run continues)' },
-  // --- upload (feature sync-delta-upload): the `delta manifest` / `delta blob` / `delta commit` lines; counts only, never a name, hash or path ---
-  'delta.bytes': { type: 'int', services: UPLOAD, description: 'Delta upload: bytes of the pictures the call asked for (manifest), stored (blob PUT) or referenced (commit)' },
-  'delta.items': { type: 'int', services: UPLOAD, description: 'Delta upload: pictures in the list (manifest, commit) or 1 (blob PUT)' },
-  'delta.items_skipped': { type: 'int', services: UPLOAD, description: 'Delta upload: pictures already held, so not asked for (manifest), or dropped with a per-picture error' },
+  // --- stock (feature stock-metasearch): one `stock provider` line per provider call; enums and counts only, never a query, body or URL ---
+  'stock.provider': { type: 'token', max: 16, pattern: /^[a-z]+$/, services: STOCK, description: 'Stock provider name (pixabay, unsplash, openverse, pexels)' },
+  'stock.provider_status': { type: 'token', max: 8, pattern: /^(?:ok|error|timeout|budget|disabled)$/, services: STOCK, description: 'Outcome of one provider call' },
+  'stock.count': { type: 'int', max: 1000, services: STOCK, description: 'Items the provider returned for this call' },
+  'stock.cache': { type: 'token', max: 4, pattern: /^(?:hit|miss|off)$/, services: STOCK, description: 'KV cache result for this provider call: hit, miss, or off (TTL 0)' },
+  'stock.budget_scope': { type: 'token', max: 6, pattern: /^(?:window|minute|user)$/, services: STOCK, description: 'Which budget refused the call (status budget): the daily/hourly window, the per-minute burst ceiling, or this user\'s share of the window' },
+  'stock.rl_limit': { type: 'int', services: STOCK, description: 'Provider X-RateLimit-Limit header, as a number' },
+  'stock.rl_remaining': { type: 'int', services: STOCK, description: 'Provider X-RateLimit-Remaining header, as a number' },
+  'stock.rl_reset_s': { type: 'int', services: STOCK, description: 'Provider X-RateLimit-Reset header: seconds until the provider window resets' },
+  'stock.retry_after_s': { type: 'int', services: STOCK, description: 'Provider Retry-After header, seconds' },
+  'stock.budget_used': { type: 'int', services: STOCK, description: 'Provider requests counted in the current budget window' },
+  'stock.dropped': { type: 'int', max: 1000, services: STOCK, description: 'Items removed from this provider call because a URL was not https on the provider\'s own hosts' },
+  // --- upload (feature sync-delta-upload): the `delta manifest` / `delta blob` / `delta commit` / clean-up lines; counts and byte sizes only ---
+  'delta.bytes': { type: 'int', services: UPLOAD, description: 'Picture bytes this line is about: manifest = bytes the client must send, blob = bytes stored by this PUT, commit = whole-build picture bytes, clean-up = bytes deleted' },
+  'delta.items': { type: 'int', services: UPLOAD, description: 'Pictures this line is about: manifest/commit = distinct pictures in the build, blob = 1, clean-up = pictures deleted' },
+  'delta.items_skipped': { type: 'int', services: UPLOAD, description: 'Pictures not sent because the project already held them (manifest, commit), refused with a per-picture error (manifest), or kept by clean-up' },
+  'delta.bytes_sent': { type: 'int', services: UPLOAD, description: 'Commit line: picture bytes the client actually sent for this build (what the manifest asked for)' },
+  'delta.items_sent': { type: 'int', services: UPLOAD, description: 'Commit line: distinct pictures the client actually sent for this build (what the manifest asked for)' },
 };

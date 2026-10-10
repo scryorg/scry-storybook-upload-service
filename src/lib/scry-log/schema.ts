@@ -6,7 +6,7 @@ export const SCHEMA_VERSION = 1 as const;
 export const MAX_STRING = 256;
 
 export const LEVELS = ['info', 'warn', 'error', 'debug'] as const;
-export const SERVICES = ['diff', 'mcp', 'upload', 'build', 'cdn', 'dashboard', 'search', 'stock', 'logs', 'plugin', 'cli', 'uat-inbox'] as const;
+export const SERVICES = ['diff', 'mcp', 'upload', 'build', 'cdn', 'dashboard', 'search', 'stock', 'logs', 'plugin', 'cli', 'uat-inbox', 'imagegen'] as const;
 export const ENVS = ['production', 'staging', 'development'] as const;
 
 export type Level = (typeof LEVELS)[number];
@@ -65,6 +65,17 @@ export interface LogLine {
   fallback?: string;
   /** search done line (search-speedup): whether the Zilliz client was built for this request or reused from the warm instance. Closed enum, see ENUM_VALUES; anything else is DROPPED. */
   zilliz_client?: 'new' | 'reused';
+  /** imagegen lines (image-generation, Compare mode): `provider`/`model`/`experiment_id` are lowercase id codes (`gemini`, `gemini-nano-banana-2.1`, `compare-2026-10`), see ID_CODE_RULES; `position` (A..D), `arm` (compare|control), `kind` (grid|refine|larger|snip) are closed enums, see ENUM_VALUES. `outcome` (above) is reused. */
+  provider?: string;
+  model?: string;
+  experiment_id?: string;
+  position?: string;
+  arm?: string;
+  kind?: string;
+  /** imagegen lines: whole micro-dollars of provider cost (never a float), tiles produced, GPU milliseconds. */
+  cost_microusd?: number;
+  tiles?: number;
+  gpu_ms?: number;
   /** Registered, typed attributes (src/attrs-registry.ts). Additive to v1: unregistered or invalid ones are dropped and counted in attrs_drop. */
   attrs?: LogAttrs;
   /** Number of attributes (and list items) dropped from `attrs` by the producer or the store. */
@@ -72,8 +83,8 @@ export interface LogLine {
 }
 
 export const REQUIRED_KEYS = ['v', 'ts', 'level', 'service', 'env', 'msg'] as const;
-export const OPTIONAL_STRING_KEYS = ['version', 'request_id', 'route', 'project', 'run_id', 'build_id', 'uid_hash', 'err_code', 'client', 'step', 'outcome', 'reason', 'sourceType', 'fallback', 'zilliz_client', 'keySource'] as const;
-export const OPTIONAL_NUMBER_KEYS = ['status', 'ms', 'log_drop', 'attempt', 'chunk', 'chunks_total', 'stories', 'with_tags', 'with_fields', 'dropped_tags', 'dropped_fields', 'truncated_bytes', 'tagFilterCount', 'readable_projects', 'readable_left_out', 'readable_ms', 'readable_dropped', 'attrs_drop', 'fallbackCapped', 'jsonParseFailures'] as const;
+export const OPTIONAL_STRING_KEYS = ['version', 'request_id', 'route', 'project', 'run_id', 'build_id', 'uid_hash', 'err_code', 'client', 'step', 'outcome', 'reason', 'sourceType', 'fallback', 'zilliz_client', 'keySource', 'provider', 'model', 'experiment_id', 'position', 'arm', 'kind'] as const;
+export const OPTIONAL_NUMBER_KEYS = ['status', 'ms', 'log_drop', 'attempt', 'chunk', 'chunks_total', 'stories', 'with_tags', 'with_fields', 'dropped_tags', 'dropped_fields', 'truncated_bytes', 'tagFilterCount', 'readable_projects', 'readable_left_out', 'readable_ms', 'readable_dropped', 'attrs_drop', 'fallbackCapped', 'jsonParseFailures', 'cost_microusd', 'tiles', 'gpu_ms'] as const;
 export const ALLOWED_KEYS: ReadonlyArray<string> = [...REQUIRED_KEYS, ...OPTIONAL_STRING_KEYS, ...OPTIONAL_NUMBER_KEYS, 'attrs'];
 
 /** Ids that may appear in a line: path-safe, bounded (ULID, uuid, project ids). */
@@ -119,13 +130,13 @@ function fixedText(k: string, val: string): string {
 }
 
 // Route pattern normalisation (allow-list per segment).
-const ROUTE_SEGMENT = /^(?::[a-z][A-Za-z_]*|\[{1,2}(?:\.\.\.)?[a-z][A-Za-z_.]*\]{1,2}|\*|[a-z][a-z_-]{0,31})$/;
+const ROUTE_SEGMENT = /^(?::[a-z][A-Za-z_]*|\[{1,2}(?:\.\.\.)?[a-z][A-Za-z_.]*\]{1,2}|\*|v[0-9]{1,3}|[a-z][a-z_-]{0,31})$/;
 export const ROUTE_MAX = 128;
 export const ROUTE_MAX_SEGMENTS = 8;
 
 /**
  * Reduce any string to a route pattern: drop `?`/`#` and everything after, keep only allow-listed segments
- * (`:name`, `[name]`, `[...name]`, `*`, short lowercase words), replace the rest by `:param`, at most 8 segments, 128 chars.
+ * (`:name`, `[name]`, `[...name]`, `*`, `v<digits>` API versions such as `v1`, short lowercase words), replace the rest by `:param`, at most 8 segments, 128 chars.
  */
 export function normalizeRoute(input: string): string {
   let path = input.length > MAX_STRING ? input.slice(0, MAX_STRING) : input;
@@ -159,8 +170,39 @@ function isIdentifier(k: string, val: string): boolean {
   return SHAPE_ID_KEYS.has(k) && val.length <= 40 && IDENTIFIER_SHAPE.test(val) && !ALL_DIGITS.test(val);
 }
 
+/**
+ * imagegen id codes (`provider`, `model`, `experiment_id`): a lowercase id that starts with a letter, such as `gemini`, `gemini-nano-banana-2.1`,
+ * `compare-2026-10`; `model` also allows `/` and `:` (`fal-ai/flux-2/klein/9b`, `gemini:gemini-nano-banana-2.1`). A `.` is only allowed before a digit
+ * (a version), never between letters, so a dotted name or an email-like string cannot pass. At most 5 separators (`- _` and, for model, `/ :`), so a
+ * slugified sentence cannot pass. Caps: provider 32, experiment_id 48, model 64. Each key has its own rule, listed in ID_CODE_RULES (hash-covered).
+ * Client-controlled upstream, so a value that does not fit, has a word over WORD_MAX chars or that the scrubber would change is DROPPED, never guessed.
+ * `position`, `arm` and `kind` are closed enums (ENUM_VALUES), not id codes.
+ */
+export interface IdCodeRule {
+  readonly pattern: RegExp;
+  readonly max: number;
+  /** Characters that split a value into words for the WORD_MAX check. */
+  readonly sep: RegExp;
+}
+export const ID_CODE_RULES: Readonly<Record<string, IdCodeRule>> = {
+  provider: { pattern: /^(?!(?:[^-_]*[-_]){6})[a-z](?:[a-z0-9_-]|\.(?=\d)){0,31}$/, max: 32, sep: /[_.-]/ },
+  model: { pattern: /^(?!(?:[^-_/:]*[-_/:]){6})[a-z](?:[a-z0-9_/:-]|\.(?=\d)){0,63}$/, max: 64, sep: /[_./:-]/ },
+  experiment_id: { pattern: /^(?!(?:[^-_]*[-_]){6})[a-z](?:[a-z0-9_-]|\.(?=\d)){0,47}$/, max: 48, sep: /[_.-]/ },
+};
+export const ID_CODE_KEYS: ReadonlyArray<string> = Object.keys(ID_CODE_RULES);
+export function isIdCode(k: string, val: string): boolean {
+  const r = ID_CODE_RULES[k];
+  return !!r && val.length <= r.max && r.pattern.test(val) && wordsShort(val, r.sep) && scrubString(val) === val;
+}
+
 /** Closed enums: the value must be exactly one of these, otherwise the key is DROPPED (no [invalid], not a validity failure of the line). */
-export const ENUM_VALUES: Readonly<Record<string, ReadonlyArray<string>>> = { zilliz_client: ['new', 'reused'] };
+export const ENUM_VALUES: Readonly<Record<string, ReadonlyArray<string>>> = {
+  zilliz_client: ['new', 'reused'],
+  // imagegen (image-generation, Compare mode): tile slot A to D (uppercase, same as the PostHog `position`), experiment arm, generation kind.
+  position: ['A', 'B', 'C', 'D'],
+  arm: ['compare', 'control'],
+  kind: ['grid', 'refine', 'larger', 'snip'],
+};
 
 /** Producers allowed to label themselves in `client` (header x-scry-client is client-controlled, so the store enforces this). */
 export const CLIENT_NAMES: ReadonlyArray<string> = ['scry-link', 'scry-deployer', 'scry-sbcov', 'scry-mcp', 'scry-cli', 'scry-dashboard'];
@@ -239,6 +281,10 @@ function validateLineUnsafe(line: unknown): ValidationResult {
       if (!PROJECT_ID.test(val)) errors.push('project must match ^[A-Za-z0-9]{20}$');
       continue;
     }
+    if (ID_CODE_KEYS.includes(k)) {
+      if (!isIdCode(k, val)) errors.push(`${k} must be a lowercase id code of at most ${ID_CODE_RULES[k].max} chars (${ID_CODE_RULES[k].pattern.source}; words at most ${WORD_MAX} chars)`);
+      continue;
+    }
     if (isIdentifier(k, val)) continue;
     if (ID_KEYS.has(k) && !SAFE_ID.test(val)) errors.push(`${k} has unsafe characters`);
     if (k === 'uid_hash' && !UID_HASH.test(val)) errors.push('uid_hash must be 12 lowercase hex chars');
@@ -315,6 +361,10 @@ function sanitizeLineUnsafe(input: unknown): LogLine | null {
     }
     if (k === 'project') {
       if (PROJECT_ID.test(val)) out[k] = val;
+      continue;
+    }
+    if (ID_CODE_KEYS.includes(k)) {
+      if (isIdCode(k, val)) out[k] = val;
       continue;
     }
     // Cap BEFORE any regex work so the cost is bounded by MAX_STRING, whatever the caller passed.

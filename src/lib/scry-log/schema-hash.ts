@@ -2,10 +2,10 @@
 // store and a vendored copy can be compared without sharing field names. Zero dependencies, synchronous (a Worker
 // can compute it at import time). Source of truth: scry-management/lib/scry-log/; vendored by sync.sh.
 //
-// What counts: the allowed top-level keys, the closed enum values, the service / env / level lists, and for each
+// What counts: the allowed top-level keys, the closed enum values, the id-code rules (pattern source and flags, max, word separators), the service / env / level lists, and for each
 // registered attribute its name, type, max, pattern (source and flags) and services. What does not count:
 // descriptions, comments and the order anything is declared in. A change to any counted item changes the hash.
-import { ALLOWED_KEYS, ENUM_VALUES, ENVS, LEVELS, SCHEMA_VERSION, SERVICES } from './schema';
+import { ALLOWED_KEYS, ENUM_VALUES, ENVS, ID_CODE_RULES, LEVELS, SCHEMA_VERSION, SERVICES } from './schema';
 import { ATTRS, type AttrDef } from './attrs-registry';
 
 /** The inputs of the hash; the default is this copy's own schema, tests pass altered copies. */
@@ -17,11 +17,13 @@ export interface SchemaShape {
   services: ReadonlyArray<string>;
   envs: ReadonlyArray<string>;
   levels: ReadonlyArray<string>;
+  /** imagegen id-code rules (key to pattern, max, word separator). Absent in older vendored copies, which then have no id-code tokens. */
+  idCodes?: Readonly<Record<string, { pattern: RegExp; max: number; sep: RegExp }>>;
   attrs: Readonly<Record<string, Omit<AttrDef, 'description'> & { description?: string }>>;
 }
 
 export function currentSchemaShape(): SchemaShape {
-  return { version: SCHEMA_VERSION, allowedKeys: ALLOWED_KEYS, enumValues: ENUM_VALUES, services: SERVICES, envs: ENVS, levels: LEVELS, attrs: ATTRS };
+  return { version: SCHEMA_VERSION, allowedKeys: ALLOWED_KEYS, enumValues: ENUM_VALUES, services: SERVICES, envs: ENVS, levels: LEVELS, idCodes: ID_CODE_RULES, attrs: ATTRS };
 }
 
 /** One token per counted item, sorted. The hash is over these; the deploy check diffs them (a vendored copy is "ahead" when it has tokens the store lacks). */
@@ -32,6 +34,7 @@ export function schemaTokens(shape: SchemaShape = currentSchemaShape()): string[
   for (const s of shape.services) t.push(`service:${s}`);
   for (const e of shape.envs) t.push(`env:${e}`);
   for (const l of shape.levels) t.push(`level:${l}`);
+  for (const [k, r] of Object.entries(shape.idCodes ?? {})) t.push(`idcode:${k}|${r.max}|/${r.pattern.source}/${r.pattern.flags}|/${r.sep.source}/${r.sep.flags}`);
   for (const [name, d] of Object.entries(shape.attrs)) {
     const svc = d.services ? [...d.services].sort().join(',') : '*';
     const pat = d.pattern ? `/${d.pattern.source}/${d.pattern.flags}` : '-';

@@ -554,8 +554,30 @@ describe('the build the processing service reads', () => {
     expect((await postCommit(server, PROJECT, CI_KEY, 'nope')).status).toBe(404);
   });
 
+  it('the commit line says how much this sync moved: whole-build totals plus what was sent and what the project already held', async () => {
+    const { server } = setup();
+    const first = pictures(2, 1);
+    await openAndUpload(server, PROJECT, CI_KEY, first, 'sync-first');
+    const info = vi.spyOn(log, 'info');
+    const second = [...first, ...pictures(1, 50)];
+    const { buildId } = (await (await postManifest(server, PROJECT, CI_KEY, manifestBody(second), { 'Idempotency-Key': 'sync-second' })).json()) as ManifestAnswer;
+    await putBlob(server, PROJECT, CI_KEY, second[2].oid, second[2].bytes, buildId);
+    expect((await postCommit(server, PROJECT, CI_KEY, buildId)).status).toBe(202);
+    const attrsOf = (msg: string) => (info.mock.calls.filter((c) => c[0] === msg).at(-1)?.[1] as { attrs: Record<string, number> }).attrs;
+    const newBytes = second[2].bytes.byteLength;
+    expect(attrsOf('delta manifest')).toEqual({ 'delta.bytes': newBytes, 'delta.items': 3, 'delta.items_skipped': 2 });
+    expect(attrsOf('delta commit')).toEqual({
+      'delta.bytes': second.reduce((sum, p) => sum + p.bytes.byteLength, 0),
+      'delta.items': 3,
+      'delta.bytes_sent': newBytes,
+      'delta.items_sent': 1,
+      'delta.items_skipped': 2,
+    });
+    info.mockRestore();
+  });
+
   it('the delta log attrs are registered for the upload service as integers, so a line carries counts and never names or ids', () => {
-    for (const name of ['delta.bytes', 'delta.items', 'delta.items_skipped']) {
+    for (const name of ['delta.bytes', 'delta.items', 'delta.items_skipped', 'delta.bytes_sent', 'delta.items_sent']) {
       expect(ATTRS[name], name).toMatchObject({ type: 'int' });
       expect(ATTRS[name].services).toContain('upload');
     }
