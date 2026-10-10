@@ -120,9 +120,10 @@ export interface StorageService {
 
   /**
    * Lists one page of keys under `prefix`, in key order, with size and write time.
-   * `limit` is at most 1000 (the R2 page size).
+   * `limit` is at most 1000 (the R2 page size). `startAfter` (a full key, exclusive) starts the listing after that key, so a
+   * caller can jump over a stretch it does not need; `cursor` wins when both are given.
    */
-  listKeys(prefix: string, opts?: { cursor?: string; limit?: number }): Promise<StorageKeyPage>;
+  listKeys(prefix: string, opts?: { cursor?: string; limit?: number; startAfter?: string }): Promise<StorageKeyPage>;
 
   /**
    * Deletes a single object. A no-op if it does not already exist.

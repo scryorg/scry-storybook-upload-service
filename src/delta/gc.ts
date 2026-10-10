@@ -9,12 +9,14 @@ import { log } from '../lib/log.js';
 import type { FirestoreService } from '../services/firestore/firestore.service.js';
 import type { Build } from '../services/firestore/firestore.types.js';
 import type { StorageService } from '../services/storage/storage.service.js';
-import { BLOB_ROOT } from './blob-store.js';
+import { BLOB_ROOT, useMarkerPrefix } from './blob-store.js';
 import { buildFileKey } from './delta-build.js';
 import { BLOB_RETENTION_DAYS } from './limits.js';
 
 /** Builds read per project. A project with this many delta builds or more is skipped (it cannot be listed whole). */
 export const GC_BUILD_PAGE = 500;
+/** A manifest opened this recently (see `BlobStore.touch`) may have been told a picture is held that clean-up's snapshot does not know about. */
+export const GC_MANIFEST_GRACE_MS = 2 * 60_000;
 /** Pictures looked at per run; the rest wait for the next day. */
 export const GC_MAX_BLOBS_PER_RUN = 25_000;
 
@@ -109,6 +111,15 @@ async function collectCandidates(storage: GcDeps['storage'], cutoff: Date, limit
   return candidates;
 }
 
+/** True when a manifest of the project was opened within the grace window (checked live, right before a delete). */
+async function manifestInFlight(deps: GcDeps, project: string): Promise<boolean> {
+  const page = await deps.storage.listKeys(useMarkerPrefix(project), { limit: 1 });
+  const marker = page.keys[0];
+  if (!marker) return false;
+  const clock = (deps.now ?? new Date()).getTime();
+  return marker.uploaded.getTime() > clock - GC_MANIFEST_GRACE_MS;
+}
+
 /** Deletes one project's unreferenced old pictures, or records why it was skipped. */
 async function sweepProject(deps: GcDeps, project: string, blobs: ReadonlyArray<{ key: string; oid: string; size: number }>, cutoff: Date, result: GcResult): Promise<void> {
   const builds = await deps.firestore.listDeltaBuilds(project, GC_BUILD_PAGE);
@@ -123,6 +134,11 @@ async function sweepProject(deps: GcDeps, project: string, blobs: ReadonlyArray<
   }
   for (const blob of blobs) {
     if (refs.oids.has(blob.oid)) continue;
+    // The snapshot above can be minutes old: a manifest that arrived since may already have been told this picture is held.
+    if (await manifestInFlight(deps, project)) {
+      result.skippedProjects.push({ project, reason: 'manifest-in-flight' });
+      return;
+    }
     await deps.storage.delete(blob.key);
     result.deleted++;
     result.deletedBytes += blob.size;

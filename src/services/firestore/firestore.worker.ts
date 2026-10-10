@@ -512,6 +512,30 @@ export class FirestoreServiceWorker implements FirestoreService {
     };
   }
 
+  /** sync-delta-upload: see `FirestoreService.claimDeltaCommit`. */
+  async claimDeltaCommit(projectId: string, buildId: string, stepSummary?: StepSummaryUpdate): Promise<'claimed' | 'already' | 'missing'> {
+    const token = await this.getAccessToken();
+    const buildPath = `projects/${projectId}/builds/${buildId}`;
+    const doc = await this.getDocument(buildPath, token);
+    if (!doc) return 'missing';
+    if (doc.fields?.processingStatus !== undefined) return 'already';
+    const summary = stepSummaryPatch(stepSummary);
+    const result = await this.patchDocument(
+      buildPath,
+      { processingStatus: { stringValue: 'queued' }, ...summary.fields },
+      token,
+      ['processingStatus', 'bundlePending', ...summary.mask],
+      { ifUpdateTime: doc.updateTime }
+    );
+    return result.preconditionFailed ? 'already' : 'claimed';
+  }
+
+  /** sync-delta-upload: see `FirestoreService.releaseDeltaCommit`. A masked field that the patch leaves out is deleted. */
+  async releaseDeltaCommit(projectId: string, buildId: string): Promise<void> {
+    const token = await this.getAccessToken();
+    await this.patchDocument(`projects/${projectId}/builds/${buildId}`, {}, token, ['processingStatus']);
+  }
+
   /**
    * Mark a bundle build's upload as never completed (ledger F80), guarded by the document's
    * `updateTime` at the moment `getBuildOrphanState` read it (ledger F92). Firestore's

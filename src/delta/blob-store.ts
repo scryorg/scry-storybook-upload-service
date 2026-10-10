@@ -11,11 +11,22 @@ import type { StorageService } from '../services/storage/storage.service.js';
 import { SHA256_HEX } from './limits.js';
 
 export const BLOB_ROOT = '_blobs/';
+/** `_blobuse/<projectId>/touch`: written whenever a manifest of the project is being opened, read by clean-up (G8, see `touch`). */
+export const USE_ROOT = '_blobuse/';
 
-/** Pages of 1,000 keys read before `has` stops listing and checks the rest one by one. */
-const MAX_LIST_PAGES = 50;
-/** Few hashes are cheaper to HEAD than to list, and the leftovers after the page cap are HEADed up to this many. */
+export const useMarkerPrefix = (projectId: string): string => {
+  assertProject(projectId);
+  return `${USE_ROOT}${projectId}/`;
+};
+
+/** Few hashes are cheaper to HEAD than to list; at most this many are HEADed one by one. */
 const HEAD_LIMIT = 50;
+
+/** The 64-hex string just below `oid` (all zeros stays all zeros: listing after the bare prefix starts at the first key). */
+function hexBefore(oid: string): string {
+  const n = BigInt(`0x${oid}`);
+  return n === 0n ? '' : (n - 1n).toString(16).padStart(64, '0');
+}
 
 export class BlobHashMismatch extends Error {
   constructor() {
@@ -58,23 +69,22 @@ export async function sha256Hex(bytes: Uint8Array): Promise<string> {
 export class BlobStore {
   constructor(private readonly storage: StorageService) {}
 
-  /** Which of `oids` this project holds. Looks only under `_blobs/<projectId>/`. */
+  /**
+   * Which of `oids` this project holds. Looks only under `_blobs/<projectId>/`. The answer is exact at any project size: a
+   * few hashes are HEADed, many are found by listing pages that start just before the next wanted hash (the keys are sorted,
+   * so the stretch between two wanted hashes is never read).
+   */
   async has(projectId: string, oids: ReadonlyArray<string>): Promise<Set<string>> {
     const prefix = blobPrefix(projectId);
-    const wanted = new Set(oids);
+    const wanted = [...new Set(oids)].sort();
     for (const oid of wanted) assertOid(oid);
     const held = new Set<string>();
-    if (wanted.size === 0) return held;
-    if (wanted.size <= HEAD_LIMIT) {
+    if (wanted.length === 0) return held;
+    if (wanted.length <= HEAD_LIMIT) {
       await this.headEach(prefix, wanted, held);
       return held;
     }
-
     await this.listHeld(prefix, wanted, held);
-    // The listing may have been cut short: settle a small remainder one by one, report a big one as missing (the client
-    // re-sends it and the PUT answers "already held", so the build is correct either way).
-    const rest = [...wanted].filter((oid) => !held.has(oid));
-    if (rest.length > 0 && rest.length <= HEAD_LIMIT) await this.headEach(prefix, rest, held);
     return held;
   }
 
@@ -82,17 +92,33 @@ export class BlobStore {
     for (const oid of oids) if (await this.storage.head(`${prefix}${oid}`)) held.add(oid);
   }
 
-  private async listHeld(prefix: string, wanted: ReadonlySet<string>, held: Set<string>): Promise<void> {
-    let cursor: string | undefined;
-    for (let page = 0; page < MAX_LIST_PAGES && held.size < wanted.size; page++) {
-      const result = await this.storage.listKeys(prefix, { cursor, limit: 1000 });
-      for (const entry of result.keys) {
-        const oid = entry.key.slice(prefix.length);
-        if (wanted.has(oid)) held.add(oid);
+  /** `wanted` is sorted. Each round lists from just before the first hash not yet settled and settles every wanted hash the page passes. */
+  private async listHeld(prefix: string, wanted: ReadonlyArray<string>, held: Set<string>): Promise<void> {
+    const wantedSet = new Set(wanted);
+    let next = 0;
+    while (next < wanted.length) {
+      if (wanted.length - next <= HEAD_LIMIT) {
+        await this.headEach(prefix, wanted.slice(next), held);
+        return;
       }
-      cursor = result.cursor;
-      if (!cursor) return;
+      const page = await this.storage.listKeys(prefix, { startAfter: `${prefix}${hexBefore(wanted[next])}`, limit: 1000 });
+      for (const entry of page.keys) {
+        const oid = entry.key.slice(prefix.length);
+        if (wantedSet.has(oid)) held.add(oid);
+      }
+      if (!page.cursor) return; // the listing ended: every wanted hash past this point is not held
+      const last = page.keys[page.keys.length - 1].key.slice(prefix.length);
+      while (next < wanted.length && wanted[next] <= last) next++;
     }
+  }
+
+  /**
+   * Marks the project as in use right now. A manifest answers "held" for old pictures before its build row exists, and clean-up
+   * works from a snapshot of the build rows, so clean-up reads this marker immediately before every delete and leaves the
+   * project alone while it is fresh. One tiny write per manifest; call it before `has`.
+   */
+  async touch(projectId: string): Promise<void> {
+    await this.storage.putObject(`${useMarkerPrefix(projectId)}touch`, new Uint8Array(0), { contentType: 'application/octet-stream' });
   }
 
   /** True when this project already holds the object. */

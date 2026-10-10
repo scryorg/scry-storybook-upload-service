@@ -80,10 +80,11 @@ export class MockStorageService implements StorageService {
     this.objects.set(key, { bytes, contentType: opts.contentType, uploaded: new Date() });
   }
 
-  async listKeys(prefix: string, opts: { cursor?: string; limit?: number } = {}): Promise<StorageKeyPage> {
+  async listKeys(prefix: string, opts: { cursor?: string; limit?: number; startAfter?: string } = {}): Promise<StorageKeyPage> {
     const limit = Math.min(opts.limit ?? 1000, 1000);
     const all = [...this.objects.keys()].filter((k) => k.startsWith(prefix)).sort();
-    const start = opts.cursor ? all.findIndex((k) => k > (opts.cursor as string)) : 0;
+    const after = opts.cursor ?? opts.startAfter;
+    const start = after ? all.findIndex((k) => k > after) : 0;
     const page = start < 0 ? [] : all.slice(start, start + limit);
     const more = start >= 0 && start + limit < all.length;
     return {

@@ -112,6 +112,31 @@ export const commitRoute = createRoute({
   },
 });
 
+/** The whole body, or null as soon as more than `max` bytes have arrived (the rest of the stream is cancelled unread). */
+async function readCapped(body: ReadableStream<Uint8Array> | null, max: number): Promise<Uint8Array | null> {
+  if (!body) return new Uint8Array(0);
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > max) {
+      await reader.cancel().catch(() => undefined);
+      return null;
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
+
 /** One refusal: fixed words in the line and the body, nothing the client sent. */
 function refuse(c: Ctx, status: Status, code: string, message: string, extra: Record<string, unknown> = {}) {
   log.warn('delta refused', reqFields(c, { err_code: `delta_${code}`, status }));
@@ -185,8 +210,9 @@ export function registerDelta(app: OpenAPIHono<AppEnv>): void {
 
       const declared = Number(c.req.header('Content-Length'));
       if (Number.isFinite(declared) && declared > MAX_MANIFEST_BYTES) return refuse(c, 413, 'manifest_too_large', 'The manifest is larger than 16 MiB');
-      const buffer = await c.req.arrayBuffer();
-      if (buffer.byteLength > MAX_MANIFEST_BYTES) return refuse(c, 413, 'manifest_too_large', 'The manifest is larger than 16 MiB');
+      // Counted as it streams in, so a body with no (or a false) Content-Length is cut off at the cap instead of buffered whole.
+      const buffer = await readCapped(c.req.raw.body, MAX_MANIFEST_BYTES);
+      if (!buffer) return refuse(c, 413, 'manifest_too_large', 'The manifest is larger than 16 MiB');
       const text = new TextDecoder().decode(buffer);
 
       let json: unknown;

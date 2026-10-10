@@ -53,16 +53,21 @@ export class FakeR2 {
   async delete(key: string | string[]) {
     for (const k of Array.isArray(key) ? key : [key]) this.objects.delete(k);
   }
-  async list(opts: { prefix?: string; cursor?: string; limit?: number } = {}) {
+  /** Number of list() calls so far (a test asserts a big existence check stays cheap). */
+  listCalls = 0;
+  async list(opts: { prefix?: string; cursor?: string; startAfter?: string; limit?: number } = {}) {
+    this.listCalls++;
     const keys = [...this.objects.keys()].filter((k) => k.startsWith(opts.prefix ?? '')).sort();
-    const start = opts.cursor ? Number(opts.cursor) : 0;
+    // Like R2: `cursor` (here: the last key of the previous page) continues a listing, `startAfter` starts one after a key.
+    const after = opts.cursor ?? opts.startAfter;
+    const start = after === undefined ? 0 : keys.findIndex((k) => k > after);
     const limit = opts.limit ?? 1000;
-    const slice = keys.slice(start, start + limit);
-    const truncated = start + limit < keys.length;
+    const slice = start < 0 ? [] : keys.slice(start, start + limit);
+    const truncated = start >= 0 && start + limit < keys.length;
     return {
       objects: slice.map((key) => ({ key, size: this.objects.get(key)!.bytes.byteLength, uploaded: this.objects.get(key)!.uploaded })),
       truncated,
-      cursor: truncated ? String(start + limit) : undefined,
+      cursor: truncated ? slice[slice.length - 1] : undefined,
     };
   }
   /** Seed an object with a chosen upload time (for clean-up tests). */
@@ -136,6 +141,18 @@ export class FakeFirestore {
   }
   async putDeltaKey(projectId: string, hash: string, data: DeltaKey) {
     this.keys.set(`${projectId}/${hash}`, data);
+  }
+  /** Atomic like the Firestore precondition: JS runs this check-and-set without yielding. */
+  async claimDeltaCommit(projectId: string, buildId: string): Promise<'claimed' | 'already' | 'missing'> {
+    const b = this.builds.get(`${projectId}/${buildId}`);
+    if (!b) return 'missing';
+    if (b.processingStatus) return 'already';
+    b.processingStatus = 'queued';
+    return 'claimed';
+  }
+  async releaseDeltaCommit(projectId: string, buildId: string) {
+    const b = this.builds.get(`${projectId}/${buildId}`);
+    if (b) delete b.processingStatus;
   }
   async incrementCaptureCounter(projectId: string, counterId: string) {
     const id = `${projectId}/${counterId}`;

@@ -269,6 +269,7 @@ export async function openDeltaBuild(deps: DeltaDeps, input: ManifestInput): Pro
   if (!keyState.ok) return keyState;
 
   const oids = [...new Set(entries.filter(([path]) => !dropped.has(path)).map(([, e]) => e.oid))];
+  await blobs.touch(input.project);
   const held = await blobs.has(input.project, oids);
   const listing = objectList(input.images, dropped, held);
   if (listing.newBytes > MAX_NEW_BYTES) return refuse(413, 'too_many_new_bytes', 'This build needs more new picture data than one build may send');
@@ -371,6 +372,33 @@ async function enqueue(deps: DeltaDeps, project: string, build: Build, manifestK
   }
 }
 
+/**
+ * Queues a committed build. The state flip comes first and is conditional, so two concurrent commits cannot both send: the
+ * loser gets `null` and answers as a repeat. A failed send gives the claim back so the client's retry can commit.
+ */
+async function claimAndEnqueue(deps: DeltaDeps, project: string, build: Build, manifestKey: string, imagesKey: string, requestId?: string): Promise<{ queued: boolean } | DeltaRefusal | null> {
+  const { firestore } = deps;
+  const summaryUpdate = stepSummaryFor(deps.queue ? 'enqueue' : 'presign', 'ok');
+  if (firestore.claimDeltaCommit) {
+    const claim = await firestore.claimDeltaCommit(project, build.id, summaryUpdate);
+    if (claim === 'missing') return refuse(404, 'build_not_found', 'No such build');
+    if (claim === 'already') return null;
+  }
+  let queued: boolean;
+  try {
+    queued = await enqueue(deps, project, build, manifestKey, imagesKey, requestId);
+  } catch (err) {
+    // Best effort: the send error is what the route reports.
+    await firestore.releaseDeltaCommit?.(project, build.id).catch(() => undefined);
+    throw err;
+  }
+  if (!firestore.claimDeltaCommit) {
+    if (firestore.updateProcessingStatus) await firestore.updateProcessingStatus(project, build.id, 'queued', summaryUpdate);
+    else await firestore.updateBuild(project, build.id, { processingStatus: 'queued' });
+  }
+  return { queued };
+}
+
 /** Commits a build: every referenced picture must be held, then it is queued for processing. */
 export async function commitDeltaBuild(deps: DeltaDeps, project: string, buildId: string, restrictedKey: boolean, requestId?: string): Promise<Committed | DeltaRefusal> {
   const { firestore, storage, blobs } = deps;
@@ -393,9 +421,9 @@ export async function commitDeltaBuild(deps: DeltaDeps, project: string, buildId
   const missing = oids.filter((oid) => !held.has(oid));
   if (missing.length > 0) return refuse(409, 'missing_blobs', 'Some pictures have not arrived', { missing: missing.slice(0, 1000) });
 
-  const queued = await enqueue(deps, project, build, manifestKey, imagesKey, requestId);
-  const summaryUpdate = stepSummaryFor(queued ? 'enqueue' : 'presign', 'ok');
-  if (firestore.updateProcessingStatus) await firestore.updateProcessingStatus(project, build.id, 'queued', summaryUpdate);
-  else await firestore.updateBuild(project, build.id, { processingStatus: 'queued' });
+  const sent = await claimAndEnqueue(deps, project, build, manifestKey, imagesKey, requestId);
+  if (!sent) return { ok: true, firstTime: false, queued: true, build: summary, items: 0, bytes: 0 };
+  if ('ok' in sent) return sent;
+  const { queued } = sent;
   return { ok: true, firstTime: true, queued, build: summary, items: oids.length, bytes: Object.values(images).reduce((s, e) => s + e.size, 0) };
 }

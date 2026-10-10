@@ -121,8 +121,8 @@ export class R2S3StorageService implements StorageService {
   }
 
   /** One page of a prefix listing via the native binding (at most 1000 keys). */
-  async listKeys(prefix: string, opts: { cursor?: string; limit?: number } = {}): Promise<StorageKeyPage> {
-    const list = await this.bucket.list({ prefix, cursor: opts.cursor, limit: Math.min(opts.limit ?? 1000, 1000) });
+  async listKeys(prefix: string, opts: { cursor?: string; limit?: number; startAfter?: string } = {}): Promise<StorageKeyPage> {
+    const list = await this.bucket.list({ prefix, cursor: opts.cursor, ...(opts.startAfter && !opts.cursor ? { startAfter: opts.startAfter } : {}), limit: Math.min(opts.limit ?? 1000, 1000) });
     return {
       keys: list.objects.map((o) => ({ key: o.key, size: o.size, uploaded: o.uploaded })),
       ...(list.truncated && list.cursor ? { cursor: list.cursor } : {}),

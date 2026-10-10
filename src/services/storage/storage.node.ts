@@ -161,17 +161,18 @@ export class R2S3StorageService implements StorageService {
   }
 
   /** One page of a prefix listing via ListObjectsV2 (at most 1000 keys). */
-  async listKeys(prefix: string, opts: { cursor?: string; limit?: number } = {}): Promise<StorageKeyPage> {
+  async listKeys(prefix: string, opts: { cursor?: string; limit?: number; startAfter?: string } = {}): Promise<StorageKeyPage> {
     const result = await this.s3.send(
       new ListObjectsV2Command({
         Bucket: this.bucketName,
         Prefix: prefix,
         ContinuationToken: opts.cursor,
+        ...(opts.startAfter && !opts.cursor ? { StartAfter: opts.startAfter } : {}),
         MaxKeys: Math.min(opts.limit ?? 1000, 1000),
       })
     );
     return {
-      keys: (result.Contents ?? []).map((o) => ({ key: o.Key ?? '', size: o.Size ?? 0, uploaded: o.LastModified ?? new Date(0) })),
+      keys: (result.Contents ?? []).map((o) => ({ key: o.Key ?? '', size: o.Size ?? 0, uploaded: o.LastModified ?? new Date() })),
       ...(result.IsTruncated && result.NextContinuationToken ? { cursor: result.NextContinuationToken } : {}),
     };
   }

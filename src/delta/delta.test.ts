@@ -17,8 +17,9 @@ vi.mock('@sentry/cloudflare', () => ({
 
 import { sweepOrphanBundleBuilds, type OrphanSweepStore } from '../bundle/orphan-sweep.js';
 import { ATTRS } from '../lib/scry-log/attrs-registry.js';
+import { BlobStore } from './blob-store.js';
 import { buildFileKey, keyHash } from './delta-build.js';
-import { GC_BUILD_PAGE, gcDue, runBlobGc } from './gc.js';
+import { GC_BUILD_PAGE, GC_MANIFEST_GRACE_MS, gcDue, runBlobGc } from './gc.js';
 import { MAX_BLOB_BYTES, MAX_MANIFEST_BYTES, MAX_PICTURES } from './limits.js';
 import { BLOBS_PER_MINUTE, MANIFESTS_PER_MINUTE } from './rate-limit.js';
 import {
@@ -608,5 +609,130 @@ describe('recorded exchanges', () => {
     await record('commit-202-queued', reqOf('POST', '/delta/<project>/builds/<buildId>/commit', {}), await postCommit(server, PROJECT, DEVICE_KEY, answer.buildId));
     await record('commit-200-already-accepted', reqOf('POST', '/delta/<project>/builds/<buildId>/commit', {}), await postCommit(server, PROJECT, DEVICE_KEY, answer.buildId));
     await record('commit-404-no-such-build', reqOf('POST', '/delta/<project>/builds/<buildId>/commit', {}), await postCommit(server, PROJECT, DEVICE_KEY, 'unknown-build'));
+  });
+});
+
+// ---- fix round 1 (review of PR #58) ---------------------------------------------------------------------------------
+
+describe('fix round 1', () => {
+  const OLD = new Date(NOW.getTime() - 40 * DAY);
+
+  it('gc-race: a picture a manifest answered "held" for after clean-up took its snapshot is not deleted, and the commit succeeds', async () => {
+    const { server, bucket, firestore, storage } = setup();
+    const [pic] = pictures(1);
+    bucket.seed(`_blobs/${PROJECT}/${pic.oid}`, pic.bytes, OLD); // 40 days old, no build lists it
+    const snapshot = firestore.listDeltaBuilds.bind(firestore);
+    let opened: Response | undefined;
+    firestore.listDeltaBuilds = async (project: string, limit?: number) => {
+      const rows = await snapshot(project, limit); // clean-up's view of the builds is taken here ...
+      opened = await postManifest(server, PROJECT, DEVICE_KEY, manifestBody([pic])); // ... and a manifest arrives right after it
+      return rows;
+    };
+
+    const result = await runBlobGc({ firestore: firestore as never, storage, now: NOW });
+    expect(opened?.status).toBe(201);
+    const answer = (await opened!.json()) as ManifestAnswer;
+    expect(answer.objects[0].actions, 'the manifest was told the picture is held').toBeUndefined();
+    expect(bucket.blobKeys(PROJECT)).toEqual([`_blobs/${PROJECT}/${pic.oid}`]);
+    expect(result.deleted).toBe(0);
+    expect(result.skippedProjects).toEqual([{ project: PROJECT, reason: 'manifest-in-flight' }]);
+    const commit = await postCommit(server, PROJECT, DEVICE_KEY, answer.buildId);
+    expect(commit.status).toBe(202);
+  });
+
+  it('gc-race: a project whose last manifest is older than the grace window is still cleaned', async () => {
+    const { bucket, firestore, storage } = setup();
+    const [pic] = pictures(1);
+    bucket.seed(`_blobs/${PROJECT}/${pic.oid}`, pic.bytes, OLD);
+    bucket.seed(`_blobuse/${PROJECT}/touch`, '', new Date(NOW.getTime() - GC_MANIFEST_GRACE_MS - 1000));
+    const result = await runBlobGc({ firestore: firestore as never, storage, now: NOW });
+    expect(result).toMatchObject({ deleted: 1, errors: 0, skippedProjects: [] });
+    expect(bucket.blobKeys(PROJECT)).toEqual([]);
+  });
+
+  describe('a project holding more than 50,000 pictures', () => {
+    // 51,000 filler keys that sort before every real hash, so no capped scan from the start of the prefix can reach the real ones.
+    const FILLERS = 51_000;
+    const seedFillers = (bucket: ReturnType<typeof setup>['bucket']) => {
+      for (let i = 0; i < FILLERS; i++) bucket.seed(`_blobs/${PROJECT}/${i.toString(16).padStart(64, '0')}`, 'x', OLD);
+    };
+
+    it('the existence check is exact at any size: manifest and commit agree on what is held', async () => {
+      const { server, bucket } = setup();
+      seedFillers(bucket);
+      const pics = pictures(120);
+      pics.slice(0, 90).forEach((p) => bucket.seed(`_blobs/${PROJECT}/${p.oid}`, p.bytes, OLD)); // 90 held, 30 new
+      bucket.listCalls = 0;
+
+      const opened = await openAndUpload(server, PROJECT, DEVICE_KEY, pics);
+      expect(opened.status).toBe(201);
+      expect(opened.answer.objects.filter((o) => o.actions)).toHaveLength(30);
+      expect(bucket.listCalls, 'listing jumps over the filler instead of reading it').toBeLessThan(10);
+
+      const commit = await postCommit(server, PROJECT, DEVICE_KEY, opened.answer.buildId);
+      expect(commit.status).toBe(202);
+    });
+
+    it('BlobStore.has answers for hashes in the middle of the listing, past it, and absent', async () => {
+      const { bucket, storage } = setup();
+      seedFillers(bucket);
+      const store = new BlobStore(storage);
+      const fill = (n: number) => n.toString(16).padStart(64, '0');
+      const heldFillers = Array.from({ length: 80 }, (_, i) => fill(i * 600));
+      const absentFillers = Array.from({ length: 80 }, (_, i) => fill(FILLERS + 10 + i));
+      const reals = pictures(70);
+      reals.slice(0, 35).forEach((p) => bucket.seed(`_blobs/${PROJECT}/${p.oid}`, p.bytes, OLD));
+      const wanted = [...heldFillers, ...absentFillers, ...reals.map((p) => p.oid), fill(0)];
+      const held = await store.has(PROJECT, wanted);
+      expect([...held].sort()).toEqual([...new Set([...heldFillers, ...reals.slice(0, 35).map((p) => p.oid)])].sort());
+    });
+  });
+
+  it('a listing with no LastModified reads as "now", never as the epoch (clean-up cannot treat it as ancient)', async () => {
+    const { R2S3StorageService: NodeStorage } = await import('../services/storage/storage.node.js');
+    const node = new NodeStorage({ accountId: 'acct123', accessKeyId: 'AKIATESTTESTTESTTEST', secretAccessKey: 'test-secret-access-key-not-real', bucketName: 'b' });
+    (node as unknown as { s3: { send: unknown } }).s3.send = vi.fn(async () => ({ Contents: [{ Key: '_blobs/p/' + sha256('a'), Size: 3 }], IsTruncated: false }));
+    const page = await node.listKeys('_blobs/');
+    expect(page.keys[0].uploaded.getTime()).toBe(NOW.getTime());
+  });
+
+  it('a manifest body is cut off at 16 MiB while it streams, with or without a Content-Length', async () => {
+    const { server } = setup();
+    const chunk = new Uint8Array(1024 * 1024).fill(0x20);
+    let pulled = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (pulled >= 40) return controller.close();
+        pulled++;
+        controller.enqueue(chunk);
+      },
+    });
+    const res = await server.request(`/delta/${PROJECT}/manifest`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': DEVICE_KEY, 'Idempotency-Key': IDEMPOTENCY },
+      body,
+      duplex: 'half',
+    } as RequestInit);
+    expect(res.status).toBe(413);
+    expect(((await res.json()) as { error: string }).error).toBe('manifest_too_large');
+    expect(pulled, 'the rest of the body was never read').toBeLessThan(40);
+  });
+
+  it('concurrent commits of one build queue it exactly once; a failed send gives the claim back', async () => {
+    const { server, queue, firestore } = setup();
+    const opened = await openAndUpload(server, PROJECT, DEVICE_KEY, pictures(3));
+    const id = opened.answer.buildId;
+    const replies = await Promise.all([1, 2, 3, 4].map(() => postCommit(server, PROJECT, DEVICE_KEY, id)));
+    expect(queue.send).toHaveBeenCalledTimes(1);
+    expect(replies.map((r) => r.status).sort()).toEqual([200, 200, 200, 202]);
+    expect(firestore.builds.get(`${PROJECT}/${id}`)?.processingStatus).toBe('queued');
+
+    // A failed send releases the claim: the client's retry commits and queues.
+    const second = await openAndUpload(server, PROJECT, DEVICE_KEY, pictures(2, 50), 'sync-attempt-0002');
+    queue.send.mockRejectedValueOnce(new Error('queue down'));
+    expect((await postCommit(server, PROJECT, DEVICE_KEY, second.answer.buildId)).status).toBe(500);
+    expect(firestore.builds.get(`${PROJECT}/${second.answer.buildId}`)?.processingStatus).toBeUndefined();
+    expect((await postCommit(server, PROJECT, DEVICE_KEY, second.answer.buildId)).status).toBe(202);
+    expect(queue.send).toHaveBeenCalledTimes(3);
   });
 });

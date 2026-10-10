@@ -67,6 +67,17 @@ export interface FirestoreService {
     expectedUpdateTime: string
   ): Promise<'marked' | 'precondition-failed'>;
 
+  /**
+   * sync-delta-upload: takes the right to queue a delta build. Flips `processingStatus` to `queued` only if the build has none
+   * and nobody wrote to it since it was read (a Firestore `currentDocument.updateTime` precondition), so of any number of
+   * concurrent commits exactly one gets `'claimed'` and sends to the queue; the rest get `'already'`. Optional like the
+   * methods above: where it is missing the commit falls back to a plain read-then-write.
+   */
+  claimDeltaCommit?(projectId: string, buildId: string, stepSummary?: StepSummaryUpdate): Promise<'claimed' | 'already' | 'missing'>;
+
+  /** Gives a claim back after the queue send failed (clears `processingStatus`) so the client can commit again. */
+  releaseDeltaCommit?(projectId: string, buildId: string): Promise<void>;
+
   createBuild(
     projectId: string,
     data: CreateBuildData
