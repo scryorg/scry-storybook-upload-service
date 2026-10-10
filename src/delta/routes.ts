@@ -21,6 +21,7 @@ import { BlobHashMismatch, BlobRejected, BlobStore } from './blob-store.js';
 import { commitDeltaBuild, extendDeadline, gateBlob, openDeltaBuild, sha256OfText, type DeltaDeps, type DeltaRefusal } from './delta-build.js';
 import { HASH_ALGORITHM, IDEMPOTENCY_KEY, MAX_BLOB_BYTES, MAX_MANIFEST_BYTES, PROTOCOL_VERSION, SHA256_HEX } from './limits.js';
 import { checkBlobRate, checkManifestRate, type RateDecision } from './rate-limit.js';
+import { readSent, recordSent } from './sent-summary.js';
 
 type Ctx = Context<AppEnv>;
 type Status = 400 | 403 | 404 | 409 | 411 | 413 | 422 | 429 | 500 | 503;
@@ -250,6 +251,10 @@ export function registerDelta(app: OpenAPIHono<AppEnv>): void {
 
       c.set('buildId', result.build.id);
       const refused = result.objects.filter((o) => o.error).length;
+      if (!result.reused) {
+        const asked = result.objects.filter((o) => o.missing);
+        await recordSent(deps.storage, { project: key.project, ...result.build }, { bytesSent: result.newBytes, itemsSent: asked.length, itemsSkipped: result.itemsHeld });
+      }
       log.info('delta manifest', reqFields(c, { attrs: { 'delta.bytes': result.newBytes, 'delta.items': result.items, 'delta.items_skipped': result.itemsHeld + refused } }));
       const expiresAt = result.deadline.toISOString();
       const toBody = objectBody(key.project, result.build.id, new URL(c.req.url).origin, expiresAt);
@@ -314,7 +319,10 @@ export function registerDelta(app: OpenAPIHono<AppEnv>): void {
 
       c.set('buildId', result.build.id);
       if (!result.firstTime) return c.json({ buildId: result.build.id, message: 'Build already accepted' }, 200);
-      log.info('delta commit', reqFields(c, { attrs: { 'delta.bytes': result.bytes, 'delta.items': result.items, 'delta.items_skipped': 0 } }));
+      // delta.bytes / delta.items are the whole build; the sent and skipped counts say how much of it this sync moved.
+      const sent = await readSent(deps.storage, { project: key.project, ...result.build });
+      const moved: Record<string, number> = sent ? { 'delta.bytes_sent': sent.bytesSent, 'delta.items_sent': sent.itemsSent, 'delta.items_skipped': sent.itemsSkipped } : {};
+      log.info('delta commit', reqFields(c, { attrs: { 'delta.bytes': result.bytes, 'delta.items': result.items, ...moved } }));
       return c.json({ buildId: result.build.id, buildNumber: result.build.buildNumber, queued: result.queued }, 202);
     } catch (error) {
       reportError(c, error, 'delta commit failed', 'delta_commit_failed');
