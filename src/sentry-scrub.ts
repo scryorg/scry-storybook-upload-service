@@ -215,7 +215,7 @@ function scrubEventUnsafe(event: any): any {
 
   // Allow-list, not deny-list (log-core-hardening G7 / flutter-capture F44): a client can send any
   // header (X-Scry-Caller, a custom X-Foo, an address header), so only SAFE_HEADERS leave the Worker.
-  if (request?.headers) allowListHeaders(request.headers);
+  if (request?.headers) request.headers = allowListHeaders(request.headers);
 
   // Bodies and query strings are never needed to diagnose a failure here, and
   // both can carry keys.
@@ -327,13 +327,33 @@ function scrubAttributes(bag: unknown): void {
   }
 }
 
-/** Keep only SAFE_HEADERS on a request header map (in place), scrubbing the values that stay. */
-function allowListHeaders(headers: Record<string, string>): void {
-  for (const name of Object.keys(headers)) {
-    if (!SAFE_HEADERS.has(name.toLowerCase())) delete headers[name];
-    else if (typeof headers[name] === "string")
-      headers[name] = scrubString(headers[name]);
+/**
+ * Keep only SAFE_HEADERS on a request header container, scrubbing the values that stay.
+ * Fails closed: a SAFE name with a non-string value is dropped, and a `Headers`/`Map`/array container is
+ * converted to a plain object and filtered the same way. Returns the container to store back on the request.
+ */
+function allowListHeaders(headers: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [name, value] of headerEntries(headers)) {
+    if (typeof value === "string" && SAFE_HEADERS.has(name.toLowerCase()))
+      out[name] = scrubString(value);
   }
+  return out;
+}
+
+function headerEntries(headers: unknown): Array<[string, unknown]> {
+  if (!headers || typeof headers !== "object") return [];
+  if (typeof Headers !== "undefined" && headers instanceof Headers) {
+    const pairs: Array<[string, unknown]> = [];
+    headers.forEach((value, name) => pairs.push([name, value]));
+    return pairs;
+  }
+  if (headers instanceof Map) return [...headers.entries()].map(([k, v]) => [String(k), v]);
+  if (Array.isArray(headers))
+    return headers.flatMap((pair): Array<[string, unknown]> =>
+      Array.isArray(pair) && typeof pair[0] === "string" ? [[pair[0], pair[1]]] : [],
+    );
+  return Object.entries(headers);
 }
 
 /** Drop everything credential-shaped from a request block; keep method, path and safe headers. */
@@ -344,7 +364,7 @@ function scrubRequestBlock(request: unknown): void {
     url?: unknown;
     [k: string]: unknown;
   };
-  if (r.headers && typeof r.headers === "object") allowListHeaders(r.headers);
+  if (r.headers && typeof r.headers === "object") r.headers = allowListHeaders(r.headers);
   delete r.data;
   delete r.query_string;
   delete r.cookies;

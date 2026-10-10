@@ -81,4 +81,28 @@ describe('scrubEvent', () => {
   it('tolerates an event with none of those fields', () => {
     expect(() => scrubEvent({})).not.toThrow();
   });
+
+  it('drops an allow-listed header whose value is not a string (fail closed)', () => {
+    const event = scrubEvent({
+      request: {
+        headers: { 'user-agent': ['a', 'scry_proj_SECRETKEY'], 'content-type': 'application/json' },
+      },
+    });
+
+    expect(event.request.headers['user-agent']).toBeUndefined();
+    expect(JSON.stringify(event)).not.toContain('SECRETKEY');
+    expect(event.request.headers['content-type']).toBe('application/json');
+  });
+
+  it('converts and filters Headers, Map and array header containers', () => {
+    const fromHeaders = new Headers({ 'x-api-key': 'scry_proj_SECRET', 'content-type': 'application/json' });
+    const fromMap = new Map([['X-Api-Key', 'scry_proj_SECRET'], ['content-type', 'application/json']]);
+    const fromArray = [['X-Api-Key', 'scry_proj_SECRET'], ['content-type', 'application/json']];
+
+    for (const headers of [fromHeaders, fromMap, fromArray]) {
+      const event = scrubEvent({ request: { headers } });
+      expect(event.request.headers).toEqual({ 'content-type': 'application/json' });
+      expect(JSON.stringify(event)).not.toContain('SECRET');
+    }
+  });
 });

@@ -1,8 +1,21 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Hono } from 'hono';
-import { apiKeyAuth, isAuthenticated, getAuthenticatedApiKey } from './auth.js';
+import {
+  apiKeyAuth,
+  isAuthenticated,
+  getAuthenticatedApiKey,
+  reportKeyTouchFailure,
+  resetKeyTouchReportGate,
+  TOUCH_REPORT_WINDOW_MS,
+} from './auth.js';
+import * as logLib from '../lib/log.js';
 import type { ApiKeyService } from '../services/apikey/apikey.service.js';
 import type { ValidateApiKeyResult } from '../services/apikey/apikey.types.js';
+
+vi.mock('../lib/log.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../lib/log.js')>();
+  return { ...actual, reportError: vi.fn(), logWarn: vi.fn() };
+});
 
 // Mock API Key Service
 const createMockApiKeyService = (validateResult: ValidateApiKeyResult): ApiKeyService => ({
@@ -344,5 +357,32 @@ describe('Auth Middleware', () => {
       expect(keyInfo.id).toBe('key-123');
       expect(keyInfo.name).toBe('Test Key');
     });
+  });
+});
+describe('reportKeyTouchFailure (Sentry throttle)', () => {
+  beforeEach(() => {
+    resetKeyTouchReportGate();
+    vi.mocked(logLib.reportError).mockClear();
+    vi.mocked(logLib.logWarn).mockClear();
+  });
+
+  it('logs every failure but reports to Sentry once per window (fake clock)', () => {
+    let t = 1_000_000;
+    const now = () => t;
+    const err = new Error('firestore down');
+
+    reportKeyTouchFailure(undefined, err, now);
+    t += 1000;
+    reportKeyTouchFailure(undefined, err, now);
+    t += TOUCH_REPORT_WINDOW_MS - 2000; // still inside the window of the first report
+    reportKeyTouchFailure(undefined, err, now);
+
+    expect(logLib.reportError).toHaveBeenCalledTimes(1);
+    expect(logLib.logWarn).toHaveBeenCalledTimes(2);
+
+    t += 2000; // window has elapsed since the first report
+    reportKeyTouchFailure(undefined, err, now);
+    expect(logLib.reportError).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(logLib.reportError).mock.calls[1][3]).toBe('apikey_touch_failed');
   });
 });
