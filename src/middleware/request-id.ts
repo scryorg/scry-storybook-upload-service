@@ -131,7 +131,8 @@ export async function requestIdMiddleware(c: Context<any>, next: Next): Promise<
 
   try {
     const { route, project, buildId, client, uidHash } = verifiedRequestFields(c);
-    log.request({
+    // An expected refusal (the flag-off 503) logs at info; the logger would map any 5xx to error and page the alerts (F50).
+    const fields = {
       request_id: finalId,
       route,
       status: c.res.status,
@@ -140,7 +141,9 @@ export async function requestIdMiddleware(c: Context<any>, next: Next): Promise<
       ...(buildId && SAFE_ID.test(buildId) ? { build_id: buildId } : {}),
       ...(client && SAFE_CLIENT.test(client) ? { client } : {}),
       ...(uidHash ? { uid_hash: uidHash } : {}),
-    });
+    };
+    if (c.get('expectedRefusal') === true) log.info('request', fields);
+    else log.request(fields);
   } catch {
     // a failing logger never changes the response
   }
