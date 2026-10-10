@@ -273,6 +273,18 @@ describe('complete', () => {
     await record('complete-413-too-large', completePath, { captureId: CAPTURE_ID }, res);
   });
 
+  it('guarantee-7: a rejected upload whose object delete fails is reported with the request id, and the 413 is unchanged', async () => {
+    const env = setup();
+    const { json } = await presign(env);
+    await putAll(env, json, PNG, fakeJpeg(2 * 1024 * 1024 + 1));
+    vi.spyOn(env.bucket, 'delete').mockRejectedValue(new Error('r2 delete refused'));
+    const res = await complete(env);
+    expect(res.status).toBe(413);
+    const reported = sentry.map((s) => (s.opts as { tags?: Record<string, string> }).tags).filter((t) => t?.err_code === 'capture_rendition_delete_failed');
+    expect(reported.length).toBeGreaterThan(0);
+    for (const tags of reported) expect(tags?.request_id).toBe(res.headers.get('x-scry-request-id'));
+  });
+
   it('415 for bad magic bytes in any of the three objects (a JPEG sent as the PNG, text as the WebP)', async () => {
     for (const [png, jpeg, webp] of [
       [JPEG, JPEG, WEBP],

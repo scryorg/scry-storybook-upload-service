@@ -314,7 +314,7 @@ export function registerCaptures(app: OpenAPIHono<AppEnv>): void {
       if (failure) {
         // A rejected upload is removed so it cannot be completed later by accident; the client re-presigns and re-PUTs.
         // A missing object is not a rejection: the client simply has not finished, so nothing is deleted.
-        if (failure.status !== 409) await Promise.all(RENDITIONS.map((r) => storage.delete(keyFor(key.project, captureId, r)).catch(() => undefined)));
+        if (failure.status !== 409) await Promise.all(RENDITIONS.map((r) => storage.delete(keyFor(key.project, captureId, r)).catch((deleteError: unknown) => reportError(c, deleteError, 'could not delete rejected rendition', 'capture_rendition_delete_failed', { run_id: captureId }))));
         return refuse(c, failure.status, failure.code, failure.message, captureId);
       }
 

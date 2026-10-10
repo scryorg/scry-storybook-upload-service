@@ -147,8 +147,8 @@ async function recordBuildProvenance(
     if (build.provenanceError) {
       try {
         await firestore.updateBuild(project, build.id, { provenanceError: null });
-      } catch {
-        log.warn('could not clear provenance marker', { ...fields, err_code: 'provenance_clear_failed' });
+      } catch (clearError) {
+        reportError(c, clearError, 'could not clear provenance marker', 'provenance_clear_failed', fields);
       }
     }
   } catch (e) {
@@ -160,8 +160,8 @@ async function recordBuildProvenance(
       await firestore.updateBuild(project, build.id, {
         provenanceError: { at: new Date().toISOString(), message, route },
       });
-    } catch {
-      log.warn('could not record provenance marker', { ...fields, err_code: 'provenance_marker_failed' });
+    } catch (markerError) {
+      reportError(c, markerError, 'could not record provenance marker', 'provenance_marker_failed', fields);
     }
   }
 }
@@ -1453,8 +1453,9 @@ async function sendToQueue(
     emitBuildStep(c, { step, outcome: 'fail', buildId, reason: 'queue_send_failed' });
     try {
       await firestore.updateBuild(project, buildId, { stepSummary: stepSummaryFor(step, 'fail') });
-    } catch {
-      // best effort: the original error is what the route reports
+    } catch (summaryError) {
+      // best effort: the original error is what the route reports; this one is reported on its own
+      reportError(c, summaryError, 'could not record enqueue failure on the build', 'enqueue_step_summary_failed', { build_id: buildId });
     }
     throw err;
   }
@@ -1469,13 +1470,13 @@ async function cleanupRejectedBundle(
   zipKey: string,
   issues: BuildValidationIssue[]
 ): Promise<void> {
-  await storage.delete(zipKey).catch(() => {
-    logWarn(c, 'could not delete rejected object', 'bundle_delete_failed');
+  await storage.delete(zipKey).catch((deleteError: unknown) => {
+    reportError(c, deleteError, 'could not delete rejected object', 'bundle_delete_failed');
   });
   await firestore
     .updateBuild(project, buildId, { processingStatus: 'failed', validationErrors: issues, stepSummary: stepSummaryFor('complete', 'fail') })
-    .catch(() => {
-      logWarn(c, 'could not mark build failed', 'bundle_mark_failed');
+    .catch((markError: unknown) => {
+      reportError(c, markError, 'could not mark build failed', 'bundle_mark_failed');
     });
 }
 
@@ -1872,8 +1873,8 @@ async function discardOversizedMetadataZip(
   buildId: string,
   zipKey: string
 ): Promise<void> {
-  await storage.delete(zipKey).catch(() => {
-    logWarn(c, 'could not delete oversized metadata zip', 'metadata_delete_failed');
+  await storage.delete(zipKey).catch((deleteError: unknown) => {
+    reportError(c, deleteError, 'could not delete oversized metadata zip', 'metadata_delete_failed');
   });
   await firestore
     .updateBuild(project, buildId, {
@@ -1881,8 +1882,8 @@ async function discardOversizedMetadataZip(
       processingError: 'metadata ZIP is over the 2 GiB processing limit',
       stepSummary: stepSummaryFor('upload_received', 'fail'),
     })
-    .catch(() => {
-      logWarn(c, 'could not mark build failed', 'metadata_mark_failed');
+    .catch((markError: unknown) => {
+      reportError(c, markError, 'could not mark build failed', 'metadata_mark_failed');
     });
   emitBuildStep(c, { step: 'upload_received', outcome: 'fail', buildId, reason: 'validation' });
 }

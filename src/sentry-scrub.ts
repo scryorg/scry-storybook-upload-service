@@ -16,17 +16,6 @@
 
 import { scrubString as sharedScrub } from "./lib/scry-log/index.js";
 
-/** Header names whose values must never be sent, compared case-insensitively. */
-const SENSITIVE_HEADERS = [
-  "x-api-key",
-  "authorization",
-  "cookie",
-  "x-cleanup-token",
-  "cf-connecting-ip",
-  "x-forwarded-for",
-  "x-real-ip",
-];
-
 /** Hard cap applied to every string BEFORE scrubbing (bounds the work of every rule). */
 export const MAX_SCRUB_CHARS = 4096;
 /** Nested objects/arrays in breadcrumb data and `extra` are scrubbed down to this depth. */
@@ -224,12 +213,9 @@ function scrubEventUnsafe(event: any): any {
       }
     | undefined;
 
-  if (request?.headers) {
-    for (const name of Object.keys(request.headers)) {
-      if (SENSITIVE_HEADERS.includes(name.toLowerCase()))
-        request.headers[name] = "<redacted>";
-    }
-  }
+  // Allow-list, not deny-list (log-core-hardening G7 / flutter-capture F44): a client can send any
+  // header (X-Scry-Caller, a custom X-Foo, an address header), so only SAFE_HEADERS leave the Worker.
+  if (request?.headers) allowListHeaders(request.headers);
 
   // Bodies and query strings are never needed to diagnose a failure here, and
   // both can carry keys.
@@ -341,6 +327,15 @@ function scrubAttributes(bag: unknown): void {
   }
 }
 
+/** Keep only SAFE_HEADERS on a request header map (in place), scrubbing the values that stay. */
+function allowListHeaders(headers: Record<string, string>): void {
+  for (const name of Object.keys(headers)) {
+    if (!SAFE_HEADERS.has(name.toLowerCase())) delete headers[name];
+    else if (typeof headers[name] === "string")
+      headers[name] = scrubString(headers[name]);
+  }
+}
+
 /** Drop everything credential-shaped from a request block; keep method, path and safe headers. */
 function scrubRequestBlock(request: unknown): void {
   if (!request || typeof request !== "object") return;
@@ -349,13 +344,7 @@ function scrubRequestBlock(request: unknown): void {
     url?: unknown;
     [k: string]: unknown;
   };
-  if (r.headers && typeof r.headers === "object") {
-    for (const name of Object.keys(r.headers)) {
-      if (!SAFE_HEADERS.has(name.toLowerCase())) delete r.headers[name];
-      else if (typeof r.headers[name] === "string")
-        r.headers[name] = scrubString(r.headers[name]);
-    }
-  }
+  if (r.headers && typeof r.headers === "object") allowListHeaders(r.headers);
   delete r.data;
   delete r.query_string;
   delete r.cookies;

@@ -311,8 +311,8 @@ export function apiKeyAuth(options: ApiKeyAuthOptions = {}) {
 
     // Update lastUsedAt timestamp (fire-and-forget to avoid latency)
     if (config.trackUsage && result.apiKey) {
-      apiKeyService.updateLastUsed(projectId, result.apiKey.id).catch(() => {
-        log.warn('could not update key last used', reqFields(c as never, { err_code: 'apikey_touch_failed' }));
+      apiKeyService.updateLastUsed(projectId, result.apiKey.id).catch((touchError: unknown) => {
+        reportError(c as never, touchError, 'could not update key last used', 'apikey_touch_failed');
       });
     }
 
