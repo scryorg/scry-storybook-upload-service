@@ -98,7 +98,7 @@ export const keyHash = (idempotencyKey: string): string => createHash('sha256').
  * Fields of the SCF that differ on every run of the Sync app for identical content, so they must not tell two manifests apart.
  * Only `createdAt`: scry-node's `buildBundle` stamps `new Date()` into the top level of every bundle it writes (folder and Creative
  * Cloud engines alike), while the SCF's captures, counts and tool version are a function of the files. (The manifest's `version`
- * label, `sync-<UTC timestamp>`, is also per run but sits outside the SCF and stays in the key as before.)
+ * label, `sync-<UTC timestamp>`, is also per run but sits outside the SCF; it is left out of the key too, see `contentKeyHash`.)
  */
 const VOLATILE_SCF_FIELDS: ReadonlySet<string> = new Set(['createdAt']);
 
@@ -117,16 +117,19 @@ export const scfPrint = (scf: Record<string, unknown>): string =>
   sha256OfText(JSON.stringify(canonical(Object.fromEntries(Object.entries(scf).filter(([k]) => !VOLATILE_SCF_FIELDS.has(k))))));
 
 /**
- * "The same work from the same source": version + source + every path with its hash and size, in a fixed order, + the print of the
+ * "The same work from the same source": source + every path with its hash and size, in a fixed order, + the print of the
  * SCF (titles, keywords, tags: a metadata edit over the same pictures is different work and must not join an earlier build that
  * lacks it). Two manifests with this hash are one piece of work, so only one build (and one charge) is made for them while it is in flight.
+ * The manifest's `version` label is deliberately NOT in the hash: Sync stamps it `sync-<UTC seconds>` per run, so two clients with
+ * identical content that start in different seconds would otherwise be charged twice (F46). A joiner gets the winner's build and so the
+ * winner's versionId; the client only ever uses the build id from the answer for later PUT/commit calls.
  */
-export const contentKeyHash = (input: Pick<ManifestInput, 'version' | 'source' | 'images' | 'scf'>): string => {
+export const contentKeyHash = (input: Pick<ManifestInput, 'source' | 'images' | 'scf'>): string => {
   const { kind, platform, framework } = input.source;
   const pictures = Object.entries(input.images)
     .map(([path, e]) => [path, e.oid, e.size] as const)
     .sort((a, b) => a[0].localeCompare(b[0], 'en'));
-  return `content-${sha256OfText(JSON.stringify([input.version, kind, platform ?? null, framework ?? null, pictures, scfPrint(input.scf)]))}`;
+  return `content-${sha256OfText(JSON.stringify([kind, platform ?? null, framework ?? null, pictures, scfPrint(input.scf)]))}`;
 };
 
 const extOf = (path: string): string => {

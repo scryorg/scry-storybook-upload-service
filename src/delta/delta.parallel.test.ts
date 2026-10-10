@@ -132,6 +132,50 @@ describe('guarantee-6 the same pictures from one source at the same time are one
   });
 });
 
+describe('F46 the manifest version label is not part of the content key', () => {
+  // The Sync app labels each run `sync-<UTC seconds>`: two clients that start in different seconds still do the same work.
+  const labelA = { version: 'sync-20261010134713' };
+  const labelB = { version: 'sync-20261010134718' };
+  const versionOf = (buildId: string) => (rest.docs.get(`projects/${PROJECT}/builds/${buildId}`)!.fields.versionId as { stringValue: string }).stringValue;
+
+  it('sequential: identical content under two version labels while the first build is open joins the first build', async () => {
+    const { server, queue } = setup({ firestore: workerFirestore() as unknown as FirestoreService });
+    const pics = pictures(4);
+    const one = await openAndUpload(server, PROJECT, DEVICE_KEY, pics, 'harness-instance-a', labelA);
+    const two = await openAndUpload(server, PROJECT, DEVICE_KEY, pics, 'harness-instance-b', labelB);
+    expect(two.answer.buildId).toBe(one.answer.buildId);
+    expect(two.answer.buildNumber).toBe(one.answer.buildNumber);
+    expect(versionOf(two.answer.buildId)).toBe(labelA.version);
+
+    await Promise.all([postCommit(server, PROJECT, DEVICE_KEY, one.answer.buildId), postCommit(server, PROJECT, DEVICE_KEY, two.answer.buildId)]);
+    expect(buildDocs().map((d) => d.id)).toEqual([one.answer.buildId]);
+    expect(queue.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('concurrent: identical content under two version labels at the same moment is one build, one queue message', async () => {
+    const { server, queue } = setup({ firestore: workerFirestore() as unknown as FirestoreService });
+    const pics = pictures(4);
+    const [one, two] = await Promise.all([
+      openAndUpload(server, PROJECT, DEVICE_KEY, pics, 'harness-instance-a', labelA),
+      openAndUpload(server, PROJECT, DEVICE_KEY, pics, 'harness-instance-b', labelB),
+    ]);
+    expect(two.answer.buildId).toBe(one.answer.buildId);
+    expect(two.answer.buildNumber).toBe(one.answer.buildNumber);
+    expect(versionOf(two.answer.buildId)).toBe(versionOf(one.answer.buildId));
+
+    await Promise.all([postCommit(server, PROJECT, DEVICE_KEY, one.answer.buildId), postCommit(server, PROJECT, DEVICE_KEY, two.answer.buildId)]);
+    expect(buildDocs().map((d) => d.id)).toEqual([one.answer.buildId]);
+    expect(queue.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('the label does not make different pictures join: other pictures under the same label are their own build', async () => {
+    const { server } = setup({ firestore: workerFirestore() as unknown as FirestoreService });
+    const one = await openAndUpload(server, PROJECT, DEVICE_KEY, pictures(3, 1), 'harness-instance-a', labelA);
+    const two = await openAndUpload(server, PROJECT, DEVICE_KEY, pictures(3, 100), 'harness-instance-b', labelA);
+    expect(two.answer.buildId).not.toBe(one.answer.buildId);
+  });
+});
+
 /** The same pictures with the SCF edited in `keywords`: a different piece of work. */
 const withKeyword = (pics: ReturnType<typeof pictures>, keyword: string) => {
   const scf = scfFor(pics);
@@ -197,7 +241,7 @@ describe('P2-1 the SCF is part of the content key', () => {
     expect(scfPrint(nested)).not.toBe(scfPrint(scf));
     // Array order is meaningful.
     expect(scfPrint({ ...scf, captures: [...scf.captures].reverse() })).not.toBe(scfPrint(scf));
-    const key = (s: Record<string, unknown>) => contentKeyHash({ version: 'v', source: { kind: 'x-scry-sync', platform: 'other' }, images: {}, scf: s });
+    const key = (s: Record<string, unknown>) => contentKeyHash({ source: { kind: 'x-scry-sync', platform: 'other' }, images: {}, scf: s });
     expect(key(scf)).not.toBe(key({ ...scf, defaults: {} }));
   });
 });
