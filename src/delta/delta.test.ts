@@ -16,10 +16,11 @@ vi.mock('@sentry/cloudflare', () => ({
 }));
 
 import { sweepOrphanBundleBuilds, type OrphanSweepStore } from '../bundle/orphan-sweep.js';
+import { log } from '../lib/log.js';
 import { ATTRS } from '../lib/scry-log/attrs-registry.js';
 import { BlobStore } from './blob-store.js';
 import { buildFileKey, keyHash } from './delta-build.js';
-import { GC_BUILD_PAGE, GC_MANIFEST_GRACE_MS, gcDue, runBlobGc } from './gc.js';
+import { GC_BUILD_PAGE, GC_MANIFEST_GRACE_MS, GC_MARKER_RECHECK_EVERY, gcDue, runBlobGc } from './gc.js';
 import { MAX_BLOB_BYTES, MAX_MANIFEST_BYTES, MAX_PICTURES } from './limits.js';
 import { BLOBS_PER_MINUTE, MANIFESTS_PER_MINUTE } from './rate-limit.js';
 import {
@@ -734,5 +735,99 @@ describe('fix round 1', () => {
     expect(firestore.builds.get(`${PROJECT}/${second.answer.buildId}`)?.processingStatus).toBeUndefined();
     expect((await postCommit(server, PROJECT, DEVICE_KEY, second.answer.buildId)).status).toBe(202);
     expect(queue.send).toHaveBeenCalledTimes(3);
+  });
+});
+
+// ---- fix round 2 (re-review of PR #58) ------------------------------------------------------------------------------
+
+describe('fix round 2', () => {
+  const OLD = new Date(NOW.getTime() - 40 * DAY);
+  const MIN = 60_000;
+
+  it('gc-race-slow-sweep: a manifest that arrived after the snapshot still stops the delete when the sweep runs minutes later', async () => {
+    const { server, bucket, firestore, storage } = setup();
+    const [pic] = pictures(1);
+    bucket.seed(`_blobs/${PROJECT}/${pic.oid}`, pic.bytes, OLD);
+    const snapshot = firestore.listDeltaBuilds.bind(firestore);
+    let opened: Response | undefined;
+    firestore.listDeltaBuilds = async (project: string, limit?: number) => {
+      const rows = await snapshot(project, limit); // snapshot at NOW
+      vi.setSystemTime(new Date(NOW.getTime() + 20_000));
+      opened = await postManifest(server, PROJECT, DEVICE_KEY, manifestBody([pic])); // manifest 20 s later: told "held"
+      vi.setSystemTime(new Date(NOW.getTime() + 10 * MIN)); // the sweep gets to the delete 10 minutes after the snapshot
+      return rows;
+    };
+
+    // No fixed `now`: the sweep reads the (advancing) clock, as the Worker does.
+    const result = await runBlobGc({ firestore: firestore as never, storage });
+    expect(opened?.status).toBe(201);
+    expect(bucket.blobKeys(PROJECT)).toEqual([`_blobs/${PROJECT}/${pic.oid}`]);
+    expect(result.deleted).toBe(0);
+    expect(result.skippedProjects).toEqual([{ project: PROJECT, reason: 'manifest-in-flight' }]);
+    const answer = (await opened!.json()) as ManifestAnswer;
+    expect((await postCommit(server, PROJECT, DEVICE_KEY, answer.buildId)).status).toBe(202);
+  });
+
+  it('gc-race-slow-sweep: a manifest older than the snapshot less the grace does not hold back the clean-up, however late the delete', async () => {
+    const { bucket, firestore, storage } = setup();
+    const [pic] = pictures(1);
+    bucket.seed(`_blobs/${PROJECT}/${pic.oid}`, pic.bytes, OLD);
+    bucket.seed(`_blobuse/${PROJECT}/touch`, '', new Date(NOW.getTime() - GC_MANIFEST_GRACE_MS - 1000));
+    const snapshot = firestore.listDeltaBuilds.bind(firestore);
+    firestore.listDeltaBuilds = async (project: string, limit?: number) => {
+      const rows = await snapshot(project, limit);
+      vi.setSystemTime(new Date(NOW.getTime() + 10 * MIN));
+      return rows;
+    };
+    const result = await runBlobGc({ firestore: firestore as never, storage });
+    expect(result).toMatchObject({ deleted: 1, errors: 0, skippedProjects: [] });
+  });
+
+  describe('marker re-check cadence', () => {
+    const seedMany = (bucket: ReturnType<typeof setup>['bucket'], n: number) => {
+      for (const p of pictures(n)) bucket.seed(`_blobs/${PROJECT}/${p.oid}`, p.bytes, OLD);
+    };
+    const markerReads = (spy: { mock: { calls: unknown[][] } }) => spy.mock.calls.filter((c) => String(c[0]).startsWith('_blobuse/')).length;
+
+    it('reads the marker before the first delete and then once per 50 deletes, not per delete', async () => {
+      const { bucket, firestore, storage } = setup();
+      seedMany(bucket, 120);
+      const listKeys = vi.spyOn(storage, 'listKeys');
+      const result = await runBlobGc({ firestore: firestore as never, storage, now: NOW });
+      expect(result).toMatchObject({ deleted: 120, errors: 0, skippedProjects: [] });
+      expect(GC_MARKER_RECHECK_EVERY).toBe(50);
+      expect(markerReads(listKeys)).toBe(3); // before delete 1, 51 and 101
+    });
+
+    it('a manifest that arrives mid-sweep stops the project at the next re-check', async () => {
+      const { bucket, firestore, storage } = setup();
+      seedMany(bucket, 120);
+      const del = storage.delete.bind(storage);
+      let deletes = 0;
+      storage.delete = async (key: string) => {
+        await del(key);
+        if (++deletes === 10) bucket.seed(`_blobuse/${PROJECT}/touch`, '', new Date(NOW.getTime() + 1000));
+      };
+      const result = await runBlobGc({ firestore: firestore as never, storage, now: NOW });
+      expect(result.deleted).toBe(GC_MARKER_RECHECK_EVERY);
+      expect(result.skippedProjects).toEqual([{ project: PROJECT, reason: 'manifest-in-flight' }]);
+    });
+  });
+
+  it('commit-release-failure: a claim that cannot be given back after a failed send is logged, with ids only', async () => {
+    const { server, firestore, queue } = setup();
+    const opened = await openAndUpload(server, PROJECT, DEVICE_KEY, pictures(2, 70), 'sync-attempt-release');
+    queue.send.mockRejectedValueOnce(new Error('queue down'));
+    firestore.releaseDeltaCommit = async () => {
+      throw new Error('firestore down secret-detail');
+    };
+    const logged = vi.spyOn(log, 'error');
+    const reply = await postCommit(server, PROJECT, DEVICE_KEY, opened.answer.buildId);
+    expect(reply.status).toBe(500);
+    const call = logged.mock.calls.find((c) => c[0] === 'delta commit release failed');
+    expect(call, 'release failure logged').toBeDefined();
+    expect(call![1]).toMatchObject({ project: PROJECT, build_id: opened.answer.buildId, err_code: 'delta_commit_release_failed' });
+    const text = JSON.stringify(call);
+    for (const clientValue of ['sync-attempt-release', DEVICE_KEY, 'secret-detail', 'firestore down']) expect(text).not.toContain(clientValue);
   });
 });

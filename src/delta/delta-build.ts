@@ -6,6 +6,7 @@
 //   commit  every referenced picture is held -> queue {format:'scf-delta'}; otherwise 409 with what is missing
 
 import { createHash } from 'node:crypto';
+import { log } from '../lib/log.js';
 import { currentTraceContext } from '../trace-context.js';
 import { stepSummaryFor, type StepEvent } from '../lib/build-steps.js';
 import { isDeviceKeySource } from '../middleware/auth.js';
@@ -388,8 +389,10 @@ async function claimAndEnqueue(deps: DeltaDeps, project: string, build: Build, m
   try {
     queued = await enqueue(deps, project, build, manifestKey, imagesKey, requestId);
   } catch (err) {
-    // Best effort: the send error is what the route reports.
-    await firestore.releaseDeltaCommit?.(project, build.id).catch(() => undefined);
+    // Best effort: the send error is what the route reports. A failed release is logged: the build would stay `queued` with nothing queued.
+    await firestore.releaseDeltaCommit?.(project, build.id).catch(() => {
+      log.error('delta commit release failed', { request_id: requestId, project, build_id: build.id, err_code: 'delta_commit_release_failed' });
+    });
     throw err;
   }
   if (!firestore.claimDeltaCommit) {

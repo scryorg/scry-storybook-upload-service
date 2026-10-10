@@ -17,6 +17,8 @@ import { BLOB_RETENTION_DAYS } from './limits.js';
 export const GC_BUILD_PAGE = 500;
 /** A manifest opened this recently (see `BlobStore.touch`) may have been told a picture is held that clean-up's snapshot does not know about. */
 export const GC_MANIFEST_GRACE_MS = 2 * 60_000;
+/** Deletes between two looks at the touch marker (the marker is also read once before the first delete). */
+export const GC_MARKER_RECHECK_EVERY = 50;
 /** Pictures looked at per run; the rest wait for the next day. */
 export const GC_MAX_BLOBS_PER_RUN = 25_000;
 
@@ -111,17 +113,21 @@ async function collectCandidates(storage: GcDeps['storage'], cutoff: Date, limit
   return candidates;
 }
 
-/** True when a manifest of the project was opened within the grace window (checked live, right before a delete). */
-async function manifestInFlight(deps: GcDeps, project: string): Promise<boolean> {
-  const page = await deps.storage.listKeys(useMarkerPrefix(project), { limit: 1 });
+/**
+ * True when a manifest of the project was opened at or after the snapshot (less the grace margin). The comparison is against
+ * the moment the snapshot was taken, not against "now": a sweep can run for minutes after it, and a manifest that arrived
+ * after the snapshot may have been told a picture is held that the snapshot does not know about.
+ */
+async function manifestInFlight(storage: GcDeps['storage'], project: string, snapshotAt: number): Promise<boolean> {
+  const page = await storage.listKeys(useMarkerPrefix(project), { limit: 1 });
   const marker = page.keys[0];
   if (!marker) return false;
-  const clock = (deps.now ?? new Date()).getTime();
-  return marker.uploaded.getTime() > clock - GC_MANIFEST_GRACE_MS;
+  return marker.uploaded.getTime() >= snapshotAt - GC_MANIFEST_GRACE_MS;
 }
 
 /** Deletes one project's unreferenced old pictures, or records why it was skipped. */
 async function sweepProject(deps: GcDeps, project: string, blobs: ReadonlyArray<{ key: string; oid: string; size: number }>, cutoff: Date, result: GcResult): Promise<void> {
+  const snapshotAt = (deps.now ?? new Date()).getTime(); // taken before the build list: everything later is not in the snapshot
   const builds = await deps.firestore.listDeltaBuilds(project, GC_BUILD_PAGE);
   if (builds.length >= GC_BUILD_PAGE) {
     result.skippedProjects.push({ project, reason: 'too-many-builds' });
@@ -132,14 +138,19 @@ async function sweepProject(deps: GcDeps, project: string, blobs: ReadonlyArray<
     result.skippedProjects.push({ project, reason: refs.reason });
     return;
   }
+  let sinceCheck = GC_MARKER_RECHECK_EVERY; // forces a look before the first delete
   for (const blob of blobs) {
     if (refs.oids.has(blob.oid)) continue;
     // The snapshot above can be minutes old: a manifest that arrived since may already have been told this picture is held.
-    if (await manifestInFlight(deps, project)) {
-      result.skippedProjects.push({ project, reason: 'manifest-in-flight' });
-      return;
+    if (sinceCheck >= GC_MARKER_RECHECK_EVERY) {
+      if (await manifestInFlight(deps.storage, project, snapshotAt)) {
+        result.skippedProjects.push({ project, reason: 'manifest-in-flight' });
+        return;
+      }
+      sinceCheck = 0;
     }
     await deps.storage.delete(blob.key);
+    sinceCheck++;
     result.deleted++;
     result.deletedBytes += blob.size;
   }
