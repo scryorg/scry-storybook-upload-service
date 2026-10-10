@@ -102,7 +102,7 @@ name = "storybook-deployment-service-preview"
 [env.staging.vars]
 R2_BUCKET_NAME = "my-storybooks-staging"
 SCRY_ENV = "staging"
-SYNC_DELTA = "0"
+SYNC_DELTA = "1"
 
 # Orphan-bundle sweep (ledger F80/F91) — see the matching comment under [env.production.triggers].
 [env.staging.triggers]
