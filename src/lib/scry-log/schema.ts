@@ -72,7 +72,7 @@ export interface LogLine {
 }
 
 export const REQUIRED_KEYS = ['v', 'ts', 'level', 'service', 'env', 'msg'] as const;
-export const OPTIONAL_STRING_KEYS = ['version', 'request_id', 'route', 'project', 'run_id', 'build_id', 'uid_hash', 'err_code', 'client', 'step', 'outcome', 'reason', 'sourceType', 'fallback', 'zilliz_client', 'keySource'] as const;
+export const OPTIONAL_STRING_KEYS = ['version', 'request_id', 'route', 'project', 'run_id', 'build_id', 'uid_hash', 'err_code', 'client', 'step', 'outcome', 'reason', 'sourceType', 'fallback', 'zilliz_client', 'keySource', 'row32_probe_1', 'row32_probe_2', 'row32_probe_3', 'row32_probe_4', 'row32_probe_5', 'row32_probe_6', 'row32_probe_7', 'row32_probe_8', 'row32_probe_9'] as const;
 export const OPTIONAL_NUMBER_KEYS = ['status', 'ms', 'log_drop', 'attempt', 'chunk', 'chunks_total', 'stories', 'with_tags', 'with_fields', 'dropped_tags', 'dropped_fields', 'truncated_bytes', 'tagFilterCount', 'readable_projects', 'readable_left_out', 'readable_ms', 'readable_dropped', 'attrs_drop', 'fallbackCapped', 'jsonParseFailures'] as const;
 export const ALLOWED_KEYS: ReadonlyArray<string> = [...REQUIRED_KEYS, ...OPTIONAL_STRING_KEYS, ...OPTIONAL_NUMBER_KEYS, 'attrs'];
 
