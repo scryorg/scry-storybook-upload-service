@@ -28,8 +28,6 @@ jobs:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ${{ vars.RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
-    env:
-      SCRY_LOG_TS_DIR: ${{ runner.temp }}/ts
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -37,7 +35,9 @@ jobs:
           node-version: '22'
       # typescript only, to read the vendored .ts schema files; no project install.
       - name: Install typescript
-        run: npm install --prefix "$SCRY_LOG_TS_DIR" --no-audit --no-fund --silent typescript@5.9.2
+        run: |
+          npm install --prefix "$RUNNER_TEMP/ts" --no-audit --no-fund --silent typescript@5.9.2
+          echo "SCRY_LOG_TS_DIR=$RUNNER_TEMP/ts" >> "$GITHUB_ENV"
       - name: Drift check tests
         run: bash scripts/tests/scry-log-drift-test.sh
       - name: Vendored scry-log is not ahead of the stage log store
