@@ -46,8 +46,10 @@ if command -v python3 >/dev/null 2>&1; then
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(s): s.send_response(403); s.end_headers(); s.wfile.write(b'challenge')
     def log_message(*a): pass
-http.server.HTTPServer(('127.0.0.1', $port), H).handle_request()" & srv=$!
-    sleep 1; n=$((n + 1))
+http.server.HTTPServer(('127.0.0.1', $port), H).serve_forever()" & srv=$!
+    # Wait for the port (up to 10 s) rather than a fixed sleep: a loaded runner raced the old sleep 1 (F63).
+    for _ in $(seq 50); do (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null && break; sleep 0.2; done
+    n=$((n + 1))
     out=$(SCRY_LOGS_STAGE_URL=http://127.0.0.1:$port "$drift" "$dir" 2>&1); rc=$?
     kill "$srv" 2>/dev/null; wait "$srv" 2>/dev/null
     if [[ $rc == 0 && $out == *"unreachable or unreadable (HTTP 403"* ]]; then echo "ok   [$n] HTTP 403 passes with a warning naming the status"
