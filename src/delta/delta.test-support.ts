@@ -109,6 +109,9 @@ export class FakeFirestore {
     this.builds.set(`${projectId}/${build.id}`, build);
     return { ...build };
   }
+  async deleteBuild(projectId: string, buildId: string) {
+    this.builds.delete(`${projectId}/${buildId}`);
+  }
   async getBuild(projectId: string, buildId: string) {
     const b = this.builds.get(`${projectId}/${buildId}`);
     return b ? { ...b } : null;
@@ -172,7 +175,8 @@ const KEYS: Record<string, { valid: boolean; apiKey?: Record<string, unknown> }>
   [CI_KEY]: { valid: true, apiKey: { id: 'ciKey1', name: 'CI', prefix: 'scry_proj_', kind: 'ci', createdBy: 'uid-ada' } },
 };
 
-export function setup(opts: { syncDelta?: boolean } = {}) {
+/** `firestore` swaps in another implementation (for example the real REST client over a fake Firestore) for the routes only. */
+export function setup(opts: { syncDelta?: boolean; firestore?: FirestoreService } = {}) {
   const bucket = new FakeR2();
   const storage = new R2S3StorageService(bucket as never, {
     accountId: 'acct123',
@@ -193,7 +197,7 @@ export function setup(opts: { syncDelta?: boolean } = {}) {
   const server = new Hono<AppEnv>();
   server.use('*', async (c, next) => {
     c.set('storage', storage);
-    c.set('firestore', firestore as unknown as FirestoreService);
+    c.set('firestore', opts.firestore ?? (firestore as unknown as FirestoreService));
     c.set('apiKeyService', apiKeyService);
     c.set('processingQueue', queue as never);
     c.set('syncDelta', opts.syncDelta ?? true);

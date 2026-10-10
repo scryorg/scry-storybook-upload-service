@@ -16,7 +16,7 @@ import type { StorageService } from '../services/storage/storage.service.js';
 import { validateBundle } from '../vendor/scf/dist/index.js';
 import type { BundleFiles, ValidationIssue } from '../vendor/scf/dist/types.js';
 import { BlobStore } from './blob-store.js';
-import { BUILD_DEADLINE_MS, IDEMPOTENCY_TTL_MS, MAX_BLOB_BYTES, MAX_NEW_BYTES, MAX_PICTURES } from './limits.js';
+import { BUILD_DEADLINE_MS, CONTENT_KEY_TTL_MS, IDEMPOTENCY_TTL_MS, MAX_BLOB_BYTES, MAX_NEW_BYTES, MAX_PICTURES } from './limits.js';
 
 type PictureErrorCode = 'too_big' | 'bad_type';
 type BuildSummary = Pick<Build, 'id' | 'buildNumber' | 'versionId'>;
@@ -93,6 +93,18 @@ const refuse = (status: DeltaRefusal['status'], code: string, message: string, e
 
 export const sha256OfText = (text: string): string => createHash('sha256').update(text).digest('hex');
 export const keyHash = (idempotencyKey: string): string => createHash('sha256').update(idempotencyKey).digest('hex');
+
+/**
+ * "The same pictures from the same source": version + source + every path with its hash and size, in a fixed order. Two
+ * manifests with this hash are one piece of work, so only one build (and one charge) is made for them while it is in flight.
+ */
+export const contentKeyHash = (input: Pick<ManifestInput, 'version' | 'source' | 'images'>): string => {
+  const { kind, platform, framework } = input.source;
+  const pictures = Object.entries(input.images)
+    .map(([path, e]) => [path, e.oid, e.size] as const)
+    .sort((a, b) => a[0].localeCompare(b[0], 'en'));
+  return `content-${sha256OfText(JSON.stringify([input.version, kind, platform ?? null, framework ?? null, pictures]))}`;
+};
 
 const extOf = (path: string): string => {
   const dot = path.lastIndexOf('.');
@@ -186,6 +198,14 @@ const isLive = (build: Build, now: Date): boolean => {
   return !!build.deltaDeadline && build.deltaDeadline.getTime() > now.getTime();
 };
 
+const IN_FLIGHT = new Set(['queued', 'processing']);
+
+/** A build a second manifest for the same pictures may join: still open for pictures, or queued / being processed. */
+const isJoinable = (build: Build | null, now: Date): build is Build => {
+  if (!build?.delta) return false;
+  return build.processingStatus ? IN_FLIGHT.has(build.processingStatus) : isLive(build, now);
+};
+
 const NOT_DEVICE_SOURCE = 'This key can only upload Scry Sync pictures';
 
 /** A delta carries pictures only. The processing service rejects structure / source text after commit has already answered 202, so say no here. */
@@ -243,14 +263,69 @@ async function claimKey(deps: DeltaDeps, input: ManifestInput, hash: string, exi
   }
   if (await firestore.createDeltaKeyIfAbsent(input.project, hash, record)) return { lost: null };
   // Two first calls with one key raced: the other one won. Fail this build and answer with the winner.
-  await firestore.updateBuild(input.project, build.id, { processingStatus: 'failed' });
   const winner = await firestore.getDeltaKey(input.project, hash);
+  // A manifest that joined this build may already have recorded the key for it: this build holds the key after all.
+  if (winner?.buildId === build.id) return { lost: null };
+  await firestore.updateBuild(input.project, build.id, { processingStatus: 'failed' });
   const won = winner && winner.digest === input.digest ? await firestore.getBuild(input.project, winner.buildId) : null;
   if (!won) return refuse(409, 'idempotency_conflict', 'This Idempotency-Key was used with a different manifest');
   return { lost: won };
 }
 
 const summaryOf = (b: BuildSummary) => ({ id: b.id, buildNumber: b.buildNumber, versionId: b.versionId });
+
+/** The "same pictures" record for this manifest and the build it names, when that build can still be joined. */
+async function lookUpContent(deps: DeltaDeps, project: string, contentHash: string, now: Date): Promise<{ key: DeltaKey | null; joinable: Build | null }> {
+  const key = await deps.firestore.getDeltaKey(project, contentHash);
+  if (!key || key.expireAt.getTime() <= now.getTime()) return { key, joinable: null };
+  const build = await deps.firestore.getBuild(project, key.buildId);
+  return { key, joinable: isJoinable(build, now) ? build : null };
+}
+
+/**
+ * Records this build as the one working on these pictures. `null` when it holds the record; the build that won when two first
+ * manifests for the same pictures raced (create-if-absent is atomic, so exactly one of them wins).
+ */
+async function claimContent(deps: DeltaDeps, project: string, contentHash: string, existing: DeltaKey | null, build: Build, now: Date): Promise<Build | null> {
+  const { firestore } = deps;
+  const record = { buildId: build.id, digest: contentHash, createdAt: now, expireAt: new Date(now.getTime() + CONTENT_KEY_TTL_MS) };
+  if (!existing) {
+    if (await firestore.createDeltaKeyIfAbsent(project, contentHash, record)) return null;
+    const winner = await lookUpContent(deps, project, contentHash, now);
+    if (winner.joinable) return winner.joinable;
+  }
+  // The earlier record's build is finished, failed or expired: this build takes the record over.
+  await firestore.putDeltaKey(project, contentHash, record);
+  return null;
+}
+
+/** A build that lost the race for its pictures never reached a client: its row and files go (best effort; a row that stays is failed), the winner answers. */
+async function abandonBuild(deps: DeltaDeps, input: ManifestInput, build: Build): Promise<void> {
+  const { firestore, storage } = deps;
+  await firestore.deleteBuild(input.project, build.id).catch(() => firestore.updateBuild(input.project, build.id, { processingStatus: 'failed' }));
+  for (const name of ['scf.json', 'images.json'] as const) {
+    await storage.delete(buildFileKey(input.project, input.version, build.buildNumber, name)).catch(() => undefined);
+  }
+}
+
+/** Answers a manifest with a build somebody else opened for the same pictures; this manifest's Idempotency-Key now names that build. */
+async function joinBuild(
+  deps: DeltaDeps,
+  input: ManifestInput,
+  hash: string,
+  existingKey: DeltaKey | null,
+  joined: Build,
+  deadline: Date,
+  common: Pick<OpenedBuild, 'objects' | 'newBytes' | 'items' | 'itemsHeld'>,
+  now: Date
+): Promise<OpenedBuild> {
+  const { firestore } = deps;
+  if (!joined.processingStatus) await firestore.updateBuild(input.project, joined.id, { deltaDeadline: deadline });
+  const record = { buildId: joined.id, digest: input.digest, createdAt: now, expireAt: new Date(now.getTime() + IDEMPOTENCY_TTL_MS) };
+  if (existingKey) await firestore.putDeltaKey(input.project, hash, record);
+  else await firestore.createDeltaKeyIfAbsent(input.project, hash, record);
+  return { ok: true, reused: true, build: summaryOf(joined), deadline, ...common };
+}
 
 /** Opens (or re-opens, for the same Idempotency-Key) a delta build from a manifest. */
 export async function openDeltaBuild(deps: DeltaDeps, input: ManifestInput): Promise<OpenedBuild | DeltaRefusal> {
@@ -284,6 +359,11 @@ export async function openDeltaBuild(deps: DeltaDeps, input: ManifestInput): Pro
     return { ok: true, reused: true, build: summaryOf(reuse), deadline, ...common };
   }
 
+  // Another manifest for the same pictures from the same source is already open or in flight: join that build (one build, one charge).
+  const contentHash = contentKeyHash(input);
+  const content = await lookUpContent(deps, input.project, contentHash, now);
+  if (content.joinable) return joinBuild(deps, input, hash, keyState.existingKey, content.joinable, deadline, common, now);
+
   const build = await firestore.createBuild(input.project, {
     versionId: input.version,
     zipUrl: '',
@@ -296,6 +376,12 @@ export async function openDeltaBuild(deps: DeltaDeps, input: ManifestInput): Pro
     deltaDeadline: deadline,
   });
   await writeBuildFiles(deps, input, build, checked.scf, dropped);
+  // Claimed after the files are written, so a manifest that joins this build can PUT pictures straight away.
+  const beaten = await claimContent(deps, input.project, contentHash, content.key, build, now);
+  if (beaten) {
+    await abandonBuild(deps, input, build);
+    return joinBuild(deps, input, hash, keyState.existingKey, beaten, deadline, common, now);
+  }
   const claim = await claimKey(deps, input, hash, keyState.existingKey, build, now);
   if ('ok' in claim) return claim;
   if (claim.lost) return { ok: true, reused: true, build: summaryOf(claim.lost), deadline, ...common };

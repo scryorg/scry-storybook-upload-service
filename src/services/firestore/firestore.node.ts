@@ -458,6 +458,23 @@ export class FirestoreServiceNode implements FirestoreService {
     return snapshot.docs.map((doc) => this.convertDocToBuild(doc.id, doc.data())).sort((a, b) => b.buildNumber - a.buildNumber);
   }
 
+  /** sync-delta-upload: see `FirestoreService.claimDeltaCommit`. The transaction reads and flips in one atomic step. */
+  async claimDeltaCommit(projectId: string, buildId: string, stepSummary?: StepSummaryUpdate): Promise<'claimed' | 'already' | 'missing'> {
+    const ref = this.db.doc(`projects/${projectId}/builds/${buildId}`);
+    return this.db.runTransaction(async (transaction) => {
+      const snap = await transaction.get(ref);
+      if (!snap.exists) return 'missing' as const;
+      if (snap.data()!.processingStatus !== undefined) return 'already' as const;
+      transaction.update(ref, { processingStatus: 'queued', ...nodeStepSummary(stepSummary) });
+      return 'claimed' as const;
+    });
+  }
+
+  /** sync-delta-upload: see `FirestoreService.releaseDeltaCommit`. */
+  async releaseDeltaCommit(projectId: string, buildId: string): Promise<void> {
+    await this.db.doc(`projects/${projectId}/builds/${buildId}`).update({ processingStatus: admin.firestore.FieldValue.delete() });
+  }
+
   async getDeltaKey(projectId: string, keyHash: string): Promise<DeltaKey | null> {
     const snap = await this.db.doc(`projects/${projectId}/deltaKeys/${keyHash}`).get();
     return snap.exists ? this.convertDocToDeltaKey(snap.data()!) : null;

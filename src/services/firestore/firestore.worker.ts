@@ -280,25 +280,10 @@ export class FirestoreServiceWorker implements FirestoreService {
     log.debug('create build step');
     const token = await this.getAccessToken();
     
-    // Get current build number
-    const counterPath = `projects/${projectId}/counters/builds`;
-    let buildNumber = 1;
-    log.debug('create build step');
-    
-    try {
-      const counterDoc = await this.getDocument(counterPath, token);
-      if (counterDoc && counterDoc.fields?.currentBuildNumber?.integerValue) {
-        buildNumber = parseInt(counterDoc.fields.currentBuildNumber.integerValue) + 1;
-      }
-    } catch {
-      // Counter doesn't exist, will create it
-    }
-
-    // Update counter
-    log.debug('create build step');
-    await this.setDocument(counterPath, {
-      currentBuildNumber: { integerValue: buildNumber.toString() }
-    }, token);
+    // sync-delta-upload: concurrent delta commits on one source made two builds with the same number (F30/F10), so a
+    // delta build takes its number from one atomic increment. The zip routes keep the read-then-write until their own
+    // bugfix (the same race exists there; see the followup in the PR).
+    const buildNumber = data.delta ? await this.incrementBuildCounter(projectId, token) : await this.nextBuildNumberReadThenWrite(projectId, token);
 
     // Create build document
     const buildId = this.generateId();
@@ -1142,6 +1127,54 @@ export class FirestoreServiceWorker implements FirestoreService {
       createdAt: new Date(fields.createdAt?.timestampValue || new Date()),
       expireAt: new Date(fields.expireAt?.timestampValue || new Date()),
     };
+  }
+
+  /** The zip routes' build number: read the counter, write it back one higher. NOT atomic, so two uploads at once can repeat a number. */
+  private async nextBuildNumberReadThenWrite(projectId: string, token: string): Promise<number> {
+    const counterPath = `projects/${projectId}/counters/builds`;
+    let buildNumber = 1;
+    try {
+      const counterDoc = await this.getDocument(counterPath, token);
+      if (counterDoc && counterDoc.fields?.currentBuildNumber?.integerValue) {
+        buildNumber = parseInt(counterDoc.fields.currentBuildNumber.integerValue) + 1;
+      }
+    } catch {
+      // Counter doesn't exist, will create it
+    }
+    await this.setDocument(counterPath, { currentBuildNumber: { integerValue: buildNumber.toString() } }, token);
+    return buildNumber;
+  }
+
+  /**
+   * The next build number for a project: one `:commit` with an `increment` transform on the counter document, which
+   * Firestore applies atomically (creating the document when absent) and answers with the new value, so two builds
+   * created at the same moment can never get the same number. Resent on a transient failure: a resend that follows a
+   * lost response only skips a number, it can never repeat one.
+   */
+  private async incrementBuildCounter(projectId: string, token: string): Promise<number> {
+    const name = `projects/${this.config.projectId}/databases/(default)/documents/projects/${projectId}/counters/builds`;
+    const response = await retryFetch(() => fetch(`${this.baseUrl}:commit`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        writes: [
+          {
+            update: { name, fields: {} },
+            updateMask: { fieldPaths: [] },
+            updateTransforms: [{ fieldPath: 'currentBuildNumber', increment: { integerValue: '1' } }],
+          },
+        ],
+      }),
+    }), { op: 'incrementBuildCounter' });
+    if (!response.ok) {
+      log.error('build counter failed', { err_code: `firestore_${response.status}`, status: response.status });
+      throw new Error(`Failed to increment build counter: ${response.status}`);
+    }
+    const body = (await response.json()) as { writeResults?: Array<{ transformResults?: FirestoreValue[] }> };
+    const value = body.writeResults?.[0]?.transformResults?.[0]?.integerValue;
+    const next = value === undefined ? NaN : parseInt(value, 10);
+    if (!Number.isFinite(next)) throw new Error('Build counter increment returned no value');
+    return next;
   }
 
   /**
