@@ -42,6 +42,7 @@ import {
   putBlob,
   setup,
   sha256,
+  FakeFirestore,
   type ManifestAnswer,
 } from './delta.test-support.js';
 
@@ -486,6 +487,46 @@ describe('versioning and flag', () => {
     await record('manifest-503-delta-disabled', reqOf('POST', '/delta/<project>/manifest', '<manifest>'), responses[0]);
     // A key check still comes first: no key is a 401, not a 503.
     expect((await postManifest(server, PROJECT, undefined, manifestBody(pics))).status).toBe(401);
+  });
+
+  // F50: the flag-off refusal is expected traffic (every Sync attempt before the rollout), so it must not read as an error.
+  describe('log level of the flag-off refusal (F50)', () => {
+    let lines: Array<Record<string, unknown>>;
+    beforeEach(() => {
+      lines = [];
+      const grab = (...args: unknown[]) => {
+        lines.push(JSON.parse(args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ')) as Record<string, unknown>);
+      };
+      for (const m of ['log', 'info', 'warn', 'error'] as const) vi.spyOn(console, m).mockImplementation(grab);
+    });
+
+    it('a flag-off manifest call logs delta_disabled at info on both lines and never at error or warn', async () => {
+      const { server } = setup({ syncDelta: false });
+      const res = await postManifest(server, PROJECT, PLAIN_KEY, manifestBody(pictures(1)));
+      expect(res.status).toBe(503);
+      const id = res.headers.get('x-scry-request-id');
+      const request = lines.filter((l) => l.msg === 'request' && l.request_id === id);
+      const refused = lines.filter((l) => l.msg === 'delta refused' && l.request_id === id);
+      expect(request).toHaveLength(1);
+      expect(refused).toHaveLength(1);
+      expect(request[0]).toMatchObject({ level: 'info', status: 503, route: '/delta/:project/manifest' });
+      expect(refused[0]).toMatchObject({ level: 'info', status: 503 });
+      expect(String(refused[0].err_code)).toContain('delta_disabled');
+      expect(lines.filter((l) => l.level === 'error' || l.level === 'warn')).toEqual([]);
+    });
+
+    it('a genuine 500 on the manifest route still logs at error', async () => {
+      const broken = new Proxy(new FakeFirestore(), {
+        get: (target, prop) => (typeof (target as never)[prop] === 'function' ? async () => { throw new Error('firestore down'); } : (target as never)[prop]),
+      });
+      const { server } = setup({ firestore: broken as never });
+      const res = await postManifest(server, PROJECT, PLAIN_KEY, manifestBody(pictures(1)));
+      expect(res.status).toBe(500);
+      const id = res.headers.get('x-scry-request-id');
+      const request = lines.filter((l) => l.msg === 'request' && l.request_id === id);
+      expect(request).toHaveLength(1);
+      expect(request[0]).toMatchObject({ level: 'error', status: 500 });
+    });
   });
 
   it('error bodies carry the minted x-scry-request-id (an inbound id from an API-key client is not adopted)', async () => {

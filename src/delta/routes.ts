@@ -140,7 +140,10 @@ async function readCapped(body: ReadableStream<Uint8Array> | null, max: number):
 
 /** One refusal: fixed words in the line and the body, nothing the client sent. */
 function refuse(c: Ctx, status: Status, code: string, message: string, extra: Record<string, unknown> = {}) {
-  log.warn('delta refused', reqFields(c, { err_code: `delta_${code}`, status }));
+  // The flag-off 503 is expected traffic (every Sync attempt before the rollout): info on this line and on the request line (F50).
+  const expected = code === 'delta_disabled';
+  if (expected) c.set('expectedRefusal', true);
+  (expected ? log.info : log.warn)('delta refused', reqFields(c, { err_code: `delta_${code}`, status }));
   const request_id = c.get('requestId') as string | undefined;
   return c.json({ error: code, message, ...extra, ...(request_id ? { request_id } : {}) }, status as never);
 }
