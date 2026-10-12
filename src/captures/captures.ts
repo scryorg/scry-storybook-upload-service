@@ -337,17 +337,31 @@ export function registerCaptures(app: OpenAPIHono<AppEnv>): void {
 /**
  * searchable-snips: ask the processing service to index a ready snip (contract §3). Best effort: the snip
  * is already saved, so a read or send failure is logged and swallowed; the retention/sync path catches it up.
- * Sends nothing unless SNIP_INDEXING is "on" and the owner has not opted out.
+ * Sends nothing unless SNIP_INDEXING is "on" and the owner has not opted out. For an opted-out owner nothing is
+ * queued (the processing service never sees the snip) and the capture is marked `indexState: 'off'` here instead.
+ * With the flag off nothing is touched: the flag is an ops switch, not the owner's choice.
  */
 async function enqueueCaptureIndex(c: Ctx, projectId: string, captureId: string, ownerUid: string): Promise<void> {
   const queue = c.var.processingQueue;
   if (!c.var.snipIndexing || !queue || !c.var.firestore) return;
   try {
-    if (!(await c.var.firestore.isSnipSearchable(ownerUid))) return;
+    if (!(await c.var.firestore.isSnipSearchable(ownerUid))) {
+      await markIndexOff(c, projectId, captureId);
+      return;
+    }
     const trace = currentTraceContext();
     await queue.send({ type: 'capture-index', projectId, captureId, requestId: c.var.requestId, ...(trace ? { trace } : {}) });
   } catch (error) {
     reportError(c, error, 'capture index enqueue failed', 'capture_index_enqueue_failed', { run_id: captureId });
+  }
+}
+
+/** Best effort: the snip is saved either way, so a failed write is logged (request id only, no uid) and never fails complete. */
+async function markIndexOff(c: Ctx, projectId: string, captureId: string): Promise<void> {
+  try {
+    await c.var.firestore!.markCaptureIndexOff(projectId, captureId);
+  } catch {
+    log.warn('capture index state not recorded', reqFields(c, { err_code: 'capture_index_off_write_failed', run_id: captureId }));
   }
 }
 

@@ -662,6 +662,53 @@ describe('guarantee-4-opted-out-owner-is-not-indexed', () => {
     expect(env.firestore.captures.get(`${PROJECT}/${CAPTURE_ID}`)?.status).toBe('ready');
   });
 
+  it('opted-out owner: queue.send not called AND the capture is marked indexState off', async () => {
+    const env = setup({ snipIndexing: true });
+    env.firestore.optedOut.add('uid-ada');
+    const { json } = await presign(env);
+    await putAll(env, json);
+    expect((await complete(env)).status).toBe(200);
+    expect(env.queue.send).not.toHaveBeenCalled();
+    expect([...env.firestore.indexOff]).toEqual([`${PROJECT}/${CAPTURE_ID}`]);
+  });
+
+  it('opted-in owner: enqueued, and no off write', async () => {
+    const env = setup({ snipIndexing: true });
+    const { json } = await presign(env);
+    await putAll(env, json);
+    expect((await complete(env)).status).toBe(200);
+    expect(env.queue.send).toHaveBeenCalledTimes(1);
+    expect(env.firestore.indexOff.size).toBe(0);
+  });
+
+  it('SNIP_INDEXING off: neither a send nor an off write, even for an opted-out owner', async () => {
+    for (const snipIndexing of [false, undefined]) {
+      const env = setup({ snipIndexing });
+      env.firestore.optedOut.add('uid-ada');
+      const { json } = await presign(env);
+      await putAll(env, json);
+      expect((await complete(env)).status).toBe(200);
+      expect(env.queue.send).not.toHaveBeenCalled();
+      expect(env.firestore.indexOff.size).toBe(0);
+    }
+  });
+
+  it('a failed off write is logged with the request id and never fails complete', async () => {
+    const env = setup({ snipIndexing: true });
+    env.firestore.optedOut.add('uid-ada');
+    env.firestore.failIndexOffWrite = true;
+    const { json } = await presign(env);
+    await putAll(env, json);
+    const res = await complete(env);
+    expect(res.status).toBe(200);
+    expect(env.queue.send).not.toHaveBeenCalled();
+    expect(env.firestore.captures.get(`${PROJECT}/${CAPTURE_ID}`)?.status).toBe('ready');
+    const warn = jsonLines().find((l) => l.err_code === 'capture_index_off_write_failed');
+    expect(warn?.level).toBe('warn');
+    expect(typeof warn?.request_id).toBe('string');
+    expect(JSON.stringify(warn)).not.toContain('uid-ada');
+  });
+
   it('a failed send or preference read is logged and never fails complete', async () => {
     const failingSend = setup({ snipIndexing: true });
     failingSend.queue.send.mockRejectedValueOnce(new Error('queue down'));
