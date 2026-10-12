@@ -105,6 +105,7 @@ nodeApp.use('*', async (c, next) => {
     c.set('cleanupToken', process.env.CLEANUP_TOKEN);
   }
   c.set('syncDelta', process.env.SYNC_DELTA === '1');
+  c.set('snipIndexing', process.env.SNIP_INDEXING === 'on');
   
   await next();
 });

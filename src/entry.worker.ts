@@ -68,6 +68,10 @@ type Bindings = StampBindings & {
   // sync-delta-upload: '1' turns the /delta routes on (503 delta_disabled otherwise). A wrangler.toml var per
   // environment so a CI deploy keeps it; staging "1", production "0".
   SYNC_DELTA?: string;
+
+  // searchable-snips: "on" lets a completed snip enqueue a capture-index message. A wrangler.toml var per
+  // environment so a CI deploy keeps it; staging "on", production "off", absent means off.
+  SNIP_INDEXING?: string;
 };
 
 // Create a new Hono instance specifically for the Worker, extending the shared AppEnv.
@@ -173,6 +177,7 @@ workerApp.use('*', async (c, next) => {
     c.set('cleanupToken', c.env.CLEANUP_TOKEN);
   }
   c.set('syncDelta', c.env.SYNC_DELTA === '1');
+  c.set('snipIndexing', c.env.SNIP_INDEXING === 'on');
 
   await next();
 });

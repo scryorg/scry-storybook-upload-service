@@ -4,7 +4,7 @@
  * Guarantee tests are named `guarantee-N-...` so the review can find them.
  * Set SCRY_RECORD_FIXTURES=1 to (re)write the wire-contract fixtures under features/snip-capture/fixtures/upload/.
  */
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -579,6 +579,7 @@ describe('guarantee-3-captures-are-not-builds', () => {
     expect(env.firestore.createBuild).not.toHaveBeenCalled();
     expect(env.firestore.updateBuild).not.toHaveBeenCalled();
     expect(env.firestore.createUpload).not.toHaveBeenCalled();
+    // The default environment has SNIP_INDEXING unset: nothing is sent.
     expect(env.queue.send).not.toHaveBeenCalled();
     expect(env.firestore.writes.length).toBeGreaterThan(0);
     for (const w of env.firestore.writes) expect(w).toMatch(new RegExp(`^projects/${PROJECT}/capture(s|Limits)/`));
@@ -589,12 +590,92 @@ describe('guarantee-3-captures-are-not-builds', () => {
   it('the route code imports no build, queue, Milvus or image-processing module, and calls no build write', () => {
     const dir = dirname(fileURLToPath(import.meta.url));
     const imports = (file: string) => [...readFileSync(join(dir, file), 'utf8').matchAll(/^import[^;]*?from '([^']+)';/gms)].map((m) => m[1]);
-    const allowed = new Set(['@hono/zod-openapi', 'hono', 'node:crypto', '../lib/log.js', '../middleware/auth.js', '../app.js', '../services/firestore/firestore.types.js', '../services/firestore/firestore.service.js', './image-check.js', './rate-limit.js']);
+    const allowed = new Set(['@hono/zod-openapi', 'hono', 'node:crypto', '../lib/log.js', '../trace-context.js', '../middleware/auth.js', '../app.js', '../services/firestore/firestore.types.js', '../services/firestore/firestore.service.js', './image-check.js', './rate-limit.js']);
     for (const file of ['captures.ts', 'image-check.ts', 'rate-limit.ts']) {
       for (const spec of imports(file)) expect(allowed.has(spec), `${file} imports ${spec}`).toBe(true);
     }
     const src = readFileSync(join(dir, 'captures.ts'), 'utf8');
-    for (const banned of ['createBuild', 'updateBuild', 'createUpload', 'processingQueue', '.send(']) expect(src.includes(banned), banned).toBe(false);
+    for (const banned of ['createBuild', 'updateBuild', 'createUpload']) expect(src.includes(banned), banned).toBe(false);
+    // The one queue send in the file carries the capture-index type and no build message type.
+    expect(src.match(/\.send\(/g)).toHaveLength(1);
+    expect(src).toContain("type: 'capture-index'");
+    expect(src).not.toMatch(/type: '(build|process)/);
+  });
+
+  it('complete sends at most one message, and its type is capture-index', async () => {
+    const env = setup({ snipIndexing: true });
+    const { json } = await presign(env);
+    await putAll(env, json);
+    expect((await complete(env)).status).toBe(200);
+    expect(env.queue.send).toHaveBeenCalledTimes(1);
+    const msg = env.queue.send.mock.calls[0][0] as Record<string, unknown>;
+    expect(msg.type).toBe('capture-index');
+    expect(msg).toMatchObject({ projectId: PROJECT, captureId: CAPTURE_ID });
+    expect(typeof msg.requestId).toBe('string');
+    // Still a capture, never a build.
+    expect(env.firestore.createBuild).not.toHaveBeenCalled();
+    expect(env.firestore.createUpload).not.toHaveBeenCalled();
+    // A repeated complete is a no-op for the queue too.
+    expect((await complete(env)).status).toBe(200);
+    expect(env.queue.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('the capture-index message has the contract shape (and the BPS fixture, when it exists)', async () => {
+    const env = setup({ snipIndexing: true });
+    const { json } = await presign(env);
+    await putAll(env, json);
+    await complete(env);
+    const msg = env.queue.send.mock.calls[0][0] as Record<string, unknown>;
+    // Contract §3: { type, projectId, captureId, requestId, trace? }.
+    const allowedKeys = ['type', 'projectId', 'captureId', 'requestId', 'trace'];
+    for (const k of Object.keys(msg)) expect(allowedKeys, `key ${k}`).toContain(k);
+    for (const k of ['type', 'projectId', 'captureId', 'requestId']) expect(typeof msg[k], k).toBe('string');
+    const fixturePath = join(dirname(fileURLToPath(import.meta.url)), '../../../scry-management/features/searchable-snips/fixtures/capture-index-message.json');
+    if (existsSync(fixturePath)) {
+      const fixture = JSON.parse(readFileSync(fixturePath, 'utf8')) as Record<string, unknown>;
+      const shape = (o: Record<string, unknown>) => Object.fromEntries(Object.entries(o).filter(([k]) => k !== 'trace').map(([k, v]) => [k, typeof v]));
+      expect(shape(msg)).toEqual(shape(fixture));
+    }
+  });
+});
+
+describe('guarantee-3-flag-off-sends-nothing', () => {
+  it('SNIP_INDEXING off or unset: complete sends zero messages', async () => {
+    for (const snipIndexing of [false, undefined]) {
+      const env = setup({ snipIndexing });
+      const { json } = await presign(env);
+      await putAll(env, json);
+      expect((await complete(env)).status).toBe(200);
+      expect(env.queue.send).not.toHaveBeenCalled();
+    }
+  });
+});
+
+describe('guarantee-4-opted-out-owner-is-not-indexed', () => {
+  it('owner with snipSearchable false: complete sends zero messages and still succeeds', async () => {
+    const env = setup({ snipIndexing: true });
+    env.firestore.optedOut.add('uid-ada');
+    const { json } = await presign(env);
+    await putAll(env, json);
+    expect((await complete(env)).status).toBe(200);
+    expect(env.queue.send).not.toHaveBeenCalled();
+    expect(env.firestore.captures.get(`${PROJECT}/${CAPTURE_ID}`)?.status).toBe('ready');
+  });
+
+  it('a failed send or preference read is logged and never fails complete', async () => {
+    const failingSend = setup({ snipIndexing: true });
+    failingSend.queue.send.mockRejectedValueOnce(new Error('queue down'));
+    const a = await presign(failingSend);
+    await putAll(failingSend, a.json);
+    expect((await complete(failingSend)).status).toBe(200);
+    expect(failingSend.firestore.captures.get(`${PROJECT}/${CAPTURE_ID}`)?.status).toBe('ready');
+
+    const failingRead = setup({ snipIndexing: true });
+    failingRead.firestore.failPreferenceRead = true;
+    const b = await presign(failingRead);
+    await putAll(failingRead, b.json);
+    expect((await complete(failingRead)).status).toBe(200);
+    expect(failingRead.queue.send).not.toHaveBeenCalled();
   });
 });
 

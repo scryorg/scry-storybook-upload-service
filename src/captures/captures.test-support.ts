@@ -60,6 +60,10 @@ export class FakeFirestore {
   readonly captures = new Map<string, Capture>();
   readonly counters = new Map<string, number>();
   readonly writes: string[] = [];
+  /** searchable-snips: owners with `users/{uid}.snipSearchable === false`. */
+  readonly optedOut = new Set<string>();
+  /** Set to make the preference read throw. */
+  failPreferenceRead = false;
   createBuild = vi.fn();
   updateBuild = vi.fn();
   getBuild = vi.fn();
@@ -98,6 +102,10 @@ export class FakeFirestore {
     this.writes.push(`projects/${projectId}/captures/${captureId}`);
     return { ...c };
   }
+  async isSnipSearchable(uid: string) {
+    if (this.failPreferenceRead) throw new Error('preference read failed');
+    return !this.optedOut.has(uid);
+  }
   async incrementCaptureCounter(projectId: string, counterId: string) {
     const id = `${projectId}/${counterId}`;
     const next = (this.counters.get(id) ?? 0) + 1;
@@ -117,7 +125,7 @@ const KEYS: Record<string, { valid: boolean; apiKey?: Record<string, unknown> }>
   [CI_KEY]: { valid: true, apiKey: { id: 'ciKey1', name: 'CI', prefix: 'scry_proj_', kind: 'ci', createdBy: 'uid-ada' } },
 };
 
-export function setup() {
+export function setup(opts: { snipIndexing?: boolean } = {}) {
   const bucket = new FakeR2();
   const storage = new R2S3StorageService(bucket as never, {
     accountId: 'acct123',
@@ -141,6 +149,7 @@ export function setup() {
     c.set('firestore', firestore as unknown as FirestoreService);
     c.set('apiKeyService', apiKeyService);
     c.set('processingQueue', queue as never);
+    if (opts.snipIndexing !== undefined) c.set('snipIndexing', opts.snipIndexing);
     await next();
   });
   server.route('/', app);
