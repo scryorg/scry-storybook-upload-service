@@ -123,7 +123,7 @@ export interface BuildProvenanceError {
   /** Short, secret-free error message (already truncated to <=300 chars). */
   message: string;
   /** Which route's provenance write failed. */
-  route: 'coverage' | 'metadata';
+  route: 'coverage' | 'metadata' | 'delta';
 }
 
 /**
@@ -393,6 +393,9 @@ export interface CreateUploadData {
  * Data that can be updated in a build record
  */
 export interface UpdateBuildData {
+  /** sync-delta-upload: marks a Storybook build the deployer attached its delta manifest to (the one build of that deploy). */
+  delta?: true;
+
   /** sync-delta-upload: push the open-until instant of a delta build out. */
   deltaDeadline?: Date;
 

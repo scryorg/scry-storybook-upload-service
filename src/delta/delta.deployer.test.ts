@@ -5,7 +5,7 @@
 //   - counts only in log lines, a request id on every line, the transfer kind as a field; a foreign key or project never reaches a line or a stored field
 // The request/response bodies are recorded to test/fixtures/deployer-delta/ (RECORD_FIXTURES=1) and compared with the committed copy otherwise;
 // scry-node builds its own requests from a copy of them.
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   OTHER_PROJECT,
@@ -13,6 +13,7 @@ import {
   DEVICE_KEY,
   PLAIN_KEY,
   PROJECT,
+  deployerFixture,
   manifestBody,
   pictures,
   postCommit,
@@ -23,7 +24,6 @@ import {
   type ManifestAnswer,
 } from './delta.test-support.js';
 
-const FIXTURES = new URL('../../test/fixtures/deployer-delta/', import.meta.url);
 const LEGACY = new URL('../../test/fixtures/delta-legacy/manifest-response.json', import.meta.url);
 const RECORD = process.env.RECORD_FIXTURES === '1';
 /** The service mints its own request id (it never trusts an inbound one); the recorded 409 carries this stand-in. */
@@ -38,17 +38,7 @@ const storybookBody = (overrides: Record<string, unknown> = {}) =>
 const withTransfers = (transfers: string[]) => storybookBody({ transfers });
 const idHeaders = { 'Idempotency-Key': DEPLOYER_IDEMPOTENCY };
 
-/** Compare with the committed fixture, or write it when recording. */
-function fixture(name: string, value: unknown) {
-  const url = new URL(name, FIXTURES);
-  const text = `${JSON.stringify(value, null, 2)}\n`;
-  if (RECORD) {
-    mkdirSync(FIXTURES, { recursive: true });
-    writeFileSync(url, text);
-  }
-  expect(existsSync(url), `fixture ${name} is missing: run with RECORD_FIXTURES=1`).toBe(true);
-  expect(readFileSync(url, 'utf8'), `fixture ${name} is out of date: run with RECORD_FIXTURES=1`).toBe(text);
-}
+const fixture = deployerFixture;
 
 let lines: string[];
 beforeEach(() => {
@@ -139,7 +129,6 @@ describe('transfers', () => {
       expect(JSON.stringify(up)).not.toContain('build=');
     }
     expect(bucket.blobKeys(PROJECT)).toHaveLength(0); // the Worker stored nothing: the bytes go to R2 directly
-    fixture('manifest-request.json', withTransfers(['r2-presigned', 'basic']));
     fixture('manifest-response-r2.json', answer);
   });
 

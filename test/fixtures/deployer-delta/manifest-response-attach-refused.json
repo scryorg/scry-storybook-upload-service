@@ -1,0 +1,5 @@
+{
+  "error": "build_not_attachable",
+  "message": "This build cannot take a delta manifest: it is not an untouched Storybook build of this project",
+  "request_id": "01HZZZZZZZZZZZZZZZZZZZZZZZ"
+}

@@ -36,6 +36,8 @@ import { ciEventFields, mergeCiTimings, parseCiTimings, type CiTimings, type CiT
 import { parseSourceKey } from './bundle/source-key.js';
 import { readBoundedZip, DEFAULT_BOUNDED_ZIP_LIMITS } from './bundle/bounded-zip.js';
 import { validateBundle } from './vendor/scf/dist/index.js';
+import { BuildProvenanceQuerySchema, recordBuildProvenance } from './lib/build-provenance.js';
+import { METADATA_ZIP_FILE, metadataZipKeyFor } from './lib/metadata-zip.js';
 import { registerSelfRevoke } from './keys/self-revoke.js';
 import { registerCaptures } from './captures/captures.js';
 import { registerDelta } from './delta/routes.js';
@@ -124,54 +126,6 @@ function logCiTimings(
     log.info('ci timings absent', { ...fields, err_code: 'ci_timings_absent' });
   } else {
     log.warn('ci timings invalid', { ...fields, err_code: 'ci_timings_invalid' });
-  }
-}
-
-/**
- * Best-effort write of commitSha/branch onto the build document, with a visible failure marker
- * (upload-provenance-updatemask D2, ISSUES.md #61).
- *
- * The write itself must never fail an upload that has already succeeded -- a build that indexes
- * without a SHA reports its freshness as unknown, which beats not indexing. But a best-effort write
- * that fails 100% of the time (the exact shape of this incident) is indistinguishable from a working
- * one from every operator-facing signal except a `console.warn` nobody watches. So a rejected write
- * here also records a small `provenanceError` field on the build document -- the one place a human
- * or a future healthcheck would already be looking -- via a SEPARATE single-field `updateBuild()`
- * call, so it has its own chance to succeed even when the commitSha/branch write itself failed.
- * Cleared (the field removed, never stored as null) the next time a provenance write for this build
- * succeeds. The marking/clearing calls are themselves best-effort and never throw further.
- */
-async function recordBuildProvenance(
-  firestore: FirestoreService,
-  project: string,
-  build: { id: string; provenanceError?: unknown },
-  route: 'coverage' | 'metadata',
-  gitContext: { commitSha?: string; branch?: string },
-  c?: Context<AppEnv>
-): Promise<void> {
-  const fields = reqFields(c, { route: `/${route}`, project, build_id: build.id });
-  try {
-    await firestore.updateBuild(project, build.id, gitContext);
-    log.info('build provenance recorded', fields);
-    if (build.provenanceError) {
-      try {
-        await firestore.updateBuild(project, build.id, { provenanceError: null });
-      } catch (clearError) {
-        reportError(c, clearError, 'could not clear provenance marker', 'provenance_clear_failed', fields);
-      }
-    }
-  } catch (e) {
-    // Only a short, already-bounded message goes on the build document (never a token, header or
-    // raw response body); the log line carries a fixed code and the exception goes to Sentry.
-    const message = (e instanceof Error ? e.message : String(e)).slice(0, 300);
-    reportError(c, e, 'could not record provenance', 'provenance_write_failed', fields);
-    try {
-      await firestore.updateBuild(project, build.id, {
-        provenanceError: { at: new Date().toISOString(), message, route },
-      });
-    } catch (markerError) {
-      reportError(c, markerError, 'could not record provenance marker', 'provenance_marker_failed', fields);
-    }
   }
 }
 
@@ -814,32 +768,10 @@ app.openapi(coverageUploadRoute, async (c) => {
   }
 });
 
-/**
- * Where a build came from, sent by the CLI alongside the metadata ZIP.
- *
- * Query parameters rather than a body field because the body is the ZIP. Both
- * are optional: a deploy from a machine with no git context sends neither, and
- * the build keeps no commit rather than an invented one (P13a).
- */
-const BuildProvenanceQuerySchema = z.object({
-  commitSha: z
-    .string()
-    .regex(/^[0-9a-fA-F]{7,40}$/, 'commitSha must be a hex git object name')
-    .optional()
-    .openapi({ example: 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678' }),
-  branch: z.string().min(1).max(255).optional().openapi({ example: 'main' }),
-});
-
 /** The old metadata route buffers the body in the Worker: its ceiling is the old deployer's own cap. */
 const METADATA_ZIP_OLD_ROUTE_MAX_BYTES = 100 * 1024 * 1024;
 /** Processing safety limit for a metadata ZIP uploaded straight to storage (enforced in complete). */
 const METADATA_ZIP_MAX_BYTES = 2 * 1024 * 1024 * 1024;
-const METADATA_ZIP_FILE = 'metadata-screenshots.zip';
-
-/** The one key a build's metadata ZIP lives at, for the old route and for presign / complete alike. */
-function metadataZipKeyFor(project: string, version: string, buildNumber: number): string {
-  return `${project}/${version}/builds/${buildNumber}/${METADATA_ZIP_FILE}`;
-}
 
 /** The 400 for an empty body, or the 413 for one over the old route's ceiling. */
 function rejectMetadataBody(c: Context<AppEnv>, body: ArrayBuffer | undefined) {

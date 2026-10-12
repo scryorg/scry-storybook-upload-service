@@ -2,8 +2,9 @@
 // The storage is the real R2S3StorageService over an in-memory bucket that behaves like R2 where it matters here:
 // put() refuses a body that does not hash to options.sha256, list() pages by prefix with `uploaded`, head() answers null when absent.
 import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { Hono } from 'hono';
-import { vi } from 'vitest';
+import { expect, vi } from 'vitest';
 import { app, type AppEnv } from '../app.js';
 import { R2S3StorageService } from '../services/storage/storage.worker.js';
 import type { ApiKeyService } from '../services/apikey/apikey.service.js';
@@ -37,17 +38,22 @@ export class FakeR2 {
     const o = this.objects.get(key);
     return o ? { size: o.bytes.byteLength, httpMetadata: { contentType: o.contentType } } : null;
   }
-  async get(key: string) {
+  /** Ranged reads the way the Worker asked for them (a test asserts only a picture's first bytes are read). */
+  readonly rangeReads: Array<{ key: string; offset: number; length: number }> = [];
+  async get(key: string, options?: { range?: { offset: number; length: number } }) {
     const o = this.objects.get(key);
     if (!o) return null;
+    const range = options?.range;
+    if (range) this.rangeReads.push({ key, ...range });
+    const bytes = range ? o.bytes.subarray(range.offset, range.offset + range.length) : o.bytes;
     return {
       body: new ReadableStream<Uint8Array>({
         start(controller) {
-          controller.enqueue(o.bytes);
+          controller.enqueue(bytes);
           controller.close();
         },
       }),
-      arrayBuffer: async () => o.bytes.buffer.slice(o.bytes.byteOffset, o.bytes.byteOffset + o.bytes.byteLength),
+      arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
     };
   }
   async delete(key: string | string[]) {
@@ -104,6 +110,8 @@ export class FakeFirestore {
       createdAt: this.now(),
       createdBy: '',
       source: data.source,
+      ...(data.channel ? { channel: data.channel } : {}),
+      ...(data.uploadedByKeyProject ? { uploadedByKeyProject: data.uploadedByKeyProject } : {}),
       ...(data.delta ? { delta: true as const, deltaDeadline: data.deltaDeadline } : {}),
     } as Build;
     this.builds.set(`${projectId}/${build.id}`, build);
@@ -317,4 +325,53 @@ export async function openAndUpload(server: Server, project: string, key: string
     if (put.status !== 201 && put.status !== 200) throw new Error(`blob PUT answered ${put.status}`);
   }
   return { status: res.status, answer };
+}
+
+// ---- the CI deployer's builds ---------------------------------------------------------------------
+
+export const STORYBOOK_VERSION = 'pr-12-abc1234';
+export const STORYBOOK_SOURCE = { kind: 'storybook', platform: 'web' } as const;
+export const COMMIT_SHA = 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678';
+
+/**
+ * The build the deployer's first call leaves behind: `POST /presigned-url/:project/:version/storybook.zip` creates it with the
+ * Storybook zip's URL and nothing else (no source, no delta marker, no processing status, no commit).
+ */
+export function seedStorybookBuild(firestore: FakeFirestore, project: string, version = STORYBOOK_VERSION) {
+  return firestore.createBuild(project, {
+    versionId: version,
+    zipUrl: `https://storage.example/${project}/${version}/storybook.zip`,
+    uploadedByKeyId: 'plainKey1',
+    uploadedByKeyProject: project,
+    firstStep: 'presign',
+  } as CreateBuildData);
+}
+
+/** The deployer's manifest for an existing Storybook build: the same pictures, plus the build to attach to and the git provenance. */
+export function attachBody(pics: ReadonlyArray<Picture>, buildId: string, overrides: Record<string, unknown> = {}) {
+  return manifestBody(pics, {
+    version: STORYBOOK_VERSION,
+    source: 'storybook:web',
+    scf: scfFor(pics, STORYBOOK_SOURCE),
+    buildId,
+    commitSha: COMMIT_SHA,
+    branch: 'feature/login',
+    ...overrides,
+  });
+}
+
+// ---- recorded fixtures ----------------------------------------------------------------------------
+
+const FIXTURES = new URL('../../test/fixtures/deployer-delta/', import.meta.url);
+
+/** Compare with the committed fixture for the deployer, or write it when RECORD_FIXTURES=1. */
+export function deployerFixture(name: string, value: unknown) {
+  const url = new URL(name, FIXTURES);
+  const text = `${JSON.stringify(value, null, 2)}\n`;
+  if (process.env.RECORD_FIXTURES === '1') {
+    mkdirSync(FIXTURES, { recursive: true });
+    writeFileSync(url, text);
+  }
+  expect(existsSync(url), `fixture ${name} is missing: run with RECORD_FIXTURES=1`).toBe(true);
+  expect(readFileSync(url, 'utf8'), `fixture ${name} is out of date: run with RECORD_FIXTURES=1`).toBe(text);
 }
