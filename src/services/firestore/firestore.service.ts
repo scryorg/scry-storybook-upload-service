@@ -266,6 +266,13 @@ export interface FirestoreService {
   isSnipSearchable(uid: string): Promise<boolean>;
 
   /**
+   * searchable-snips: records that an opted-out owner's snip is not indexed (contract §3 step 4): sets `indexState` = 'off'
+   * and `indexedAt` = now on the capture, the same two fields the processing service writes. Never creates the document
+   * (a capture deleted since the read stays deleted).
+   */
+  markCaptureIndexOff(projectId: string, captureId: string): Promise<void>;
+
+  /**
    * Atomically adds 1 to a counter document and returns the new count (`projects/{p}/captureLimits/{id}`).
    * `expireAt` rides on the document so a Firestore TTL policy on the field can remove old windows.
    */

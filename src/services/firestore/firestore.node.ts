@@ -442,6 +442,14 @@ export class FirestoreServiceNode implements FirestoreService {
     return snap.data()?.snipSearchable !== false;
   }
 
+  async markCaptureIndexOff(projectId: string, captureId: string): Promise<void> {
+    try {
+      await this.db.doc(`projects/${projectId}/captures/${captureId}`).update({ indexState: 'off', indexedAt: new Date() }); // update() never creates the document
+    } catch (error) {
+      if ((error as { code?: number }).code !== 5) throw error; // 5 = NOT_FOUND: deleted since the read
+    }
+  }
+
   async markCaptureReady(projectId: string, captureId: string): Promise<Capture | null> {
     const ref = this.db.doc(`projects/${projectId}/captures/${captureId}`);
     const snap = await ref.get();

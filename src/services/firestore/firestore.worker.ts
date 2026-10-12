@@ -1062,6 +1062,18 @@ export class FirestoreServiceWorker implements FirestoreService {
     return doc?.fields?.snipSearchable?.booleanValue !== false;
   }
 
+  async markCaptureIndexOff(projectId: string, captureId: string): Promise<void> {
+    const token = await this.getAccessToken();
+    // ifExists: a PATCH would otherwise create a stub capture document if it was deleted since the read.
+    await this.patchDocument(
+      `projects/${projectId}/captures/${captureId}`,
+      { indexState: { stringValue: 'off' }, indexedAt: { timestampValue: new Date().toISOString() } },
+      token,
+      undefined,
+      { ifExists: true }
+    );
+  }
+
   async markCaptureReady(projectId: string, captureId: string): Promise<Capture | null> {
     const token = await this.getAccessToken();
     const path = `projects/${projectId}/captures/${captureId}`;

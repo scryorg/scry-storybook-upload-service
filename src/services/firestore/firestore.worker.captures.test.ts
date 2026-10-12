@@ -101,6 +101,22 @@ describe('FirestoreServiceWorker captures', () => {
     expect(Object.keys(JSON.parse(String(patch.init?.body)).fields).sort()).toEqual(['receivedAt', 'status']);
   });
 
+  it('markCaptureIndexOff patches indexState=off and indexedAt only, and never creates the document', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => { calls.push({ url, init }); return json(200); }));
+    await createSvc().markCaptureIndexOff('proj1', ID);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].init?.method).toBe('PATCH');
+    expect(calls[0].url).toContain(`/documents/projects/proj1/captures/${ID}?`);
+    expect(calls[0].url).toContain('currentDocument.exists=true');
+    expect(decodeURIComponent(calls[0].url)).toContain('updateMask.fieldPaths=indexState');
+    expect(decodeURIComponent(calls[0].url)).toContain('updateMask.fieldPaths=indexedAt');
+    const fields = JSON.parse(String(calls[0].init?.body)).fields;
+    expect(Object.keys(fields).sort()).toEqual(['indexState', 'indexedAt']);
+    expect(fields.indexState).toEqual({ stringValue: 'off' });
+    expect(new Date(fields.indexedAt.timestampValue).getTime()).toBeGreaterThan(Date.now() - 60_000);
+  });
+
   it('markCaptureReady returns null when the capture is gone', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => json(404)));
     expect(await createSvc().markCaptureReady('proj1', ID)).toBeNull();

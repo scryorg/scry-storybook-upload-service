@@ -106,6 +106,14 @@ export class FakeFirestore {
     if (this.failPreferenceRead) throw new Error('preference read failed');
     return !this.optedOut.has(uid);
   }
+  /** searchable-snips: captures marked `indexState: 'off'` by `markCaptureIndexOff`, keyed `project/capture`. */
+  readonly indexOff = new Set<string>();
+  /** Set to make the index-off write throw. */
+  failIndexOffWrite = false;
+  async markCaptureIndexOff(projectId: string, captureId: string) {
+    if (this.failIndexOffWrite) throw new Error('index state write failed');
+    this.indexOff.add(`${projectId}/${captureId}`);
+  }
   async incrementCaptureCounter(projectId: string, counterId: string) {
     const id = `${projectId}/${counterId}`;
     const next = (this.counters.get(id) ?? 0) + 1;
