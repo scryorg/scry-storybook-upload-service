@@ -10,11 +10,14 @@
 // What it makes (all ids carry the prefix `ssnips-uat`, so --reset removes exactly those):
 //   users A (owner), B (project member), C (org-mate of A, project member), D (outside the project), E (member, opted out:
 //   users/{E}.snipSearchable=false); org `ssnips-uat-org` (A, C); project `ssnips-uat-project` (A, B, C, E).
-//   snips: A private, A -> B, A -> org, A -> project, B private, C private (then expired), plus one E snip (not indexed).
+//   snips: A private, A -> B, A -> org, A -> project, B private, C private (then expired), one E snip (not indexed), and
+//   one extra A -> B snip marked `disposable: true` (the UAT hides/deletes it in row 6).
 // Shares and the opted-out flag are written before `complete`, so the indexer sees the final audience. The expired
 // snip gets its past `expiresAt` AFTER `complete`, so its row exists until the daily sweep or /captures/sync removes it.
 // Output: scry-management/features/searchable-snips/fixtures/stage-snips.json
-//   {projectId, users:{A..E:{uid,name}}, snips:[{captureId, owner, share, words, expired?}]}  (no keys, ever).
+//   {projectId, users:{A..E:{uid,name}}, snips:[{captureId, owner, share, words, expired?, disposable?}]}  (no keys, ever).
+//   users.E.session is "missing": the existing UAT identity setup (one owner identity, fixtures.ts / global-setup.ts) has no member
+//   that can serve as the opted-out user, and the seed does not mint sign-in sessions, so the spec must treat E as snip owner only.
 //
 // Guards: the upload host is fixed to upload-stage.scrymore.com, the Firestore service account must be
 // scry-dev-dashboard-stage, the R2 bucket must be my-storybooks-staging. There is no flag to point it elsewhere.
@@ -64,6 +67,8 @@ const SNIPS = [
   { captureId: cid(5), owner: 'B', share: 'private', words: 'empty state' },
   { captureId: cid(6), owner: 'C', share: 'private', words: 'profile header', expired: true },
   { captureId: cid(7), owner: 'E', share: 'private', words: 'dark mode toggle' },
+  // UAT hides/deletes this one in row 6, so nothing else depends on it.
+  { captureId: cid(8), owner: 'A', share: 'B', words: 'settings modal', disposable: true },
 ];
 
 const args = new Set(process.argv.slice(2));
@@ -90,7 +95,7 @@ function plan() {
   const members = Object.entries(MEMBERS).map(([k, r]) => k + ':' + r).join(' ');
   log(`project ${PROJECT}, org ${ORG} (A, C), members ${members}, D outside, E opted out`);
   for (const s of SNIPS) {
-    const notes = [s.expired ? 'expiresAt set to the past after complete' : '', s.owner === 'E' ? 'owner opted out: no index row expected' : ''].filter(Boolean).join('; ');
+    const notes = [s.disposable ? 'disposable (UAT deletes it)' : '', s.expired ? 'expiresAt set to the past after complete' : '', s.owner === 'E' ? 'owner opted out: no index row expected' : ''].filter(Boolean).join('; ');
     log(`  snip ${s.captureId} owner ${s.owner} share ${s.share} words "${s.words}"${notes ? ' (' + notes + ')' : ''}`);
   }
   log(`writes: ${FIXTURE}`);
@@ -242,8 +247,8 @@ async function seed() {
     for (const s of SNIPS) await seedOne(s, keys[s.owner], tmp);
     const out = {
       projectId: PROJECT,
-      users: USERS,
-      snips: SNIPS.map(({ captureId, owner, share, words, expired }) => ({ captureId, owner, share, words, ...(expired ? { expired: true } : {}) })),
+      users: { ...USERS, E: { ...USERS.E, session: 'missing' } },
+      snips: SNIPS.map(({ captureId, owner, share, words, expired, disposable }) => ({ captureId, owner, share, words, ...(expired ? { expired: true } : {}), ...(disposable ? { disposable: true } : {}) })),
     };
     fs.mkdirSync(path.dirname(FIXTURE), { recursive: true });
     fs.writeFileSync(FIXTURE, JSON.stringify(out, null, 2) + '\n');
