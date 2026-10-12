@@ -67,7 +67,8 @@ name = "storybook-deployment-service"
 [env.production.vars]
 R2_BUCKET_NAME = "my-storybooks-production"
 SCRY_ENV = "production"
-SYNC_DELTA = "0"
+# Sync delta upload: on in production (founder Gate B go 2026-10-12). Rollback = "0" (clients fall back to the zip).
+SYNC_DELTA = "1"
 
 # Orphan-bundle sweep (ledger F80): a bundle build's presigned-url call creates its Firestore
 # document immediately, before any bytes move; if the client's later `/bundle/complete` call never
