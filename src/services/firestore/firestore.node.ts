@@ -437,6 +437,11 @@ export class FirestoreServiceNode implements FirestoreService {
     return snap.exists ? this.convertDocToCapture(snap.id, snap.data()!) : null;
   }
 
+  async isSnipSearchable(uid: string): Promise<boolean> {
+    const snap = await this.db.doc(`users/${uid}`).get();
+    return snap.data()?.snipSearchable !== false;
+  }
+
   async markCaptureReady(projectId: string, captureId: string): Promise<Capture | null> {
     const ref = this.db.doc(`projects/${projectId}/captures/${captureId}`);
     const snap = await ref.get();

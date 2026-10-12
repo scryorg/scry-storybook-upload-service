@@ -1056,6 +1056,12 @@ export class FirestoreServiceWorker implements FirestoreService {
     return doc ? this.convertDocToCapture(captureId, doc.fields) : null;
   }
 
+  async isSnipSearchable(uid: string): Promise<boolean> {
+    const token = await this.getAccessToken();
+    const doc = await this.getDocument(`users/${uid}`, token);
+    return doc?.fields?.snipSearchable?.booleanValue !== false;
+  }
+
   async markCaptureReady(projectId: string, captureId: string): Promise<Capture | null> {
     const token = await this.getAccessToken();
     const path = `projects/${projectId}/captures/${captureId}`;

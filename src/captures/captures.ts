@@ -5,8 +5,11 @@
  *   POST /captures/:project/complete  verify what was PUT, then mark the capture ready
  *
  * Guarantees this file carries:
- *  - G3 a capture is never a build: no build row, no story, no queue message, no Milvus, no image
+ *  - G3 a capture is never a build: no build row, no story, no build message, no Milvus, no image
  *    processing in the Worker. The only writes are `projects/{p}/captures/{id}`, its counters and R2.
+ *    searchable-snips: `complete` sends at most one queue message, and its type is `capture-index`
+ *    (never a build message), only when SNIP_INDEXING is "on" and the owner has not opted out
+ *    (`users/{uid}.snipSearchable !== false`). A failed send is logged and never fails `complete`.
  *  - G4 only a device key of the project reaches these routes (`apiKeyAuth` mounted on
  *    `/captures/:project/*` gives 401 for a revoked/unknown key and 403 for another project's key;
  *    the two paths are the only capture entries in `DEVICE_KEY_ROUTES`, everything else stays refused).
@@ -21,6 +24,7 @@ import { DEVICE_KEY_KIND, VERIFIED_PROJECT } from '../middleware/auth.js';
 import type { AppEnv } from '../app.js';
 import type { Capture } from '../services/firestore/firestore.types.js';
 import { HEADER_BYTES, pngDimensions, sniffImage, type ImageKind } from './image-check.js';
+import { currentTraceContext } from '../trace-context.js';
 import { checkCompleteRate, checkPresignRate } from './rate-limit.js';
 
 /** The original may be at most 20 MB (the SCF per-image bound). */
@@ -321,12 +325,30 @@ export function registerCaptures(app: OpenAPIHono<AppEnv>): void {
       const ready = await firestore.markCaptureReady(key.project, captureId);
       if (!ready) return refuse(c, 404, 'not_found', 'No pending capture with this id', captureId);
       log.info('capture completed', reqFields(c, { run_id: captureId, status: 200 }));
+      await enqueueCaptureIndex(c, key.project, captureId, ready.capturedByUid);
       return c.json({ capture: summary(ready) }, 200);
     } catch (error) {
       reportError(c, error, 'capture complete failed', 'capture_complete_failed');
       return c.json({ error: 'complete_failed', message: 'Could not verify the upload; retry shortly' }, 500);
     }
   }) as never);
+}
+
+/**
+ * searchable-snips: ask the processing service to index a ready snip (contract §3). Best effort: the snip
+ * is already saved, so a read or send failure is logged and swallowed; the retention/sync path catches it up.
+ * Sends nothing unless SNIP_INDEXING is "on" and the owner has not opted out.
+ */
+async function enqueueCaptureIndex(c: Ctx, projectId: string, captureId: string, ownerUid: string): Promise<void> {
+  const queue = c.var.processingQueue;
+  if (!c.var.snipIndexing || !queue || !c.var.firestore) return;
+  try {
+    if (!(await c.var.firestore.isSnipSearchable(ownerUid))) return;
+    const trace = currentTraceContext();
+    await queue.send({ type: 'capture-index', projectId, captureId, requestId: c.var.requestId, ...(trace ? { trace } : {}) });
+  } catch (error) {
+    reportError(c, error, 'capture index enqueue failed', 'capture_index_enqueue_failed', { run_id: captureId });
+  }
 }
 
 type Failure = { status: 409 | 413 | 415 | 422; code: string; message: string };

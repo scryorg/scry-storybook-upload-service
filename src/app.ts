@@ -53,6 +53,8 @@ export type AppEnv = {
     assertionSecret?: string;
     /** SYNC_DELTA: the /delta routes answer 503 delta_disabled unless this is true (sync-delta-upload). */
     syncDelta?: boolean;
+    /** SNIP_INDEXING: "on" lets /captures/:p/complete enqueue a capture-index message (searchable-snips). Absent or off sends nothing. */
+    snipIndexing?: boolean;
     /** Set by a route that refused with an expected, non-failing 5xx (the flag-off 503): the request line logs at info, not error. */
     expectedRefusal?: boolean;
   } & AuthVariables;

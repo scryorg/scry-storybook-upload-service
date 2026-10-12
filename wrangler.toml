@@ -44,6 +44,8 @@ SCRY_ENV = "production"
 R2_BUCKET_NAME = "my-storybooks-production"
 # sync-delta-upload kill switch: "1" turns the /delta routes on. Off in production until the feature is released.
 SYNC_DELTA = "0"
+# searchable-snips: "on" lets a completed snip enqueue a capture-index message. Absent or anything else is off.
+SNIP_INDEXING = "off"
 
 # IMPORTANT: The following secrets MUST be set via `wrangler secret put`:
 # - R2_ACCOUNT_ID (your Cloudflare account ID)
@@ -69,6 +71,8 @@ R2_BUCKET_NAME = "my-storybooks-production"
 SCRY_ENV = "production"
 # Sync delta upload: on in production (founder Gate B go 2026-10-12). Rollback = "0" (clients fall back to the zip).
 SYNC_DELTA = "1"
+# searchable-snips: dark in production until the feature is released (Release: dark SNIP_INDEXING).
+SNIP_INDEXING = "off"
 
 # Orphan-bundle sweep (ledger F80): a bundle build's presigned-url call creates its Firestore
 # document immediately, before any bytes move; if the client's later `/bundle/complete` call never
@@ -104,6 +108,7 @@ name = "storybook-deployment-service-preview"
 R2_BUCKET_NAME = "my-storybooks-staging"
 SCRY_ENV = "staging"
 SYNC_DELTA = "1"
+SNIP_INDEXING = "on"
 
 # Orphan-bundle sweep (ledger F80/F91) — see the matching comment under [env.production.triggers].
 [env.staging.triggers]

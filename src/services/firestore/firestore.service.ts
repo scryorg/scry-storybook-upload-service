@@ -260,6 +260,12 @@ export interface FirestoreService {
   markCaptureReady(projectId: string, captureId: string): Promise<Capture | null>;
 
   /**
+   * searchable-snips: whether the person's snips may be indexed for search. `users/{uid}.snipSearchable`;
+   * absent means true, only an explicit `false` opts out. Written by the dashboard server only.
+   */
+  isSnipSearchable(uid: string): Promise<boolean>;
+
+  /**
    * Atomically adds 1 to a counter document and returns the new count (`projects/{p}/captureLimits/{id}`).
    * `expireAt` rides on the document so a Firestore TTL policy on the field can remove old windows.
    */
