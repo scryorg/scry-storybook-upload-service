@@ -1,0 +1,90 @@
+{
+  "protocol": 1,
+  "hash": "sha256",
+  "version": "pr-12-abc1234",
+  "source": "storybook:web",
+  "scf": {
+    "scf": "1.0",
+    "source": {
+      "kind": "storybook",
+      "platform": "web"
+    },
+    "createdAt": "2026-10-10T00:00:00Z",
+    "counts": {
+      "declared": 3,
+      "captured": 3,
+      "skipped": []
+    },
+    "captures": [
+      {
+        "id": "pic-0",
+        "image": "images/pic-1.png",
+        "kind": "component",
+        "title": [
+          "Folder"
+        ],
+        "name": "Picture 0",
+        "capture": {
+          "method": "manual",
+          "viewport": {
+            "width": 64,
+            "height": 48
+          },
+          "scale": 1
+        }
+      },
+      {
+        "id": "pic-1",
+        "image": "images/pic-2.png",
+        "kind": "component",
+        "title": [
+          "Folder"
+        ],
+        "name": "Picture 1",
+        "capture": {
+          "method": "manual",
+          "viewport": {
+            "width": 64,
+            "height": 48
+          },
+          "scale": 1
+        }
+      },
+      {
+        "id": "pic-2",
+        "image": "images/pic-3.png",
+        "kind": "component",
+        "title": [
+          "Folder"
+        ],
+        "name": "Picture 2",
+        "capture": {
+          "method": "manual",
+          "viewport": {
+            "width": 64,
+            "height": 48
+          },
+          "scale": 1
+        }
+      }
+    ]
+  },
+  "images": {
+    "images/pic-1.png": {
+      "oid": "6bf29de53398442edb45142612726e80a7274b1e8c28031c70ae2fe92e4759a4",
+      "size": 400
+    },
+    "images/pic-2.png": {
+      "oid": "18d27ea28594e2c58713d26b9811e1529fd0233b91c44eaf0faa9f8c19e77a77",
+      "size": 400
+    },
+    "images/pic-3.png": {
+      "oid": "9213a47a94eacf4db675b8c3ac371b753ab7b1065cb39c1aa5e409b528a33728",
+      "size": 400
+    }
+  },
+  "transfers": [
+    "r2-presigned",
+    "basic"
+  ]
+}

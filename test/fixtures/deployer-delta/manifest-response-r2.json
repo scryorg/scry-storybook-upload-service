@@ -1,0 +1,51 @@
+{
+  "buildId": "build_A_1",
+  "buildNumber": 1,
+  "expiresAt": "2026-10-12T13:00:00.000Z",
+  "maxBlobBytes": 20971520,
+  "objects": [
+    {
+      "oid": "6bf29de53398442edb45142612726e80a7274b1e8c28031c70ae2fe92e4759a4",
+      "size": 400,
+      "actions": {
+        "upload": {
+          "href": "https://my-storybooks-test.acct123.r2.cloudflarestorage.com/_blobs/projAAAAAAAAAAAAAAAA/6bf29de53398442edb45142612726e80a7274b1e8c28031c70ae2fe92e4759a4?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Content-Sha256=UNSIGNED-PAYLOAD&X-Amz-Credential=AKIATESTTESTTESTTEST%2F20261012%2Fauto%2Fs3%2Faws4_request&X-Amz-Date=20261012T120000Z&X-Amz-Expires=3600&X-Amz-Signature=1065dd3f0ed766335c65c4b0f27ea68d25583e1b60d66b8d04ab206363a42f90&X-Amz-SignedHeaders=content-length%3Bcontent-type%3Bhost%3Bx-amz-checksum-sha256&x-id=PutObject",
+          "header": {
+            "Content-Type": "application/octet-stream",
+            "x-amz-checksum-sha256": "a/Kd5TOYRC7bRRQmEnJugKcnSx6MKAMccK4v6S5HWaQ="
+          },
+          "expires_at": "2026-10-12T13:00:00.000Z"
+        }
+      }
+    },
+    {
+      "oid": "18d27ea28594e2c58713d26b9811e1529fd0233b91c44eaf0faa9f8c19e77a77",
+      "size": 400,
+      "actions": {
+        "upload": {
+          "href": "https://my-storybooks-test.acct123.r2.cloudflarestorage.com/_blobs/projAAAAAAAAAAAAAAAA/18d27ea28594e2c58713d26b9811e1529fd0233b91c44eaf0faa9f8c19e77a77?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Content-Sha256=UNSIGNED-PAYLOAD&X-Amz-Credential=AKIATESTTESTTESTTEST%2F20261012%2Fauto%2Fs3%2Faws4_request&X-Amz-Date=20261012T120000Z&X-Amz-Expires=3600&X-Amz-Signature=c45b0e831ff1606958beed01fad8a630a91180c2181358246689cd3cb7beba3e&X-Amz-SignedHeaders=content-length%3Bcontent-type%3Bhost%3Bx-amz-checksum-sha256&x-id=PutObject",
+          "header": {
+            "Content-Type": "application/octet-stream",
+            "x-amz-checksum-sha256": "GNJ+ooWU4sWHE9JrmBHhUp/QIzuRxE6vD6qfjBnnenc="
+          },
+          "expires_at": "2026-10-12T13:00:00.000Z"
+        }
+      }
+    },
+    {
+      "oid": "9213a47a94eacf4db675b8c3ac371b753ab7b1065cb39c1aa5e409b528a33728",
+      "size": 400,
+      "actions": {
+        "upload": {
+          "href": "https://my-storybooks-test.acct123.r2.cloudflarestorage.com/_blobs/projAAAAAAAAAAAAAAAA/9213a47a94eacf4db675b8c3ac371b753ab7b1065cb39c1aa5e409b528a33728?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Content-Sha256=UNSIGNED-PAYLOAD&X-Amz-Credential=AKIATESTTESTTESTTEST%2F20261012%2Fauto%2Fs3%2Faws4_request&X-Amz-Date=20261012T120000Z&X-Amz-Expires=3600&X-Amz-Signature=c91106990b77edb7ef8bcc1f3e5f7e340cb828d80a1dc44686b83e8c658c8e08&X-Amz-SignedHeaders=content-length%3Bcontent-type%3Bhost%3Bx-amz-checksum-sha256&x-id=PutObject",
+          "header": {
+            "Content-Type": "application/octet-stream",
+            "x-amz-checksum-sha256": "khOkepTqz022dbjDrDcbdTq3sQZcs5wapeQJtSijNyg="
+          },
+          "expires_at": "2026-10-12T13:00:00.000Z"
+        }
+      }
+    }
+  ],
+  "transfer": "r2-presigned"
+}

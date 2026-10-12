@@ -11,8 +11,8 @@ import {
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { Upload } from '@aws-sdk/lib-storage';
-import { createCapturePresignClient, presignCapturePut } from './storage.capture-presign.js';
-import { StorageService, CapturePresignOptions, StorageKeyPage, StorageObjectMeta, StorageObjectRange, UploadResult } from './storage.service.js';
+import { createCapturePresignClient, presignBlobPut, presignCapturePut } from './storage.capture-presign.js';
+import { StorageService, BlobPresignOptions, CapturePresignOptions, StorageKeyPage, StorageObjectMeta, StorageObjectRange, UploadResult } from './storage.service.js';
 import { Readable } from 'stream';
 
 /** True for the S3/R2 "not found" errors both HeadObject and GetObject can throw. */
@@ -95,6 +95,11 @@ export class R2S3StorageService implements StorageService {
   /** Capture rendition PUT: signed content-type and content-length, short expiry, no default checksum. */
   getPresignedCaptureUploadUrl(key: string, opts: CapturePresignOptions): Promise<{ url: string; key: string }> {
     return presignCapturePut(this.captureS3, this.bucketName, key, opts);
+  }
+
+  /** Delta picture PUT: signed length, type and SHA-256 checksum, short expiry. */
+  getPresignedBlobUploadUrl(key: string, opts: BlobPresignOptions): Promise<{ url: string; key: string; header: Record<string, string> }> {
+    return presignBlobPut(this.captureS3, this.bucketName, key, opts);
   }
 
   /**

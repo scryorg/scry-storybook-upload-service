@@ -553,7 +553,7 @@ export async function commitDeltaBuild(deps: DeltaDeps, project: string, buildId
   const oids = [...new Set(Object.values(images).map((e) => e.oid))];
   const held = await blobs.has(project, oids);
   const missing = oids.filter((oid) => !held.has(oid));
-  if (missing.length > 0) return refuse(409, 'missing_blobs', 'Some pictures have not arrived', { missing: missing.slice(0, 1000) });
+  if (missing.length > 0) return refuse(409, 'missing_blobs', 'Some pictures have not arrived', { count: missing.length, missing: missing.slice(0, 1000) });
 
   const sent = await claimAndEnqueue(deps, project, build, manifestKey, imagesKey, requestId);
   if (!sent) return { ok: true, firstTime: false, queued: true, build: summary, items: 0, bytes: 0 };

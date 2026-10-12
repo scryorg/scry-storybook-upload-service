@@ -27,6 +27,15 @@ export interface CapturePresignOptions {
   expiresIn: number;
 }
 
+export interface BlobPresignOptions {
+  /** Exact body length the PUT must carry. */
+  contentLength: number;
+  /** The picture's SHA-256 (64 lowercase hex): signed as `x-amz-checksum-sha256`, so R2 refuses a body that does not hash to it. */
+  sha256Hex: string;
+  /** Seconds the URL stays valid. */
+  expiresIn: number;
+}
+
 export interface StorageObjectMeta {
   size: number;
   contentType?: string;
@@ -91,6 +100,12 @@ export interface StorageService {
    * is deliberately unchanged.
    */
   getPresignedCaptureUploadUrl(key: string, opts: CapturePresignOptions): Promise<{ url: string; key: string }>;
+
+  /**
+   * Presigned PUT for one delta picture (content-hash-identity slice 2). Length, type and the SHA-256 checksum are signed;
+   * `header` lists the headers the client must send with the PUT, exactly as given.
+   */
+  getPresignedBlobUploadUrl(key: string, opts: BlobPresignOptions): Promise<{ url: string; key: string; header: Record<string, string> }>;
 
   /**
    * HEADs an object: its size and content type, without downloading the body.
