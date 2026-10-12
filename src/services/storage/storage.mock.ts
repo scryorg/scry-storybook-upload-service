@@ -46,6 +46,12 @@ export class MockStorageService implements StorageService {
     return { url, key };
   }
 
+  async getPresignedBlobUploadUrl(key: string, opts: { contentLength: number; sha256Hex: string; expiresIn: number }): Promise<{ url: string; key: string; header: Record<string, string> }> {
+    const checksum = btoa(String.fromCodePoint(...Uint8Array.from(opts.sha256Hex.match(/../g) ?? [], (h) => Number.parseInt(h, 16))));
+    const url = `https://test-bucket.s3.amazonaws.com/${key}?X-Amz-SignedHeaders=content-length%3Bcontent-type%3Bhost%3Bx-amz-checksum-sha256&X-Amz-Expires=${opts.expiresIn}&X-Amz-Signature=test`;
+    return { url, key, header: { 'Content-Type': 'application/octet-stream', 'x-amz-checksum-sha256': checksum } };
+  }
+
   async head(key: string): Promise<StorageObjectMeta | null> {
     const object = this.objects.get(key);
     if (!object) return null;

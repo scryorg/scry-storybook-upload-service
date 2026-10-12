@@ -13,16 +13,29 @@ import { isDeviceKeySource } from '../middleware/auth.js';
 import type { FirestoreService } from '../services/firestore/firestore.service.js';
 import type { Build, DeltaKey, BuildSource } from '../services/firestore/firestore.types.js';
 import type { StorageService } from '../services/storage/storage.service.js';
+import { metadataZipKeyFor } from '../lib/metadata-zip.js';
 import { validateBundle } from '../vendor/scf/dist/index.js';
+import { measureImage, MEASURE_IMAGE_MAX_PREFIX_BYTES } from '../vendor/scf/dist/image-dimensions.js';
 import type { BundleFiles, ValidationIssue } from '../vendor/scf/dist/types.js';
-import { BlobStore } from './blob-store.js';
-import { BUILD_DEADLINE_MS, CONTENT_KEY_TTL_MS, IDEMPOTENCY_TTL_MS, MAX_BLOB_BYTES, MAX_NEW_BYTES, MAX_PICTURES } from './limits.js';
+import { BlobStore, blobKey } from './blob-store.js';
+import { BUILD_DEADLINE_MS, CONTENT_KEY_TTL_MS, IDEMPOTENCY_TTL_MS, MAX_BLOB_BYTES, MAX_NEW_BYTES, MAX_PICTURES, R2_DEADLINE_MARGIN_MS } from './limits.js';
 
 type PictureErrorCode = 'too_big' | 'bad_type';
 type BuildSummary = Pick<Build, 'id' | 'buildNumber' | 'versionId'>;
 type PictureFamily = 'png' | 'jpeg' | 'webp';
 
 export const ALLOWED_PICTURE_EXT: Readonly<Record<string, PictureFamily>> = { png: 'png', jpg: 'jpeg', jpeg: 'jpeg', webp: 'webp' };
+
+const MAX_DIMENSION = 16384;
+
+/** Every family a picture can be accepted as: a blob that fails even this is no one's picture. */
+const ANY_PICTURE_FAMILY: ReadonlyArray<PictureFamily> = ['png', 'jpeg', 'webp'];
+
+/** True when the picture's own bytes are a picture of one of the types the manifest declared for it, with sane dimensions. */
+export const acceptsPicture = (families: ReadonlyArray<string>) => (bytes: Uint8Array) => {
+  const measured = measureImage(bytes.subarray(0, MEASURE_IMAGE_MAX_PREFIX_BYTES));
+  return !!measured && families.includes(measured.family) && measured.width >= 1 && measured.height >= 1 && measured.width <= MAX_DIMENSION && measured.height <= MAX_DIMENSION;
+};
 
 /** A refusal the route turns into a response. `extra` carries structured detail (never a stack or a secret). */
 export interface DeltaRefusal {
@@ -51,6 +64,13 @@ export interface ManifestInput {
   scf: Record<string, unknown>;
   images: Record<string, PictureEntry>;
   requestId?: string;
+  /**
+   * The Storybook build the CI deployer already opened for this deploy: the delta attaches to it instead of opening a second build
+   * (one deploy = one build). Refused with `build_not_attachable` unless that build is this project's, untouched and not yet committed.
+   */
+  attachBuildId?: string;
+  /** The client asked for "r2-presigned" links: the build stays open for the whole life of the links and a margin (see R2_DEADLINE_MARGIN_MS). */
+  directUploads?: boolean;
 }
 
 export interface DeltaObject {
@@ -137,7 +157,7 @@ const extOf = (path: string): string => {
   return dot < 0 ? '' : path.slice(dot + 1).toLowerCase();
 };
 
-export const buildFileKey = (project: string, versionId: string, buildNumber: number, name: 'scf.json' | 'images.json' | 'delta-sent.json'): string =>
+export const buildFileKey = (project: string, versionId: string, buildNumber: number, name: 'scf.json' | 'images.json' | 'delta-sent.json' | 'r2-offered.json'): string =>
   `${project}/${versionId}/builds/${buildNumber}/${name}`;
 
 type Dropped = Map<string, { code: PictureErrorCode; message: string }>;
@@ -272,8 +292,9 @@ async function lookUpKey(deps: DeltaDeps, input: ManifestInput, hash: string, no
 async function writeBuildFiles(deps: DeltaDeps, input: ManifestInput, build: Build, scf: Record<string, unknown>, dropped: Dropped): Promise<void> {
   const imagesJson: Record<string, PictureEntry> = {};
   for (const [path, entry] of Object.entries(input.images)) if (!dropped.has(path)) imagesJson[path] = { oid: entry.oid, size: entry.size };
+  // The build's own version: for a build the deployer opened first it is the label that build was created with (BPS finds these files by it).
   const put = (name: 'scf.json' | 'images.json', text: string) =>
-    deps.storage.putObject(buildFileKey(input.project, input.version, build.buildNumber, name), new TextEncoder().encode(text), { contentType: 'application/json' });
+    deps.storage.putObject(buildFileKey(input.project, build.versionId, build.buildNumber, name), new TextEncoder().encode(text), { contentType: 'application/json' });
   await put('scf.json', JSON.stringify(scf));
   await put('images.json', JSON.stringify(imagesJson));
 }
@@ -348,15 +369,91 @@ async function joinBuild(
   existingKey: DeltaKey | null,
   joined: Build,
   deadline: Date,
+  kept: Date,
   common: Pick<OpenedBuild, 'objects' | 'newBytes' | 'items' | 'itemsHeld'>,
   now: Date
 ): Promise<OpenedBuild> {
   const { firestore } = deps;
-  if (!joined.processingStatus) await firestore.updateBuild(input.project, joined.id, { deltaDeadline: deadline });
+  if (!joined.processingStatus) await firestore.updateBuild(input.project, joined.id, { deltaDeadline: kept });
   const record = { buildId: joined.id, digest: input.digest, createdAt: now, expireAt: new Date(now.getTime() + IDEMPOTENCY_TTL_MS) };
   if (existingKey) await firestore.putDeltaKey(input.project, hash, record);
   else await firestore.createDeltaKeyIfAbsent(input.project, hash, record);
   return { ok: true, reused: true, build: summaryOf(joined), deadline, ...common };
+}
+
+const NOT_ATTACHABLE = 'This build cannot take a delta manifest: it is not an untouched Storybook build of this project';
+
+/**
+ * The build the deployer's Storybook upload opened: this project's, made by the Storybook upload routes (a zip, no source, not made
+ * through the dashboard), not yet a delta, not committed / queued / processed, and no metadata ZIP attached. Anything else is refused
+ * with the same words, so the answer never tells which of the conditions failed (or whether the id exists at all).
+ */
+async function findAttachable(deps: DeltaDeps, input: ManifestInput): Promise<{ ok: true; build: Build } | DeltaRefusal> {
+  const refusal = refuse(409, 'build_not_attachable', NOT_ATTACHABLE);
+  if (input.restrictedKey || !input.attachBuildId) return refusal;
+  const build = await deps.firestore.getBuild(input.project, input.attachBuildId);
+  if (!build || build.projectId !== input.project) return refusal;
+  if (build.delta || build.source || build.channel || !build.zipUrl || build.processingStatus) return refusal;
+  if (build.uploadedByKeyProject && build.uploadedByKeyProject !== input.project) return refusal;
+  if (await deps.storage.head(metadataZipKeyFor(input.project, build.versionId, build.buildNumber))) return refusal;
+  return { ok: true, build };
+}
+
+/** The build to attach to: none when the manifest names none, or when its Idempotency-Key already answers with a live build (a replay). */
+async function attachTargetFor(deps: DeltaDeps, input: ManifestInput, replay: boolean): Promise<{ ok: true; build: Build | null } | DeltaRefusal> {
+  if (!input.attachBuildId || replay) return { ok: true, build: null };
+  return findAttachable(deps, input);
+}
+
+/** The links answer `expires_at = deadline`; the build outlives them (r2-presigned) so the last picture to land can still be committed. */
+const storedDeadline = (input: ManifestInput, deadline: Date): Date => (input.directUploads ? new Date(deadline.getTime() + R2_DEADLINE_MARGIN_MS) : deadline);
+
+/**
+ * One manifest at a time per build: the first to record `attach-<buildId>` wins. The same manifest again passes (it writes the same
+ * files); a different manifest for the same build is refused. The record expires with the idempotency records.
+ */
+async function lockAttach(deps: DeltaDeps, input: ManifestInput, build: Build, now: Date): Promise<DeltaRefusal | null> {
+  const { firestore } = deps;
+  const id = `attach-${build.id}`;
+  const record = { buildId: build.id, digest: input.digest, createdAt: now, expireAt: new Date(now.getTime() + IDEMPOTENCY_TTL_MS) };
+  if (await firestore.createDeltaKeyIfAbsent(input.project, id, record)) return null;
+  const held = await firestore.getDeltaKey(input.project, id);
+  if (held && held.expireAt.getTime() > now.getTime()) return held.digest === input.digest ? null : refuse(409, 'build_not_attachable', NOT_ATTACHABLE);
+  await firestore.putDeltaKey(input.project, id, record);
+  return null;
+}
+
+/**
+ * Turns the deployer's Storybook build into the delta build: the manifest files go under the build's own version and number (where BPS
+ * looks for them), the Idempotency-Key names the build, and only then is the build marked `delta` and given its deadline. In that order a
+ * failure in between leaves the build attachable for the retry. The build keeps its zip, its upload key and its step history.
+ */
+async function attachDeltaBuild(
+  deps: DeltaDeps,
+  input: ManifestInput,
+  hash: string,
+  existingKey: DeltaKey | null,
+  target: Build,
+  scf: Record<string, unknown>,
+  dropped: Dropped,
+  deadlines: { link: Date; stored: Date },
+  common: Pick<OpenedBuild, 'objects' | 'newBytes' | 'items' | 'itemsHeld'>,
+  now: Date
+): Promise<OpenedBuild | DeltaRefusal> {
+  const { firestore } = deps;
+  const locked = await lockAttach(deps, input, target, now);
+  if (locked) return locked;
+  await writeBuildFiles(deps, input, target, scf, dropped);
+  const record = { buildId: target.id, digest: input.digest, createdAt: now, expireAt: new Date(now.getTime() + IDEMPOTENCY_TTL_MS) };
+  if (existingKey) {
+    await firestore.putDeltaKey(input.project, hash, record);
+  } else if (!(await firestore.createDeltaKeyIfAbsent(input.project, hash, record))) {
+    // The same Idempotency-Key raced in: fine when it is the same manifest for the same build, a conflict otherwise.
+    const winner = await firestore.getDeltaKey(input.project, hash);
+    if (winner?.buildId !== target.id || winner.digest !== input.digest) return refuse(409, 'idempotency_conflict', 'This Idempotency-Key was used with a different manifest');
+  }
+  await firestore.updateBuild(input.project, target.id, { delta: true, deltaDeadline: deadlines.stored });
+  return { ok: true, reused: false, build: summaryOf(target), deadline: deadlines.link, ...common };
 }
 
 /** Opens (or re-opens, for the same Idempotency-Key) a delta build from a manifest. */
@@ -376,6 +473,11 @@ export async function openDeltaBuild(deps: DeltaDeps, input: ManifestInput): Pro
   const keyState = await lookUpKey(deps, input, hash, now);
   if (!keyState.ok) return keyState;
 
+  // Named build to attach to: refused before anything is touched (a replay of an earlier attach is answered by `reuse` below instead).
+  const found = await attachTargetFor(deps, input, !!keyState.reuse);
+  if (!found.ok) return found;
+  const attachTarget = found.build;
+
   const oids = [...new Set(entries.filter(([path]) => !dropped.has(path)).map(([, e]) => e.oid))];
   await blobs.touch(input.project);
   const held = await blobs.has(input.project, oids);
@@ -383,18 +485,21 @@ export async function openDeltaBuild(deps: DeltaDeps, input: ManifestInput): Pro
   if (listing.newBytes > MAX_NEW_BYTES) return refuse(413, 'too_many_new_bytes', 'This build needs more new picture data than one build may send');
 
   const deadline = new Date(now.getTime() + BUILD_DEADLINE_MS);
+  const kept = storedDeadline(input, deadline);
   const common = { objects: listing.objects, newBytes: listing.newBytes, items: oids.length, itemsHeld: listing.itemsHeld };
 
   const { reuse } = keyState;
   if (reuse) {
-    if (!reuse.processingStatus) await firestore.updateBuild(input.project, reuse.id, { deltaDeadline: deadline });
+    if (!reuse.processingStatus) await firestore.updateBuild(input.project, reuse.id, { deltaDeadline: kept });
     return { ok: true, reused: true, build: summaryOf(reuse), deadline, ...common };
   }
+
+  if (attachTarget) return attachDeltaBuild(deps, input, hash, keyState.existingKey, attachTarget, checked.scf, dropped, { link: deadline, stored: kept }, common, now);
 
   // Another manifest for the same pictures from the same source is already open or in flight: join that build (one build, one charge).
   const contentHash = contentKeyHash(input);
   const content = await lookUpContent(deps, input.project, contentHash, now);
-  if (content.joinable) return joinBuild(deps, input, hash, keyState.existingKey, content.joinable, deadline, common, now);
+  if (content.joinable) return joinBuild(deps, input, hash, keyState.existingKey, content.joinable, deadline, kept, common, now);
 
   const build = await firestore.createBuild(input.project, {
     versionId: input.version,
@@ -405,14 +510,14 @@ export async function openDeltaBuild(deps: DeltaDeps, input: ManifestInput): Pro
     requestId: input.requestId,
     firstStep: 'presign',
     delta: true,
-    deltaDeadline: deadline,
+    deltaDeadline: kept,
   });
   await writeBuildFiles(deps, input, build, checked.scf, dropped);
   // Claimed after the files are written, so a manifest that joins this build can PUT pictures straight away.
   const beaten = await claimContent(deps, input.project, contentHash, content.key, build, now);
   if (beaten) {
     await abandonBuild(deps, input, build);
-    return joinBuild(deps, input, hash, keyState.existingKey, beaten, deadline, common, now);
+    return joinBuild(deps, input, hash, keyState.existingKey, beaten, deadline, kept, common, now);
   }
   const claim = await claimKey(deps, input, hash, keyState.existingKey, build, now);
   if ('ok' in claim) return claim;
@@ -462,6 +567,54 @@ export async function extendDeadline(deps: DeltaDeps, project: string, buildId: 
   const deadline = new Date((deps.now ?? (() => new Date()))().getTime() + BUILD_DEADLINE_MS);
   await deps.firestore.updateBuild(project, buildId, { deltaDeadline: deadline });
   return deadline;
+}
+
+/** Which pictures this build offered through "r2-presigned" links (so were never seen by the Worker): the commit looks inside exactly those. */
+export async function readR2Offered(storage: StorageService, project: string, build: BuildSummary): Promise<string[]> {
+  const raw = await storage.getObjectStream(buildFileKey(project, build.versionId, build.buildNumber, 'r2-offered.json'));
+  if (!raw) return [];
+  return JSON.parse(await new Response(raw).text()) as string[];
+}
+
+/** Remembers the pictures offered through direct links (merged with earlier answers for the same build, e.g. a replay or a joiner). */
+export async function recordR2Offered(storage: StorageService, project: string, build: BuildSummary, oids: ReadonlyArray<string>): Promise<void> {
+  if (oids.length === 0) return;
+  const merged = [...new Set([...(await readR2Offered(storage, project, build)), ...oids])].sort();
+  await storage.putObject(buildFileKey(project, build.versionId, build.buildNumber, 'r2-offered.json'), new TextEncoder().encode(JSON.stringify(merged)), { contentType: 'application/json' });
+}
+
+/** Pictures are looked at this many at a time (each is one ranged read of the first 64 KiB). */
+const PICTURE_CHECK_CONCURRENCY = 8;
+
+/**
+ * The checks the PUT route runs on a picture, for the pictures that never went through it: those offered through R2 links in this build.
+ * A picture that is not a picture of its declared type with sane dimensions fails this build's commit (422). Blobs are shared by every
+ * build of the project, so the blob itself is deleted only when its bytes are not an accepted picture of ANY family; bytes that are a
+ * valid picture of another family (declared with the wrong extension here) may be queued by another build and are kept (PR #72 F55).
+ * Returns how many pictures failed.
+ */
+async function removeInvalidDirectPictures(storage: StorageService, project: string, build: BuildSummary, images: Record<string, PictureEntry>): Promise<number> {
+  const offered = new Set(await readR2Offered(storage, project, build));
+  if (offered.size === 0) return 0;
+  const families = new Map<string, PictureFamily[]>();
+  for (const [path, entry] of Object.entries(images)) {
+    const family = ALLOWED_PICTURE_EXT[extOf(path)];
+    if (family && offered.has(entry.oid)) families.set(entry.oid, [...(families.get(entry.oid) ?? []), family]);
+  }
+  const queue = [...families.keys()];
+  const invalid: string[] = [];
+  const unusable: string[] = [];
+  const work = async (): Promise<void> => {
+    for (let oid = queue.pop(); oid !== undefined; oid = queue.pop()) {
+      const bytes = await storage.getObjectRange(blobKey(project, oid), { offset: 0, length: MEASURE_IMAGE_MAX_PREFIX_BYTES });
+      if (bytes && acceptsPicture(families.get(oid) ?? [])(bytes)) continue;
+      invalid.push(oid);
+      if (!bytes || !acceptsPicture(ANY_PICTURE_FAMILY)(bytes)) unusable.push(oid);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(PICTURE_CHECK_CONCURRENCY, queue.length) }, work));
+  for (const oid of unusable) await storage.delete(blobKey(project, oid));
+  return invalid.length;
 }
 
 export interface Committed {
@@ -553,7 +706,10 @@ export async function commitDeltaBuild(deps: DeltaDeps, project: string, buildId
   const oids = [...new Set(Object.values(images).map((e) => e.oid))];
   const held = await blobs.has(project, oids);
   const missing = oids.filter((oid) => !held.has(oid));
-  if (missing.length > 0) return refuse(409, 'missing_blobs', 'Some pictures have not arrived', { missing: missing.slice(0, 1000) });
+  if (missing.length > 0) return refuse(409, 'missing_blobs', 'Some pictures have not arrived', { count: missing.length, missing: missing.slice(0, 1000) });
+  // Pictures that went straight to R2 never met the PUT route's checks: run them now, before anything is queued (F38).
+  const invalid = await removeInvalidDirectPictures(storage, project, build, images);
+  if (invalid > 0) return refuse(422, 'invalid_picture', 'Some pictures sent directly to storage are not valid pictures of their declared type; they were removed, send them again', { count: invalid });
 
   const sent = await claimAndEnqueue(deps, project, build, manifestKey, imagesKey, requestId);
   if (!sent) return { ok: true, firstTime: false, queued: true, build: summary, items: 0, bytes: 0 };

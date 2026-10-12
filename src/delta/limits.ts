@@ -12,6 +12,11 @@ export const MAX_NEW_BYTES = 1024 * 1024 * 1024;
 
 /** A build stays open this long after creation and after every accepted blob PUT. */
 export const BUILD_DEADLINE_MS = 60 * 60 * 1000;
+/**
+ * "r2-presigned" links stay valid until the answer's `expires_at`; the build must stay open a little longer than that, so a picture that lands
+ * in the last second of a link's life still finds its build open for the commit.
+ */
+export const R2_DEADLINE_MARGIN_MS = 5 * 60 * 1000;
 /** An Idempotency-Key record outlives its build deadline by a day (TTL policy on `expireAt`). */
 export const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
 

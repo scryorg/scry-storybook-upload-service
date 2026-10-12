@@ -5,6 +5,10 @@
  *   PUT  /delta/:project/blobs/:oid                store one picture under the fingerprint of its bytes
  *   POST /delta/:project/builds/:buildId/commit    every picture is held -> queue the build
  *
+ * Direct to storage (content-hash-identity slice 2): a manifest that lists "r2-presigned" in `transfers` gets pre-signed R2 PUT links
+ * (length, type and SHA-256 checksum signed, so R2 refuses wrong bytes) instead of links to this Worker. Without `transfers` the answer
+ * is exactly what it was before (Scry Sync 0.1.7 refuses links to another origin).
+ *
  * Thin adapters over `blob-store.ts` and `delta-build.ts` (the swap seam). Behind the SYNC_DELTA flag: 503 `delta_disabled`
  * when off. `apiKeyAuth` (mounted on `/delta/:project/*`) has already checked the key against the project in the URL;
  * the three paths are the only delta entries in DEVICE_KEY_ROUTES. Log lines carry counts only, never a name, hash or path.
@@ -16,9 +20,10 @@ import { emitBuildStep } from '../lib/build-steps.js';
 import { parseSourceKey } from '../bundle/source-key.js';
 import { VERIFIED_PROJECT, isRestrictedKeyKind } from '../middleware/auth.js';
 import type { AppEnv } from '../app.js';
-import { measureImage, MEASURE_IMAGE_MAX_PREFIX_BYTES } from '../vendor/scf/dist/image-dimensions.js';
-import { BlobHashMismatch, BlobRejected, BlobStore } from './blob-store.js';
-import { commitDeltaBuild, extendDeadline, gateBlob, openDeltaBuild, sha256OfText, type DeltaDeps, type DeltaRefusal } from './delta-build.js';
+import type { StorageService } from '../services/storage/storage.service.js';
+import { BuildProvenanceQuerySchema, recordBuildProvenance } from '../lib/build-provenance.js';
+import { BlobHashMismatch, BlobRejected, BlobStore, blobKey } from './blob-store.js';
+import { acceptsPicture, commitDeltaBuild, extendDeadline, gateBlob, openDeltaBuild, recordR2Offered, sha256OfText, type DeltaDeps, type DeltaRefusal } from './delta-build.js';
 import { HASH_ALGORITHM, IDEMPOTENCY_KEY, MAX_BLOB_BYTES, MAX_MANIFEST_BYTES, PROTOCOL_VERSION, SHA256_HEX } from './limits.js';
 import { checkBlobRate, checkManifestRate, type RateDecision } from './rate-limit.js';
 import { readSent, recordSent } from './sent-summary.js';
@@ -26,7 +31,6 @@ import { readSent, recordSent } from './sent-summary.js';
 type Ctx = Context<AppEnv>;
 type Status = 400 | 403 | 404 | 409 | 411 | 413 | 422 | 429 | 500 | 503;
 
-const MAX_DIMENSION = 16384;
 const VERSION = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
 const BUILD_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -40,6 +44,28 @@ const ManifestBody = z.object({
   source: z.string(),
   scf: z.record(z.string(), z.unknown()),
   images: z.record(z.string().min(1).max(512), z.object({ oid: z.string().regex(SHA256_HEX), size: z.number().int().min(0) })),
+  /** LFS-style, in order of preference. Absent: today's answer, byte for byte. */
+  transfers: z.array(z.string().max(32)).max(8).optional(),
+  /** The Storybook build the deployer's first call opened for this deploy: this delta attaches to it instead of opening a second build. */
+  buildId: z.string().regex(BUILD_ID).optional(),
+  /** Where the deploy came from, validated like the metadata ZIP path's query (a hex git object name, a branch name). */
+  commitSha: BuildProvenanceQuerySchema.shape.commitSha,
+  branch: BuildProvenanceQuerySchema.shape.branch,
+});
+
+/** The transfer kinds this server can answer with. */
+const TRANSFER_BASIC = 'basic';
+const TRANSFER_R2 = 'r2-presigned';
+/** Pre-signed links are made this many at a time (local HMAC work, no network). */
+const PRESIGN_BATCH = 200;
+
+const AnswerBody = z.object({
+  buildId: z.string(),
+  buildNumber: z.number(),
+  expiresAt: z.string(),
+  maxBlobBytes: z.number(),
+  objects: z.array(z.lazy(() => ObjectBody)),
+  transfer: z.enum([TRANSFER_BASIC, TRANSFER_R2]).optional(),
 });
 
 const ObjectBody = z.object({
@@ -54,23 +80,28 @@ export const manifestRoute = createRoute({
   path: '/delta/{project}/manifest',
   description:
     'Project key or Scry Sync device key. Header Idempotency-Key (8-128 of A-Z a-z 0-9 _ -). JSON body: protocol 1, hash "sha256", version, source ("<kind>:<platform>"), ' +
-    'scf (the scf.json object), images ({"images/<name>.<ext>": {oid: sha256 hex, size}}). Answers which pictures the project does not hold: an object with actions.upload is ' +
-    'missing (PUT to its href as given), one with neither actions nor error is already held, one with error is refused alone. 201 a new build, 200 the same key and manifest again. ' +
+    'scf (the scf.json object), images ({"images/<name>.<ext>": {oid: sha256 hex, size}}), optional transfers (["r2-presigned", "basic"], in order of preference). ' +
+    'Answers which pictures the project does not hold: an object with actions.upload is missing (PUT to its href with the header given, exactly as given), one with neither actions nor error ' +
+    'is already held, one with error is refused alone. With transfers listing "r2-presigned" (and signing available) each href is a pre-signed Cloudflare R2 URL for that one picture: send the bytes there with the given header ' +
+    '(which carries x-amz-checksum-sha256, so R2 refuses any other bytes) and never send the Scry key to that host; the answer carries transfer "r2-presigned" or "basic". Without transfers the answer is unchanged and has no transfer field. ' +
+    '201 a new build, 200 the same key and manifest again. ' +
+    'Optional buildId (the Storybook build the deployer\'s first call opened) attaches this delta to that build instead of opening a second one, so one deploy is one build; optional commitSha (hex git object name) and branch are stored on the build. ' +
+    'buildId is refused with 409 build_not_attachable unless that build is this project\'s, was made by the Storybook upload, has no metadata ZIP and has not been committed or queued. Without buildId a new build is opened as before. ' +
     'Limits: 10,000 pictures, 16 MiB manifest, 20 MiB per picture, 1 GiB of new pictures per build; 30 manifests per minute and 500 per day per key.',
   request: { params: z.object({ project: z.string() }) },
   responses: {
     200: {
       description: 'The same build again (same Idempotency-Key and manifest while it is open)',
-      content: { 'application/json': { schema: z.object({ buildId: z.string(), buildNumber: z.number(), expiresAt: z.string(), maxBlobBytes: z.number(), objects: z.array(ObjectBody) }) } },
+      content: { 'application/json': { schema: AnswerBody } },
     },
     201: {
       description: 'A new build was opened',
-      content: { 'application/json': { schema: z.object({ buildId: z.string(), buildNumber: z.number(), expiresAt: z.string(), maxBlobBytes: z.number(), objects: z.array(ObjectBody) }) } },
+      content: { 'application/json': { schema: AnswerBody } },
     },
     400: errorResponse('Not valid JSON, an SCF error, or an unsupported protocol/hash (unsupported_protocol: use the zip path)'),
     401: errorResponse('Missing, malformed, unknown or revoked key'),
     403: errorResponse('A key of another project, or a device key outside its pinned source'),
-    409: errorResponse('idempotency_conflict: the key was used with a different manifest'),
+    409: errorResponse('idempotency_conflict: the key was used with a different manifest; build_not_attachable: buildId names a build this manifest cannot attach to'),
     413: errorResponse('The list breaks a limit'),
     429: errorResponse('Rate limited; Retry-After says when to retry'),
     503: errorResponse('delta_disabled: the flag is off, use the zip path'),
@@ -101,14 +132,18 @@ export const putBlobRoute = createRoute({
 export const commitRoute = createRoute({
   method: 'post',
   path: '/delta/{project}/builds/{buildId}/commit',
-  description: 'Project key or Scry Sync device key. Body {}. 202 when every picture is held and the build was queued; a repeat answers 200; 409 missing_blobs lists what has not arrived.',
+  description:
+    'Project key or Scry Sync device key. Body {}. Checks that every picture the build lists is held by this project, then queues it: 202 queued, a repeat answers 200. ' +
+    '409 missing_blobs (count = how many pictures have not arrived, missing = up to 1,000 of them) and the build is not queued; send the missing pictures and commit again. ' +
+    'Pictures sent straight to R2 are looked at here (type and dimensions, as the PUT route does): 422 invalid_picture (count = how many) deletes those pictures, does not queue the build, and the client sends them again.',
   request: { params: z.object({ project: z.string(), buildId: z.string() }) },
   responses: {
     200: { description: 'Already accepted', content: { 'application/json': { schema: z.object({ buildId: z.string(), message: z.string() }) } } },
     202: { description: 'Queued', content: { 'application/json': { schema: z.object({ buildId: z.string(), buildNumber: z.number(), queued: z.boolean() }) } } },
     403: errorResponse('A key of another project, or a device key outside its pinned source'),
     404: errorResponse('No such build in this project'),
-    409: errorResponse('missing_blobs (with a missing list) or build_not_open'),
+    409: errorResponse('missing_blobs (with count and a missing list) or build_not_open'),
+    422: errorResponse('invalid_picture (with count): pictures sent straight to R2 were not valid pictures; they were removed and the build was not queued'),
     503: errorResponse('delta_disabled'),
   },
 });
@@ -143,7 +178,9 @@ function refuse(c: Ctx, status: Status, code: string, message: string, extra: Re
   // The flag-off 503 is expected traffic (every Sync attempt before the rollout): info on this line and on the request line (F50).
   const expected = code === 'delta_disabled';
   if (expected) c.set('expectedRefusal', true);
-  (expected ? log.info : log.warn)('delta refused', reqFields(c, { err_code: `delta_${code}`, status }));
+  // A count of pictures (never which ones) when the refusal is about pictures that did not arrive.
+  const count = typeof extra.count === 'number' ? extra.count : undefined;
+  (expected ? log.info : log.warn)('delta refused', reqFields(c, { err_code: `delta_${code}`, status, ...(count === undefined ? {} : { attrs: { 'delta.items': count } }) }));
   const request_id = c.get('requestId') as string | undefined;
   return c.json({ error: code, message, ...extra, ...(request_id ? { request_id } : {}) }, status as never);
 }
@@ -171,22 +208,66 @@ function context(c: Ctx) {
   return { ctx: { key: { id: key.id, project: key.projectId, restricted: isRestrictedKeyKind(key.kind) }, firestore, deps } };
 }
 
-const objectBody = (project: string, buildId: string, origin: string, expiresAt: string) =>
-  (o: { oid: string; size: number; missing: boolean; error?: { code: string; message: string } }) => {
-    if (o.error) return { oid: o.oid, size: o.size, error: o.error };
-    if (!o.missing) return { oid: o.oid, size: o.size };
-    return {
-      oid: o.oid,
-      size: o.size,
-      actions: { upload: { href: `${origin}/delta/${project}/blobs/${o.oid}?build=${buildId}`, header: { 'Content-Type': 'application/octet-stream' }, expires_at: expiresAt } },
-    };
-  };
+type AnswerObject = { oid: string; size: number; missing: boolean; error?: { code: string; message: string } };
+type UploadLink = { href: string; header: Record<string, string> };
 
-/** True when the picture's own bytes are a picture of one of the types the manifest declared for it, with sane dimensions. */
-const acceptsPicture = (families: ReadonlyArray<string>) => (bytes: Uint8Array) => {
-  const measured = measureImage(bytes.subarray(0, MEASURE_IMAGE_MAX_PREFIX_BYTES));
-  return !!measured && families.includes(measured.family) && measured.width >= 1 && measured.height >= 1 && measured.width <= MAX_DIMENSION && measured.height <= MAX_DIMENSION;
+const sameOriginLink = (project: string, buildId: string, origin: string) => (o: AnswerObject): UploadLink => ({
+  href: `${origin}/delta/${project}/blobs/${o.oid}?build=${buildId}`,
+  header: { 'Content-Type': 'application/octet-stream' },
+});
+
+/** A pre-signed R2 PUT for `_blobs/<project>/<oid>`: valid until the build's deadline, exactly `size` bytes, checksum signed. */
+const r2Link = (storage: StorageService, project: string, deadline: Date) => async (o: AnswerObject): Promise<UploadLink> => {
+  const signed = await storage.getPresignedBlobUploadUrl(blobKey(project, o.oid), {
+    contentLength: o.size,
+    sha256Hex: o.oid,
+    expiresIn: Math.max(1, Math.floor((deadline.getTime() - Date.now()) / 1000)),
+  });
+  return { href: signed.url, header: signed.header };
 };
+
+const toObjectBody = (o: AnswerObject, link: UploadLink | undefined, expiresAt: string) => {
+  if (o.error) return { oid: o.oid, size: o.size, error: o.error };
+  if (!o.missing || !link) return { oid: o.oid, size: o.size };
+  return { oid: o.oid, size: o.size, actions: { upload: { href: link.href, header: link.header, expires_at: expiresAt } } };
+};
+
+/**
+ * The per-picture answers. `wantsR2` is the client's opt-in; when signing fails for the first picture (storage not able to sign) the whole
+ * answer falls back to same-origin links, so a build never gets a mix. Returns which transfer was used.
+ */
+async function answerObjects(
+  c: Ctx,
+  deps: DeltaDeps,
+  input: { project: string; buildId: string; objects: ReadonlyArray<AnswerObject>; deadline: Date; wantsR2: boolean }
+): Promise<{ objects: ReturnType<typeof toObjectBody>[]; transfer: 'basic' | 'r2-presigned' }> {
+  const expiresAt = input.deadline.toISOString();
+  const wanted = input.objects.filter((o) => o.missing && !o.error);
+  const links = new Map<string, UploadLink>();
+  let transfer: 'basic' | 'r2-presigned' = TRANSFER_BASIC;
+  if (input.wantsR2 && wanted.length > 0) {
+    try {
+      const sign = r2Link(deps.storage, input.project, input.deadline);
+      for (let i = 0; i < wanted.length; i += PRESIGN_BATCH) {
+        const batch = wanted.slice(i, i + PRESIGN_BATCH);
+        const made = await Promise.all(batch.map(sign));
+        batch.forEach((o, j) => links.set(o.oid, made[j]));
+      }
+      transfer = TRANSFER_R2;
+    } catch (error) {
+      links.clear();
+      log.warn('delta presign unavailable so links stay same-origin', reqFields(c, { err_code: 'delta_presign_unavailable', attrs: { 'delta.items': wanted.length } }));
+      reportError(c, error, 'delta presign failed', 'delta_presign_failed');
+    }
+  } else if (input.wantsR2) {
+    transfer = TRANSFER_R2; // nothing to send: the client asked for direct links and no link is needed
+  }
+  if (transfer === TRANSFER_BASIC) {
+    const basic = sameOriginLink(input.project, input.buildId, new URL(c.req.url).origin);
+    for (const o of wanted) links.set(o.oid, basic(o));
+  }
+  return { objects: input.objects.map((o) => toObjectBody(o, links.get(o.oid), expiresAt)), transfer };
+}
 
 /** Stores the picture; a refusal comes back as the response to send. */
 async function storePicture(c: Ctx, deps: DeltaDeps, project: string, oid: string, bytes: Uint8Array, families: Parameters<typeof acceptsPicture>[0]): Promise<'stored' | 'held' | Response> {
@@ -197,6 +278,23 @@ async function storePicture(c: Ctx, deps: DeltaDeps, project: string, oid: strin
     if (error instanceof BlobRejected) return refuse(c, 422, 'bad_type', 'The bytes are not a PNG, JPEG or WebP of the declared type; nothing was stored');
     throw error;
   }
+}
+
+/** Where the deploy came from goes on the build row, where the metadata ZIP path puts it (best effort, with the same failure marker). */
+async function recordProvenance(c: Ctx, firestore: NonNullable<Ctx['var']['firestore']>, project: string, buildId: string, git: { commitSha?: string; branch?: string }): Promise<void> {
+  if (!git.commitSha && !git.branch) return;
+  await recordBuildProvenance(firestore, project, { id: buildId }, 'delta', { ...(git.commitSha ? { commitSha: git.commitSha } : {}), ...(git.branch ? { branch: git.branch } : {}) }, c);
+}
+
+/** Pictures that go straight to R2 skip the PUT route's checks: remember which ones, so the commit can look inside them. */
+async function recordOffered(
+  deps: DeltaDeps,
+  project: string,
+  build: { id: string; buildNumber: number; versionId: string },
+  answered: Awaited<ReturnType<typeof answerObjects>>
+): Promise<void> {
+  if (answered.transfer !== TRANSFER_R2) return;
+  await recordR2Offered(deps.storage, project, build, answered.objects.filter((o) => 'actions' in o).map((o) => o.oid));
 }
 
 export function registerDelta(app: OpenAPIHono<AppEnv>): void {
@@ -249,6 +347,8 @@ export function registerDelta(app: OpenAPIHono<AppEnv>): void {
         scf: body.scf,
         images: body.images,
         requestId: c.var.requestId,
+        attachBuildId: body.buildId,
+        directUploads: !!body.transfers?.includes(TRANSFER_R2),
       });
       if (!result.ok) return fromRefusal(c, result);
 
@@ -257,12 +357,24 @@ export function registerDelta(app: OpenAPIHono<AppEnv>): void {
       if (!result.reused) {
         const asked = result.objects.filter((o) => o.missing);
         await recordSent(deps.storage, { project: key.project, ...result.build }, { bytesSent: result.newBytes, itemsSent: asked.length, itemsSkipped: result.itemsHeld });
+        await recordProvenance(c, firestore, key.project, result.build.id, body);
       }
-      log.info('delta manifest', reqFields(c, { attrs: { 'delta.bytes': result.newBytes, 'delta.items': result.items, 'delta.items_skipped': result.itemsHeld + refused } }));
       const expiresAt = result.deadline.toISOString();
-      const toBody = objectBody(key.project, result.build.id, new URL(c.req.url).origin, expiresAt);
+      const wantsR2 = !!body.transfers?.includes(TRANSFER_R2);
+      const answered = await answerObjects(c, deps, { project: key.project, buildId: result.build.id, objects: result.objects, deadline: result.deadline, wantsR2 });
+      // Pictures that go straight to R2 skip the PUT route's checks: remember which ones, so the commit can look inside them.
+      await recordOffered(deps, key.project, result.build, answered);
+      // `reason` carries the transfer kind (a closed code) until `delta.transfer` is a registered attribute.
+      log.info('delta manifest', reqFields(c, { reason: `transfer_${answered.transfer}`, attrs: { 'delta.bytes': result.newBytes, 'delta.items': result.items, 'delta.items_skipped': result.itemsHeld + refused } }));
       return c.json(
-        { buildId: result.build.id, buildNumber: result.build.buildNumber, expiresAt, maxBlobBytes: MAX_BLOB_BYTES, objects: result.objects.map(toBody) },
+        {
+          buildId: result.build.id,
+          buildNumber: result.build.buildNumber,
+          expiresAt,
+          maxBlobBytes: MAX_BLOB_BYTES,
+          objects: answered.objects,
+          ...(body.transfers ? { transfer: answered.transfer } : {}),
+        },
         result.reused ? 200 : 201
       );
     } catch (error) {

@@ -1,0 +1,6 @@
+{
+  "error": "invalid_picture",
+  "message": "Some pictures sent directly to storage are not valid pictures of their declared type; they were removed, send them again",
+  "count": 1,
+  "request_id": "01HZZZZZZZZZZZZZZZZZZZZZZZ"
+}
