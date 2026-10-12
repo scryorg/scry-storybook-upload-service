@@ -28,6 +28,9 @@ export const ALLOWED_PICTURE_EXT: Readonly<Record<string, PictureFamily>> = { pn
 
 const MAX_DIMENSION = 16384;
 
+/** Every family a picture can be accepted as: a blob that fails even this is no one's picture. */
+const ANY_PICTURE_FAMILY: ReadonlyArray<PictureFamily> = ['png', 'jpeg', 'webp'];
+
 /** True when the picture's own bytes are a picture of one of the types the manifest declared for it, with sane dimensions. */
 export const acceptsPicture = (families: ReadonlyArray<string>) => (bytes: Uint8Array) => {
   const measured = measureImage(bytes.subarray(0, MEASURE_IMAGE_MAX_PREFIX_BYTES));
@@ -585,7 +588,10 @@ const PICTURE_CHECK_CONCURRENCY = 8;
 
 /**
  * The checks the PUT route runs on a picture, for the pictures that never went through it: those offered through R2 links in this build.
- * A picture that is not a picture of its declared type with sane dimensions is deleted. Returns how many were deleted.
+ * A picture that is not a picture of its declared type with sane dimensions fails this build's commit (422). Blobs are shared by every
+ * build of the project, so the blob itself is deleted only when its bytes are not an accepted picture of ANY family; bytes that are a
+ * valid picture of another family (declared with the wrong extension here) may be queued by another build and are kept (PR #72 F55).
+ * Returns how many pictures failed.
  */
 async function removeInvalidDirectPictures(storage: StorageService, project: string, build: BuildSummary, images: Record<string, PictureEntry>): Promise<number> {
   const offered = new Set(await readR2Offered(storage, project, build));
@@ -597,14 +603,17 @@ async function removeInvalidDirectPictures(storage: StorageService, project: str
   }
   const queue = [...families.keys()];
   const invalid: string[] = [];
+  const unusable: string[] = [];
   const work = async (): Promise<void> => {
     for (let oid = queue.pop(); oid !== undefined; oid = queue.pop()) {
       const bytes = await storage.getObjectRange(blobKey(project, oid), { offset: 0, length: MEASURE_IMAGE_MAX_PREFIX_BYTES });
-      if (!bytes || !acceptsPicture(families.get(oid) ?? [])(bytes)) invalid.push(oid);
+      if (bytes && acceptsPicture(families.get(oid) ?? [])(bytes)) continue;
+      invalid.push(oid);
+      if (!bytes || !acceptsPicture(ANY_PICTURE_FAMILY)(bytes)) unusable.push(oid);
     }
   };
   await Promise.all(Array.from({ length: Math.min(PICTURE_CHECK_CONCURRENCY, queue.length) }, work));
-  for (const oid of invalid) await storage.delete(blobKey(project, oid));
+  for (const oid of unusable) await storage.delete(blobKey(project, oid));
   return invalid.length;
 }
 

@@ -124,6 +124,11 @@ export class FakeFirestore {
     const b = this.builds.get(`${projectId}/${buildId}`);
     return b ? { ...b } : null;
   }
+  async getLatestBuild(projectId: string, versionId: string) {
+    const rows = [...this.builds.values()].filter((b) => b.projectId === projectId && b.versionId === versionId);
+    const latest = rows.sort((a, b) => b.buildNumber - a.buildNumber)[0];
+    return latest ? { ...latest } : null;
+  }
   updateBuild = vi.fn(async (projectId: string, buildId: string, data: UpdateBuildData) => {
     const b = this.builds.get(`${projectId}/${buildId}`);
     if (b) Object.assign(b, data);

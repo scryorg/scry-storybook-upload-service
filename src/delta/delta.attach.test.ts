@@ -268,6 +268,44 @@ const hugePicture = (seed: number): Picture => {
   return { path: `images/huge-${seed}.png`, bytes, oid: sha256(bytes) };
 };
 
+describe('F56: the old metadata routes refuse a build that is a delta build', () => {
+  const V = STORYBOOK_VERSION;
+  const call = (env: Env, path: string, init: { body?: BodyInit; json?: unknown } = {}) =>
+    env.server.request(`/upload/${PROJECT}/${V}/${path}`, {
+      method: 'POST',
+      headers: { 'X-API-Key': PLAIN_KEY, 'Content-Type': init.json ? 'application/json' : 'application/zip' },
+      body: init.json ? JSON.stringify(init.json) : init.body,
+    });
+
+  it.each([
+    ['before the pictures arrived', false],
+    ['after the delta commit queued it', true],
+  ])('metadata, metadata/presign and metadata/complete answer 409 and touch nothing, %s', async (_label, committed) => {
+    const env = setup();
+    const { b } = await openAttached(env);
+    if (committed) {
+      for (const p of pics) await putBlob(env.server, PROJECT, PLAIN_KEY, p.oid, p.bytes, b.id);
+      expect((await postCommit(env.server, PROJECT, PLAIN_KEY, b.id)).status).toBe(202);
+    }
+    const before = env.firestore.builds.get(`${PROJECT}/${b.id}`)!.processingStatus;
+    const sends = env.queue.send.mock.calls.length;
+    const keysBefore = env.bucket.objects.size;
+    const zipKey = `${PROJECT}/${V}/builds/${b.buildNumber}/metadata-screenshots.zip`;
+
+    const upload = await call(env, 'metadata', { body: new Uint8Array([80, 75, 3, 4, 1, 2, 3]) });
+    const presign = await call(env, 'metadata/presign');
+    const complete = await call(env, 'metadata/complete', { json: { buildId: b.id, zipKey } });
+    for (const res of [upload, presign, complete]) {
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ error: expect.stringContaining("delta") });
+    }
+    expect(env.firestore.builds.get(`${PROJECT}/${b.id}`)!.processingStatus).toBe(before);
+    expect(env.queue.send.mock.calls).toHaveLength(sends);
+    expect(env.bucket.objects.size).toBe(keysBefore);
+    expect([...env.bucket.objects.keys()].some((k) => k.endsWith('metadata-screenshots.zip'))).toBe(false);
+  });
+});
+
 describe('F38: pictures sent straight to R2 pass the picture checks at commit', () => {
   async function openR2(env: Env, p: ReadonlyArray<Picture>) {
     const { b, answer } = await openAttached(env, p, ['r2-presigned', 'basic']);
@@ -345,6 +383,43 @@ describe('F38: pictures sent straight to R2 pass the picture checks at commit', 
     for (const p of pics) await putBlob(env.server, PROJECT, PLAIN_KEY, p.oid, p.bytes, b.id);
     expect((await postCommit(env.server, PROJECT, PLAIN_KEY, b.id)).status).toBe(202);
     expect(env.bucket.blobKeys(PROJECT)).toContain(`_blobs/${PROJECT}/${planted.oid}`);
+  });
+
+  it('F55: bytes that are a valid picture of another family are kept: A gets 422, the blob stays, and B (queued with it) still has its picture', async () => {
+    const env = setup();
+    const shared = pictures(1, 300)[0]; // PNG bytes
+    const asPng: Picture = { ...shared, path: 'images/shared.png' };
+    const asJpg: Picture = { ...shared, path: 'images/shared.jpg' }; // build A declares the same bytes under the wrong extension
+    const bA = await seedStorybookBuild(env.firestore, PROJECT, 'pr-12-aaaaaaa');
+    const bB = await seedStorybookBuild(env.firestore, PROJECT, 'pr-13-bbbbbbb');
+    const offer = async (b: { id: string }, version: string, p: Picture, idem: string) => {
+      const res = await postManifest(env.server, PROJECT, PLAIN_KEY, attachBody([p], b.id, { version, transfers: ['r2-presigned', 'basic'] }), { 'Idempotency-Key': idem });
+      expect(res.status).toBe(201);
+      expect(((await res.json()) as { transfer?: string }).transfer).toBe('r2-presigned');
+    };
+    await offer(bA, 'pr-12-aaaaaaa', asJpg, 'f55-attempt-a');
+    await offer(bB, 'pr-13-bbbbbbb', asPng, 'f55-attempt-b');
+    landDirectly(env, shared);
+
+    const commitB = await postCommit(env.server, PROJECT, PLAIN_KEY, bB.id);
+    expect(commitB.status).toBe(202);
+    const commitA = await postCommit(env.server, PROJECT, PLAIN_KEY, bA.id);
+    expect(commitA.status).toBe(422);
+    expect(await commitA.json()).toMatchObject({ error: 'invalid_picture', count: 1 });
+
+    expect(env.bucket.blobKeys(PROJECT)).toEqual([`_blobs/${PROJECT}/${shared.oid}`]); // kept for B
+    expect(env.firestore.builds.get(`${PROJECT}/${bB.id}`)!.processingStatus).toBe('queued');
+    expect(env.firestore.builds.get(`${PROJECT}/${bA.id}`)!.processingStatus).toBeUndefined();
+    expect(env.queue.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('F55: bytes that are not a picture under any family are still deleted, whichever extension this build declared', async () => {
+    const env = setup();
+    const evil = { ...textPicture(11), path: 'images/evil.jpg' };
+    const { b } = await openR2(env, [evil]);
+    landDirectly(env, evil);
+    expect((await postCommit(env.server, PROJECT, PLAIN_KEY, b.id)).status).toBe(422);
+    expect(env.bucket.blobKeys(PROJECT)).toEqual([]);
   });
 
   it('the checks run with bounded concurrency', async () => {

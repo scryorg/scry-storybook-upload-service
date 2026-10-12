@@ -800,6 +800,19 @@ function metadataZipTooLargeForOldRoute(c: Context<AppEnv>) {
   );
 }
 
+/** The provenance fields the request actually carried. */
+const presentProvenance = (commitSha?: string, branch?: string) => ({
+  ...(commitSha ? { commitSha } : {}),
+  ...(branch ? { branch } : {}),
+});
+
+/**
+ * A delta build (Scry Sync, or a Storybook build the deployer attached a picture manifest to) gets its pictures through
+ * /delta/* and is queued by the delta commit. The ZIP routes must not attach a metadata ZIP to it or queue it, whatever order
+ * the two paths arrive in (PR #72 review, F56).
+ */
+const DELTA_BUILD_TAKES_NO_ZIP = 'This build takes its pictures through the delta routes; it does not take a metadata ZIP';
+
 const metadataUploadRoute = createRoute({
   method: 'post',
   path: '/upload/:project/:version/metadata',
@@ -829,6 +842,14 @@ const metadataUploadRoute = createRoute({
       content: {
         'application/json': {
           schema: AuthErrorResponseSchema,
+        },
+      },
+    },
+    409: {
+      description: 'The build is a delta build: it takes no metadata ZIP',
+      content: {
+        'application/json': {
+          schema: ErrorResponseSchema,
         },
       },
     },
@@ -882,6 +903,8 @@ app.openapi(metadataUploadRoute, async (c) => {
       );
     }
 
+    if (build.delta) return c.json({ error: DELTA_BUILD_TAKES_NO_ZIP }, 409);
+
     const zipKey = metadataZipKeyFor(project, version, build.buildNumber);
     await storage.upload(zipKey, new Blob([body]).stream(), 'application/zip');
     emitBuildStep(c, { step: 'upload_received', outcome: 'ok', buildId: build.id });
@@ -891,10 +914,7 @@ app.openapi(metadataUploadRoute, async (c) => {
     // writes). Best effort: a build that indexes without a SHA reports its
     // freshness as unknown, which is strictly better than not indexing.
     if (commitSha || branch) {
-      await recordBuildProvenance(firestore, project, build, 'metadata', {
-        ...(commitSha ? { commitSha } : {}),
-        ...(branch ? { branch } : {}),
-      }, c);
+      await recordBuildProvenance(firestore, project, build, 'metadata', presentProvenance(commitSha, branch), c);
     }
 
     let queued = false;
@@ -1699,6 +1719,7 @@ const metadataPresignRoute = createRoute({
     400: { description: 'No build for this project and version yet', content: { 'application/json': { schema: ErrorResponseSchema } } },
     401: { description: 'Unauthorized', content: { 'application/json': { schema: AuthErrorResponseSchema } } },
     403: { description: 'API key does not belong to the requested project', content: { 'application/json': { schema: AuthErrorResponseSchema } } },
+    409: { description: 'The build is a delta build: it takes no metadata ZIP', content: { 'application/json': { schema: ErrorResponseSchema } } },
     500: { description: 'Internal server error', content: { 'application/json': { schema: ErrorResponseSchema } } },
   },
 });
@@ -1716,6 +1737,7 @@ app.openapi(metadataPresignRoute, async (c) => {
       return c.json({ error: 'No build found for this project and version. Upload storybook.zip first.' }, 400);
     }
     c.set('buildId', build.id);
+    if (build.delta) return c.json({ error: DELTA_BUILD_TAKES_NO_ZIP }, 409);
     const key = metadataZipKeyFor(project, version, build.buildNumber);
     const data = await storage.getPresignedUploadUrl(key, 'application/zip');
     emitBuildStep(c, { step: 'presign', outcome: 'ok', buildId: build.id });
@@ -1796,6 +1818,8 @@ async function checkMetadataCompleteTarget(
   if (zipKey !== metadataZipKeyFor(project, version, build.buildNumber)) {
     return { error: 'zipKey is not the object issued for this build', status: 400 };
   }
+  // A delta build is never given a metadata ZIP, so this is neither a retry of a success nor a build awaiting one.
+  if (build.delta) return { error: DELTA_BUILD_TAKES_NO_ZIP, status: 409 };
   // A repeat after a success (a retry whose first response was lost) answers the same success and
   // touches nothing. A build already resolved another way (failed) is not awaiting a metadata ZIP.
   if (build.processingStatus && RESOLVED_OK_STATUSES.has(build.processingStatus)) {
