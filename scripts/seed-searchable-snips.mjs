@@ -12,10 +12,17 @@
 //   users/{E}.snipSearchable=false); org `ssnips-uat-org` (A, C); project `ssnips-uat-project` (A, B, C, E).
 //   snips: A private, A -> B, A -> org, A -> project, B private, C private (then expired), one E snip (not indexed), and
 //   one extra A -> B snip marked `disposable: true` (the UAT hides/deletes it in row 6).
+//   story build: one indexed storybook build (2 screens, "Button / Primary" and "Button / Secondary") in the same project, put there
+//   through the real bundle route with a project key (POST /presigned-url/<p>/<v>/bundle.zip?source=storybook:web, PUT, POST
+//   /upload/<p>/<v>/bundle/complete). The bundle is the smallest existing SCF fixture, src/bundle/__fixtures__/valid-basic
+//   (scf.json unchanged; its two 1x1 placeholder PNGs are replaced by the renderer's drawn pictures so the vision embedding has
+//   something to see). It gives UAT a story to fall back on: query "button" must return a story hit (written to the fixture file
+//   as `storyQuery`). Idempotent: a non-failed build of that version means skip. --reset removes it (builds, counters, objects);
+//   its search rows are filtered out once the project is gone (no BPS delete route exists for a build).
 // Shares and the opted-out flag are written before `complete`, so the indexer sees the final audience. The expired
 // snip gets its past `expiresAt` AFTER `complete`, so its row exists until the daily sweep or /captures/sync removes it.
 // Output: scry-management/features/searchable-snips/fixtures/stage-snips.json
-//   {projectId, users:{A..E:{uid,name}}, snips:[{captureId, owner, share, words, expired?, disposable?}]}  (no keys, ever).
+//   {projectId, storyQuery, storyBuild:{version,buildId,buildNumber,query}, users:{A..E:{uid,name}}, snips:[{captureId, owner, share, words, expired?, disposable?}]}  (no keys, ever).
 //   users.E.session is "missing": the existing UAT identity setup (one owner identity, fixtures.ts / global-setup.ts) has no member
 //   that can serve as the opted-out user, and the seed does not mint sign-in sessions, so the spec must treat E as snip owner only.
 //
@@ -47,6 +54,12 @@ const ORG = `${PFX}-org`;
 const KEY_NAME = `${PFX} seed key (delete me)`;
 const FIXTURE = '/home/boxuser/scry/scry-management/features/searchable-snips/fixtures/stage-snips.json';
 const RENDER = path.join(HERE, 'seed-searchable-snips-render.py');
+// The story build (F49): fixed version so a re-run finds it.
+const STORY_VERSION = `${PFX}-stories`;
+const STORY_SOURCE = 'storybook:web';
+const STORY_QUERY = 'button';
+const STORY_FIXTURE = path.join(REPO, 'src', 'bundle', '__fixtures__', 'valid-basic');
+const STORY_WAIT_MS = 10 * 60 * 1000;
 
 const USERS = {
   A: { uid: `${PFX}-a`, name: 'Snips UAT A' },
@@ -98,6 +111,7 @@ function plan() {
     const notes = [s.disposable ? 'disposable (UAT deletes it)' : '', s.expired ? 'expiresAt set to the past after complete' : '', s.owner === 'E' ? 'owner opted out: no index row expected' : ''].filter(Boolean).join('; ');
     log(`  snip ${s.captureId} owner ${s.owner} share ${s.share} words "${s.words}"${notes ? ' (' + notes + ')' : ''}`);
   }
+  log(`  story build ${PROJECT}/${STORY_VERSION} source ${STORY_SOURCE} from ${path.relative(REPO, STORY_FIXTURE)} (skipped when a non-failed build of that version exists); search "${STORY_QUERY}" should find it`);
   log(`writes: ${FIXTURE}`);
 }
 
@@ -135,10 +149,11 @@ async function call(pathname, key, body) {
   return { status: res.status, json, rid: res.headers.get('x-scry-request-id') };
 }
 
-async function mintKey(uid) {
+async function mintKey(uid, kind = 'device') {
   const raw = `scry_proj_${PROJECT}_${randomBytes(32).toString('base64url')}`;
-  const id = `${PFX}-key-${uid.slice(-1)}`;
-  await db.doc(`projects/${PROJECT}/apiKeys/${id}`).set({ hash: sha256(raw), status: 'active', kind: 'device', name: KEY_NAME, prefix: raw.slice(0, 12), createdAt: new Date(), createdBy: uid });
+  const id = kind === 'device' ? `${PFX}-key-${uid.slice(-1)}` : `${PFX}-key-${kind}`;
+  // a project key has no `kind` (unrestricted); a device key is the restricted class Scry Sync gets
+  await db.doc(`projects/${PROJECT}/apiKeys/${id}`).set({ hash: sha256(raw), status: 'active', ...(kind === 'device' ? { kind } : {}), name: KEY_NAME, prefix: raw.slice(0, 12), createdAt: new Date(), createdBy: uid });
   return raw;
 }
 
@@ -190,6 +205,62 @@ async function seedOne(s, key, tmp) {
   log(`  ${s.captureId} owner ${s.owner} share ${s.share} ready (complete rid=${c.rid})`);
 }
 
+/** Zip the fixture dir with `archiver` (the package scry-node and sbcov build SCF bundles with); images are the renderer's drawn pictures. */
+async function storyBundle(tmp) {
+  const manifest = JSON.parse(fs.readFileSync(path.join(STORY_FIXTURE, 'scf.json'), 'utf8'));
+  const archiver = require('archiver');
+  const archive = archiver('zip', { zlib: { level: 9 } });
+  const chunks = [];
+  archive.on('data', (c) => chunks.push(c));
+  const closed = new Promise((resolve, reject) => { archive.on('end', resolve); archive.on('error', reject); });
+  archive.append(JSON.stringify(manifest), { name: 'scf.json' });
+  for (const cap of manifest.captures) {
+    const words = `${cap.title.join(' ')} ${cap.name}`;
+    const dir = path.join(tmp, `story-${path.basename(cap.image, '.png')}`);
+    render({ words, owner: 'story' }, dir);
+    archive.append(fs.readFileSync(path.join(dir, 'original.png')), { name: cap.image });
+  }
+  await archive.finalize();
+  await closed;
+  return Buffer.concat(chunks);
+}
+
+async function jsonCall(method, pathname, key, body) {
+  const res = await fetch(UPLOAD + pathname, { method, headers: { 'content-type': 'application/json', 'X-API-Key': key }, body: body ? JSON.stringify(body) : undefined });
+  let json = null;
+  try { json = await res.json(); } catch { /* non-JSON body */ }
+  return { status: res.status, json, rid: res.headers.get('x-scry-request-id') };
+}
+
+/** Put one indexed story build into the seed project through the real bundle route. Returns what the fixture file records. */
+async function seedStoryBuild(tmp) {
+  const builds = await db.collection(`projects/${PROJECT}/builds`).where('versionId', '==', STORY_VERSION).get();
+  const live = builds.docs.find((d) => d.data().processingStatus !== 'failed');
+  if (live) {
+    log(`  story build ${STORY_VERSION} already there (build ${live.data().buildNumber}, ${live.data().processingStatus ?? 'no status'}); not uploading again`);
+    return { version: STORY_VERSION, buildId: live.id, buildNumber: live.data().buildNumber ?? null, query: STORY_QUERY };
+  }
+  const key = await mintKey(USERS.A.uid, 'story');
+  const zip = await storyBundle(tmp);
+  const p = await jsonCall('POST', `/presigned-url/${PROJECT}/${STORY_VERSION}/bundle.zip?source=${encodeURIComponent(STORY_SOURCE)}`, key, { contentType: 'application/zip' });
+  if (p.status !== 200) throw new Error(`story presign: ${p.status} ${p.json?.error ?? ''} rid=${p.rid}`);
+  const { url, fields, buildId, buildNumber } = p.json;
+  const put = await fetch(url, { method: 'PUT', headers: { 'content-type': 'application/zip' }, body: zip });
+  if (put.status !== 200) throw new Error(`story PUT: ${put.status}`);
+  const c = await jsonCall('POST', `/upload/${PROJECT}/${STORY_VERSION}/bundle/complete`, key, { buildId, zipKey: fields.key });
+  if (c.status !== 200) throw new Error(`story complete: ${c.status} ${c.json?.error ?? ''} ${JSON.stringify(c.json?.errors ?? '').slice(0, 300)} rid=${c.rid}`);
+  log(`  story build ${buildId} (#${buildNumber}) queued (complete rid=${c.rid}); waiting for build processing`);
+  const t0 = Date.now();
+  for (;;) {
+    const st = (await db.doc(`projects/${PROJECT}/builds/${buildId}`).get()).data()?.processingStatus;
+    if (st === 'completed' || st === 'partial') { log(`  story build processed: ${st} after ${Math.round((Date.now() - t0) / 1000)} s`); break; }
+    if (st === 'failed') throw new Error(`story build ${buildId} processing failed`);
+    if (Date.now() - t0 > STORY_WAIT_MS) throw new Error(`story build ${buildId} still ${st ?? 'unstarted'} after ${STORY_WAIT_MS / 60000} min`);
+    await new Promise((r) => setTimeout(r, 10_000));
+  }
+  return { version: STORY_VERSION, buildId, buildNumber, query: STORY_QUERY };
+}
+
 async function wipePrefix(prefix) {
   const { client, ListObjectsV2Command, DeleteObjectsCommand } = r2();
   let n = 0;
@@ -219,9 +290,12 @@ async function reset() {
   }
   const syncNote = synced === 0 ? ' (SNIP_BPS_SERVICE_TOKEN not set or sync unavailable: index rows leave with the next daily sweep)' : '';
   log(`capture docs deleted: ${SNIPS.length}; BPS /captures/sync ok: ${synced}/${SNIPS.length}${syncNote}`);
-  const objects = await wipePrefix(PROJECT + '/captures/');
+  const objects = (await wipePrefix(PROJECT + '/captures/')) + (await wipePrefix(`${PROJECT}/${STORY_VERSION}/`));
+  const builds = await db.collection(`projects/${PROJECT}/builds`).get();
+  await Promise.all(builds.docs.map((d) => db.recursiveDelete(d.ref)));
+  log(`story builds deleted: ${builds.size} (their search rows go inert with the project; BPS has no build-delete route)`);
   log(`R2 objects deleted: ${objects}`);
-  for (const col of ['captureLimits', 'apiKeys', 'members']) {
+  for (const col of ['captureLimits', 'apiKeys', 'members', 'counters']) {
     const snap = await db.collection(`projects/${PROJECT}/${col}`).get();
     await Promise.all(snap.docs.map((d) => d.ref.delete()));
   }
@@ -245,8 +319,11 @@ async function seed() {
     for (const k of new Set(SNIPS.map((s) => s.owner))) keys[k] = await mintKey(USERS[k].uid);
     log(`world ready: ${Object.keys(USERS).length} users, org, project, ${Object.keys(keys).length} device keys (not printed, not saved)`);
     for (const s of SNIPS) await seedOne(s, keys[s.owner], tmp);
+    const storyBuild = await seedStoryBuild(tmp);
     const out = {
       projectId: PROJECT,
+      storyQuery: storyBuild.query,
+      storyBuild,
       users: { ...USERS, E: { ...USERS.E, session: 'missing' } },
       snips: SNIPS.map(({ captureId, owner, share, words, expired, disposable }) => ({ captureId, owner, share, words, ...(expired ? { expired: true } : {}), ...(disposable ? { disposable: true } : {}) })),
     };
