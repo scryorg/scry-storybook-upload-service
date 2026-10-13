@@ -22,7 +22,7 @@ import { createHash } from 'node:crypto';
 import { log, reqFields, reportError } from '../lib/log.js';
 import { DEVICE_KEY_KIND, VERIFIED_PROJECT } from '../middleware/auth.js';
 import type { AppEnv } from '../app.js';
-import type { Capture } from '../services/firestore/firestore.types.js';
+import type { Capture, CaptureMarkup } from '../services/firestore/firestore.types.js';
 import { HEADER_BYTES, pngDimensions, sniffImage, type ImageKind } from './image-check.js';
 import { currentTraceContext } from '../trace-context.js';
 import { checkCompleteRate, checkPresignRate } from './rate-limit.js';
@@ -38,7 +38,13 @@ export const MAX_NOTE_CHARS = 2000;
 export const CAPTURE_TTL_DAYS = 30;
 /** Presigned PUT URLs live 15 minutes: long enough for three uploads, short enough that a ready capture's objects cannot be replaced for long. */
 export const CAPTURE_URL_EXPIRES_SECONDS = 900;
-const MAX_BODY_CHARS = 8192;
+/** 30 notes x 300 chars + a 2,000-char note + the largest marks fit with room to spare (snip-markup contract: `largest`). */
+const MAX_BODY_CHARS = 24_576;
+export const MAX_MARKUP_NOTES = 30;
+export const MAX_MARKUP_TEXT_CHARS = 300;
+export const MAX_MARKUP_MARKS_EACH = 500;
+// C0 controls, DEL and C1 controls: a note is one line of plain text.
+const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/;
 
 const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SHA256_HEX = /^[0-9a-f]{64}$/;
@@ -56,6 +62,26 @@ const RENDITIONS: ReadonlyArray<Rendition> = [
 
 const keyFor = (project: string, captureId: string, r: Rendition): string => `${project}/captures/${captureId}/${r.name}`;
 
+const MarkupInt = z.number().int();
+const MarkupNote = z.object({
+  n: MarkupInt.min(1).max(MAX_MARKUP_NOTES),
+  x: MarkupInt.min(0),
+  y: MarkupInt.min(0),
+  w: MarkupInt.min(1).optional(),
+  h: MarkupInt.min(1).optional(),
+  // Trimmed first, then checked. Empty is allowed (a marker with no words). Unknown keys (editor-only bx/by, colour) are dropped.
+  text: z
+    .string()
+    .transform((t) => t.trim())
+    .pipe(z.string().max(MAX_MARKUP_TEXT_CHARS).refine((t) => !CONTROL_CHARS.test(t))),
+});
+const MarkupCount = MarkupInt.min(0).max(MAX_MARKUP_MARKS_EACH).default(0);
+const Markup = z.object({
+  v: z.literal(1),
+  notes: z.array(MarkupNote).max(MAX_MARKUP_NOTES),
+  marks: z.object({ arrows: MarkupCount, boxes: MarkupCount, pens: MarkupCount }).default({ arrows: 0, boxes: 0, pens: 0 }),
+});
+
 const PresignBody = z.object({
   captureId: z.string().regex(UUID_V7),
   width: z.number().int().min(1).max(MAX_DIMENSION),
@@ -70,6 +96,20 @@ const PresignBody = z.object({
   mode: z.enum(['region', 'window', 'screen']),
   sendMode: z.enum(['review', 'auto']),
   note: z.string().max(MAX_NOTE_CHARS).optional(),
+  markup: Markup.optional(),
+}).superRefine((body, ctx) => {
+  // Numbers run 1..k in order; positions lie inside the picture the body declares (the pixels of original.png).
+  // Issues carry paths only, never values: the 400 names the field and nothing the client wrote.
+  body.markup?.notes.forEach((note, i) => {
+    const bad = (key: string) => ctx.addIssue({ code: 'custom', path: ['markup', 'notes', i, key], message: 'out of range' });
+    const { w, h } = note;
+    const halfArea = (w === undefined) !== (h === undefined);
+    const outside = w !== undefined && h !== undefined && (note.x + w > body.width || note.y + h > body.height);
+    if (note.n !== i + 1) bad('n');
+    if (note.x > body.width) bad('x');
+    if (note.y > body.height) bad('y');
+    if (halfArea || outside) bad('w');
+  });
 });
 const CompleteBody = z.object({ captureId: z.string().regex(UUID_V7) });
 
@@ -94,7 +134,9 @@ export const presignCaptureRoute = createRoute({
   description:
     'Device key only. JSON body: captureId (UUIDv7, lowercase), width, height, bytes (<= 20 MB), sha256 (hex of the original), ' +
     'previewBytes (<= 2 MB) and agentBytes (<= 512 KB) as the exact sizes of the other two files, ' +
-    'scale, os (mac|win), mode (region|window|screen), sendMode (review|auto), optional note (<= 2000 chars). Idempotent on captureId. ' +
+    'scale, os (mac|win), mode (region|window|screen), sendMode (review|auto), optional note (<= 2000 chars), ' +
+    'optional markup ({ v: 1, notes: [{ n, x, y, w?, h?, text }] (<= 30, text <= 300 chars), marks: { arrows, boxes, pens } (0..500 each) }; ' +
+    'accepted and stored only while SNIP_MARKUP is on, otherwise ignored). Idempotent on captureId. ' +
     'The three URLs sign Content-Type (image/png, image/jpeg, image/webp) and Content-Length, so the PUTs must send exactly those, and they expire after 15 minutes. ' +
     'Limits: 30 per minute and 2,000 per day per key.',
   request: { params: z.object({ project: z.string() }) },
@@ -181,6 +223,21 @@ async function readJson(c: Ctx): Promise<unknown | undefined> {
   }
 }
 
+/** Switch off: the `markup` key is removed from the parsed body unread (no 400, no store). */
+function withoutMarkupUnlessOn(raw: unknown, on: boolean): unknown {
+  if (on || typeof raw !== 'object' || raw === null || !('markup' in raw)) return raw;
+  const rest: Record<string, unknown> = { ...(raw as Record<string, unknown>) };
+  delete rest.markup;
+  return rest;
+}
+
+/** A markup with no notes and nothing drawn is stored as absent. */
+function storableMarkup(markup: PresignBodyData['markup']): CaptureMarkup | undefined {
+  if (!markup) return undefined;
+  const { arrows, boxes, pens } = markup.marks;
+  return markup.notes.length === 0 && arrows + boxes + pens === 0 ? undefined : markup;
+}
+
 /** Field names only: never the received values. */
 function badFields(error: z.ZodError): string[] {
   const names = new Set<string>();
@@ -236,7 +293,8 @@ export function registerCaptures(app: OpenAPIHono<AppEnv>): void {
         return refuse(c, 429, 'rate_limited', 'Too many captures from this key; retry after the time in Retry-After');
       }
 
-      const parsed = PresignBody.safeParse(await readJson(c));
+      // snip-markup: with the switch off the field is dropped before validation, so an old or new client never fails on it.
+      const parsed = PresignBody.safeParse(withoutMarkupUnlessOn(await readJson(c), c.get('snipMarkup') === true));
       if (!parsed.success) {
         log.warn('capture refused', reqFields(c, { err_code: 'capture_invalid_request', status: 400 }));
         return c.json({ error: 'invalid_request', message: 'The request body is not valid', fields: badFields(parsed.error) }, 400);
@@ -246,6 +304,7 @@ export function registerCaptures(app: OpenAPIHono<AppEnv>): void {
         return refuse(c, 413, 'too_large', 'An image is larger than its limit (original 20 MB, preview 2 MB, agent 512 KB)', body.captureId);
       }
 
+      const markup = storableMarkup(body.markup);
       const expiresAt = new Date(Date.now() + CAPTURE_TTL_DAYS * 86_400_000);
       const { capture, created } = await firestore.createCaptureIfAbsent(key.project, {
         captureId: body.captureId,
@@ -262,6 +321,7 @@ export function registerCaptures(app: OpenAPIHono<AppEnv>): void {
         mode: body.mode,
         sendMode: body.sendMode,
         ...(body.note ? { note: body.note } : {}),
+        ...(markup ? { markup } : {}),
         expiresAt,
       });
 

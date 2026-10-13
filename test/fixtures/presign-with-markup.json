@@ -1,0 +1,83 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/captures/{project}/presign",
+    "body": {
+      "captureId": "0192f3a4-7b5c-7d2e-8f10-3a4b5c6d7e8f",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 600,
+      "previewBytes": 300,
+      "agentBytes": 200,
+      "sha256": "890a57e6d55d0f38614188c761c355c3bf38f61adcf7c72f8445a4fbb0c410ec",
+      "scale": 2,
+      "os": "mac",
+      "mode": "region",
+      "sendMode": "review",
+      "markup": {
+        "v": 1,
+        "notes": [
+          {
+            "n": 1,
+            "x": 436,
+            "y": 96,
+            "w": 260,
+            "h": 64,
+            "text": "header is too tall, should be 48 px"
+          },
+          {
+            "n": 2,
+            "x": 912,
+            "y": 540,
+            "text": "this button should be ink, not teal"
+          },
+          {
+            "n": 3,
+            "x": 120,
+            "y": 700,
+            "text": "missing empty state"
+          }
+        ],
+        "marks": {
+          "arrows": 1,
+          "boxes": 0,
+          "pens": 0
+        }
+      },
+      "note": "Card spacing pass for the settings page"
+    }
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "capture": {
+        "captureId": "0192f3a4-7b5c-7d2e-8f10-3a4b5c6d7e8f",
+        "status": "pending",
+        "width": 1600,
+        "height": 1000,
+        "bytes": 600,
+        "sha256": "890a57e6d55d0f38614188c761c355c3bf38f61adcf7c72f8445a4fbb0c410ec",
+        "expiresAt": "2026-11-12T10:00:00.000Z"
+      },
+      "created": true,
+      "uploads": {
+        "original": {
+          "url": "<presigned PUT url for the key; 15 minutes>",
+          "key": "projAAAAAAAAAAAAAAAA/captures/0192f3a4-7b5c-7d2e-8f10-3a4b5c6d7e8f/original.png",
+          "contentType": "image/png"
+        },
+        "preview": {
+          "url": "<presigned PUT url for the key; 15 minutes>",
+          "key": "projAAAAAAAAAAAAAAAA/captures/0192f3a4-7b5c-7d2e-8f10-3a4b5c6d7e8f/preview.jpg",
+          "contentType": "image/jpeg"
+        },
+        "agent": {
+          "url": "<presigned PUT url for the key; 15 minutes>",
+          "key": "projAAAAAAAAAAAAAAAA/captures/0192f3a4-7b5c-7d2e-8f10-3a4b5c6d7e8f/agent.webp",
+          "contentType": "image/webp"
+        }
+      }
+    }
+  },
+  "largestRequestChars": 12806
+}

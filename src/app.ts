@@ -57,6 +57,8 @@ export type AppEnv = {
     syncDelta?: boolean;
     /** SNIP_INDEXING: "on" lets /captures/:p/complete enqueue a capture-index message (searchable-snips). Absent or off sends nothing. */
     snipIndexing?: boolean;
+    /** SNIP_MARKUP: "on" lets /captures/:p/presign validate and store the optional `markup` field (snip-markup). Absent or off drops the field unread. */
+    snipMarkup?: boolean;
     /** Set by a route that refused with an expected, non-failing 5xx (the flag-off 503): the request line logs at info, not error. */
     expectedRefusal?: boolean;
   } & AuthVariables;

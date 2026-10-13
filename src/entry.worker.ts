@@ -72,6 +72,10 @@ type Bindings = StampBindings & {
   // searchable-snips: "on" lets a completed snip enqueue a capture-index message. A wrangler.toml var per
   // environment so a CI deploy keeps it; staging "on", production "off", absent means off.
   SNIP_INDEXING?: string;
+
+  // snip-markup: "on" lets presign validate and store the optional `markup` field; anything else drops it unread.
+  // A wrangler.toml var per environment so a CI deploy keeps it; staging "on", production "off", absent means off.
+  SNIP_MARKUP?: string;
 };
 
 // Create a new Hono instance specifically for the Worker, extending the shared AppEnv.
@@ -178,6 +182,7 @@ workerApp.use('*', async (c, next) => {
   }
   c.set('syncDelta', c.env.SYNC_DELTA === '1');
   c.set('snipIndexing', c.env.SNIP_INDEXING === 'on');
+  c.set('snipMarkup', c.env.SNIP_MARKUP === 'on');
 
   await next();
 });
