@@ -76,7 +76,7 @@ SYNC_DELTA = "1"
 # searchable-snips: dark in production until the feature is released (Release: dark SNIP_INDEXING).
 SNIP_INDEXING = "on"
 # snip-markup: dark in production until the feature is released (Release: dark SNIP_MARKUP).
-SNIP_MARKUP = "off"
+SNIP_MARKUP = "on"
 
 # Orphan-bundle sweep (ledger F80): a bundle build's presigned-url call creates its Firestore
 # document immediately, before any bytes move; if the client's later `/bundle/complete` call never
