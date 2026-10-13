@@ -20,6 +20,8 @@ import type {
   DeltaKey,
   Capture,
   CreateCaptureData,
+  CaptureMarkup,
+  CaptureMarkupNote,
   CaptureOs,
   CaptureMode,
   CaptureSendMode,
@@ -87,6 +89,52 @@ interface FirestoreValue {
 
 /** A Firestore REST document's `fields` map — also the shape every write body sends. */
 type FirestoreFields = Record<string, FirestoreValue>;
+
+const intValue = (n: number): FirestoreValue => ({ integerValue: String(n) });
+
+/** snip-markup: the capture `markup` as a Firestore map of arrays of maps; integers are stored as integerValue. */
+function markupToValue(m: CaptureMarkup): FirestoreValue {
+  const note = (n: CaptureMarkupNote): FirestoreValue => ({
+    mapValue: {
+      fields: {
+        n: intValue(n.n),
+        x: intValue(n.x),
+        y: intValue(n.y),
+        ...(n.w !== undefined && n.h !== undefined ? { w: intValue(n.w), h: intValue(n.h) } : {}),
+        text: { stringValue: n.text },
+      },
+    },
+  });
+  return {
+    mapValue: {
+      fields: {
+        v: intValue(m.v),
+        notes: { arrayValue: { values: m.notes.map(note) } },
+        marks: { mapValue: { fields: { arrows: intValue(m.marks.arrows), boxes: intValue(m.marks.boxes), pens: intValue(m.marks.pens) } } },
+      },
+    },
+  };
+}
+
+/** The reverse of markupToValue; anything malformed reads as no markup rather than failing the capture read. */
+function markupFromValue(value: FirestoreValue | undefined): CaptureMarkup | undefined {
+  const fields = value?.mapValue?.fields;
+  if (!fields || fields.v?.integerValue !== '1') return undefined;
+  const int = (v: FirestoreValue | undefined): number => (v?.integerValue !== undefined ? parseInt(v.integerValue, 10) : 0);
+  const notes: CaptureMarkupNote[] = (fields.notes?.arrayValue?.values ?? []).flatMap((entry) => {
+    const f = entry.mapValue?.fields;
+    if (!f) return [];
+    return [{
+      n: int(f.n),
+      x: int(f.x),
+      y: int(f.y),
+      ...(f.w !== undefined && f.h !== undefined ? { w: int(f.w), h: int(f.h) } : {}),
+      text: f.text?.stringValue ?? '',
+    }];
+  });
+  const marks = fields.marks?.mapValue?.fields;
+  return { v: 1, notes, marks: { arrows: int(marks?.arrows), boxes: int(marks?.boxes), pens: int(marks?.pens) } };
+}
 
 /** A Firestore REST document, as returned by get/runQuery. */
 interface FirestoreDocument {
@@ -1037,6 +1085,7 @@ export class FirestoreServiceWorker implements FirestoreService {
       mode: data.mode,
       sendMode: data.sendMode,
       ...(data.note ? { note: data.note } : {}),
+      ...(data.markup ? { markup: data.markup } : {}),
       sharedWith: [],
       sharedWithOrgIds: [],
       sharedWithProject: false,
@@ -1272,6 +1321,7 @@ export class FirestoreServiceWorker implements FirestoreService {
       mode: { stringValue: c.mode },
       sendMode: { stringValue: c.sendMode },
       ...(c.note ? { note: { stringValue: c.note } } : {}),
+      ...(c.markup ? { markup: markupToValue(c.markup) } : {}),
       sharedWith: strings(c.sharedWith),
       sharedWithOrgIds: strings(c.sharedWithOrgIds),
       sharedWithProject: { booleanValue: c.sharedWithProject },
@@ -1286,6 +1336,7 @@ export class FirestoreServiceWorker implements FirestoreService {
       (v?.arrayValue?.values ?? []).flatMap((x) => (x.stringValue !== undefined ? [x.stringValue] : []));
     const num = (v: FirestoreValue | undefined): number =>
       v?.integerValue !== undefined ? parseInt(v.integerValue, 10) : (v?.doubleValue ?? 0);
+    const parsedMarkup = markupFromValue(fields.markup);
     return {
       captureId: id,
       capturedByUid: fields.capturedByUid?.stringValue || '',
@@ -1302,6 +1353,7 @@ export class FirestoreServiceWorker implements FirestoreService {
       mode: (fields.mode?.stringValue || 'region') as CaptureMode,
       sendMode: (fields.sendMode?.stringValue || 'review') as CaptureSendMode,
       ...(fields.note?.stringValue ? { note: fields.note.stringValue } : {}),
+      ...(parsedMarkup ? { markup: parsedMarkup } : {}),
       sharedWith: strings(fields.sharedWith),
       sharedWithOrgIds: strings(fields.sharedWithOrgIds),
       sharedWithProject: fields.sharedWithProject?.booleanValue === true,

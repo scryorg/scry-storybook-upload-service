@@ -485,6 +485,23 @@ export type CaptureSendMode = 'review' | 'auto';
  * story, no Milvus entry. `appName` is never written by this service (the person's opt-in is a
  * later slice); `note` is stored and never logged (G6).
  */
+/** One numbered note on a marked-up snip (feature snip-markup). x/y/w/h are integers in pixels of the uploaded original. */
+export interface CaptureMarkupNote {
+  n: number;
+  x: number;
+  y: number;
+  w?: number;
+  h?: number;
+  text: string;
+}
+
+/** Markup sent with a snip (feature snip-markup): numbered notes plus counts of what was drawn. Never logged. */
+export interface CaptureMarkup {
+  v: 1;
+  notes: CaptureMarkupNote[];
+  marks: { arrows: number; boxes: number; pens: number };
+}
+
 export interface Capture {
   captureId: string;
   /** Owner of the device key that presigned it. Powers "my latest" and the owner-only rules. */
@@ -504,6 +521,8 @@ export interface Capture {
   mode: CaptureMode;
   sendMode: CaptureSendMode;
   note?: string;
+  /** snip-markup: absent for an unmarked snip (and while SNIP_MARKUP is off). Note text inside is never logged. */
+  markup?: CaptureMarkup;
   sharedWith: string[];
   sharedWithOrgIds: string[];
   sharedWithProject: boolean;
@@ -519,4 +538,4 @@ export interface Capture {
 export type CreateCaptureData = Pick<
   Capture,
   'captureId' | 'capturedByUid' | 'deviceId' | 'width' | 'height' | 'bytes' | 'sha256' | 'scale' | 'os' | 'mode' | 'sendMode'
-> & { previewBytes: number; agentBytes: number; note?: string; expiresAt: Date };
+> & { previewBytes: number; agentBytes: number; note?: string; markup?: CaptureMarkup; expiresAt: Date };

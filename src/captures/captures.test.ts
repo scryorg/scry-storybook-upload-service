@@ -809,3 +809,74 @@ describe('guarantee-6-no-sensitive-values-in-logs', () => {
     expect(line.request_id).toMatch(/^[0-9A-HJKMNP-TV-Z]{26}$/);
   });
 });
+
+describe('guarantee-4-markup-text-never-logged', () => {
+  const CANARY = 'MARKUPCANARY';
+  const hdrs = { host: 'canaryhost.example', 'x-scry-request-id': '01J9ZZZZZZZZZZZZZZZZZZZZZZ' };
+  const send = (path: string, key: string | undefined, body: unknown, server: ReturnType<typeof setup>['server']) => post(server, path, key, body, hdrs);
+  const validMarkup = {
+    v: 1,
+    notes: [
+      { n: 1, x: 10, y: 20, w: 30, h: 40, text: `${CANARY} header is too tall` },
+      { n: 2, x: 50, y: 60, text: `${CANARY}2 this button` },
+    ],
+    marks: { arrows: 1, boxes: 0, pens: 0 },
+  };
+  // invalid on purpose: the number skips, and the second text carries a control character
+  const invalidMarkup = { v: 1, notes: [{ n: 1, x: 10, y: 20, text: `${CANARY}3 one` }, { n: 3, x: 5, y: 5, text: `${CANARY}4\nline` }], marks: { arrows: 0, boxes: 0, pens: 0 } };
+
+  function expectNoCanary(...bodies: string[]) {
+    const all = lines.join('\n') + JSON.stringify(sentry.map((s) => s.opts)) + JSON.stringify(sentry.map((s) => String(s.err)));
+    expect(all).not.toContain(CANARY);
+    for (const b of bodies) expect(b).not.toContain(CANARY);
+    for (const l of jsonLines().filter((x) => x.v === 1)) {
+      for (const k of Object.keys(l)) expect(ALLOWED_KEYS, `key ${k}`).toContain(k);
+    }
+  }
+
+  it.each([['on', true], ['off', false], ['unset', undefined]])('switch %s: valid and invalid markup, then complete, leave no note text in any log line or Sentry payload', async (_label, flag) => {
+    const env = setup(flag === undefined ? {} : { snipMarkup: flag });
+    const bodies: string[] = [];
+    // invalid first (400 with the switch on, 200 otherwise), then the same capture id with valid markup
+    const bad = await send(presignPath, DEVICE_KEY, presignBody(PNG, { markup: invalidMarkup, note: `${CANARY}NOTE` }), env.server);
+    bodies.push(await bad.text());
+    expect(bad.status).toBe(flag === true ? 400 : 200);
+    const good = await send(presignPath, DEVICE_KEY, presignBody(PNG, { markup: validMarkup, note: `${CANARY}NOTE` }), env.server);
+    bodies.push(await good.clone().text());
+    expect(good.status).toBe(200);
+    await putAll(env, (await good.json()) as any); // eslint-disable-line @typescript-eslint/no-explicit-any
+    const done = await send(completePath, DEVICE_KEY, { captureId: CAPTURE_ID }, env.server);
+    bodies.push(await done.text());
+    expect(done.status).toBe(200);
+    expectNoCanary(...bodies);
+    if (flag === true) expect(lines.join('\n')).toContain('capture_invalid_request');
+  });
+
+  it('refusals that carry markup (unauthenticated, revoked, wrong project, oversize, conflict, rate limit) log no note text', async () => {
+    const env = setup({ snipMarkup: true });
+    const bodies: string[] = [];
+    const keep = async (res: Response) => { bodies.push(await res.text()); };
+    await keep(await send(`/captures/CANARYPROJ/presign`, `scry_proj_CANARYPROJ_x`, presignBody(PNG, { markup: validMarkup }), env.server));
+    await keep(await send(presignPath, undefined, presignBody(PNG, { markup: validMarkup }), env.server));
+    await keep(await send(presignPath, REVOKED_KEY, presignBody(PNG, { markup: validMarkup }), env.server));
+    await keep(await send(presignPath, OTHER_PROJECT_KEY, presignBody(PNG, { markup: validMarkup }), env.server));
+    await keep(await send(presignPath, DEVICE_KEY, presignBody(PNG, { bytes: 30_000_000, markup: validMarkup }), env.server)); // 413
+    await keep(await send(presignPath, DEVICE_KEY, '{"markup":"' + CANARY + 'x'.repeat(30_000) + '"}', env.server)); // over the body cap
+    await keep(await send(presignPath, DEVICE_KEY, presignBody(PNG, { markup: validMarkup }), env.server));
+    await keep(await send(presignPath, DEVICE_KEY, presignBody(PNG, { bytes: 601, markup: validMarkup }), env.server)); // 409
+    await keep(await send(presignPath, DEVICE_KEY, presignBody(PNG, { markup: { v: 1, notes: [{ n: 1, x: 99999, y: 1, text: `${CANARY}5` }], marks: {} } }, 40, 40), env.server));
+    env.firestore.counters.set(`${PROJECT}/deviceKey1_m_${Math.floor(NOW.getTime() / 60_000)}`, 99);
+    await keep(await send(presignPath, DEVICE_KEY, presignBody(PNG, { markup: validMarkup }), env.server)); // 429
+    const statuses = jsonLines().map((l) => l.status).filter(Boolean);
+    expect(statuses).toEqual(expect.arrayContaining([400, 401, 403, 409, 413, 429]));
+    expectNoCanary(...bodies);
+  });
+
+  it('a failing store logs a fixed message and a code, not the markup', async () => {
+    const env = setup({ snipMarkup: true });
+    env.firestore.createCaptureIfAbsent = async () => { throw new Error('store unavailable'); };
+    const res = await send(presignPath, DEVICE_KEY, presignBody(PNG, { markup: validMarkup }), env.server);
+    expect(res.status).toBe(500);
+    expectNoCanary(await res.text());
+  });
+});

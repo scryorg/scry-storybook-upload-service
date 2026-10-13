@@ -143,6 +143,45 @@ describe('FirestoreServiceWorker captures', () => {
     expect(fields.agentBytes).toEqual({ integerValue: '200' });
   });
 
+  it('snip-markup: markup is written as a map of arrays of maps with integerValue and reads back unchanged (serialise -> parse)', async () => {
+    const markup = {
+      v: 1 as const,
+      notes: [
+        { n: 1, x: 436, y: 96, w: 260, h: 64, text: 'header is too tall, should be 48 px' },
+        { n: 2, x: 912, y: 540, text: '' },
+      ],
+      marks: { arrows: 1, boxes: 0, pens: 2 },
+    };
+    const calls: Array<{ init?: RequestInit }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => { calls.push({ init }); return json(200); }));
+    const { capture } = await createSvc().createCaptureIfAbsent('proj1', { ...data, markup });
+    expect(capture.markup).toEqual(markup);
+    const fields = JSON.parse(String(calls[0].init?.body)).fields;
+    expect(fields.markup.mapValue.fields.v).toEqual({ integerValue: '1' });
+    expect(fields.markup.mapValue.fields.marks.mapValue.fields.pens).toEqual({ integerValue: '2' });
+    const first = fields.markup.mapValue.fields.notes.arrayValue.values[0].mapValue.fields;
+    expect(first.x).toEqual({ integerValue: '436' });
+    expect(first.text).toEqual({ stringValue: 'header is too tall, should be 48 px' });
+    const second = fields.markup.mapValue.fields.notes.arrayValue.values[1].mapValue.fields;
+    expect(Object.keys(second).sort()).toEqual(['n', 'text', 'x', 'y']);
+
+    // parse: the same fields come back as the same markup
+    vi.stubGlobal('fetch', vi.fn(async () => json(200, { name: 'x', fields, updateTime: '2026-10-13T00:00:00Z' })));
+    const read = await createSvc().getCapture('proj1', ID);
+    expect(read?.markup).toEqual(markup);
+  });
+
+  it('snip-markup: a capture without markup writes no markup field and reads back without one', async () => {
+    const calls: Array<{ init?: RequestInit }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => { calls.push({ init }); return json(200); }));
+    const { capture } = await createSvc().createCaptureIfAbsent('proj1', data);
+    expect(capture).not.toHaveProperty('markup');
+    const fields = JSON.parse(String(calls[0].init?.body)).fields;
+    expect(fields).not.toHaveProperty('markup');
+    vi.stubGlobal('fetch', vi.fn(async () => json(200, { name: 'x', fields, updateTime: '2026-10-13T00:00:00Z' })));
+    expect(await createSvc().getCapture('proj1', ID)).not.toHaveProperty('markup');
+  });
+
   it('incrementCaptureCounter sends one atomic increment transform and returns the new count', async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => { calls.push({ url, init }); return json(200, { writeResults: [{ transformResults: [{ integerValue: '17' }] }] }); }));
