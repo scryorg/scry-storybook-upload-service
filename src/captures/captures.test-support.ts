@@ -133,7 +133,7 @@ const KEYS: Record<string, { valid: boolean; apiKey?: Record<string, unknown> }>
   [CI_KEY]: { valid: true, apiKey: { id: 'ciKey1', name: 'CI', prefix: 'scry_proj_', kind: 'ci', createdBy: 'uid-ada' } },
 };
 
-export function setup(opts: { snipIndexing?: boolean; snipMarkup?: boolean } = {}) {
+export function setup(opts: { snipIndexing?: boolean; snipMarkup?: boolean; animatedSnips?: boolean } = {}) {
   const bucket = new FakeR2();
   const storage = new R2S3StorageService(bucket as never, {
     accountId: 'acct123',
@@ -159,6 +159,7 @@ export function setup(opts: { snipIndexing?: boolean; snipMarkup?: boolean } = {
     c.set('processingQueue', queue as never);
     if (opts.snipIndexing !== undefined) c.set('snipIndexing', opts.snipIndexing);
     if (opts.snipMarkup !== undefined) c.set('snipMarkup', opts.snipMarkup);
+    if (opts.animatedSnips !== undefined) c.set('animatedSnips', opts.animatedSnips);
     await next();
   });
   server.route('/', app);

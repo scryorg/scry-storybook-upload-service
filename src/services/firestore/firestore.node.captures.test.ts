@@ -64,3 +64,27 @@ describe('FirestoreServiceNode capture markup', () => {
     expect(await svc.getCapture('p1', ID)).not.toHaveProperty('markup');
   });
 });
+
+describe('FirestoreServiceNode capture animation', () => {
+  it('stores animated and animation on the capture document and reads them back', async () => {
+    store.clear();
+    const animation = { bytes: 22838, sha256: 'b'.repeat(64), durationMs: 3000, width: 1280, height: 800, fps: 12 };
+    const svc = new FirestoreServiceNode();
+    const { capture, created } = await svc.createCaptureIfAbsent('p1', { ...base, animated: true, animation });
+    expect(created).toBe(true);
+    expect(capture).toMatchObject({ animated: true, animation });
+    expect(store.get(`projects/p1/captures/${ID}`)).toMatchObject({ animated: true, animation });
+    expect(await svc.getCapture('p1', ID)).toMatchObject({ animated: true, animation });
+  });
+
+  it('a still capture has neither animated nor animation on the document', async () => {
+    store.clear();
+    const svc = new FirestoreServiceNode();
+    await svc.createCaptureIfAbsent('p1', base);
+    expect(store.get(`projects/p1/captures/${ID}`)).not.toHaveProperty('animated');
+    expect(store.get(`projects/p1/captures/${ID}`)).not.toHaveProperty('animation');
+    const read = await svc.getCapture('p1', ID);
+    expect(read).not.toHaveProperty('animated');
+    expect(read).not.toHaveProperty('animation');
+  });
+});

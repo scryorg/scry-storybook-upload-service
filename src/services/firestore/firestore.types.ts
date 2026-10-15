@@ -502,6 +502,16 @@ export interface CaptureMarkup {
   marks: { arrows: number; boxes: number; pens: number };
 }
 
+/** animated-snips: what the client declared for the clip at presign; `complete` checks the uploaded clip against it. */
+export interface CaptureAnimation {
+  bytes: number;
+  sha256: string;
+  durationMs: number;
+  width: number;
+  height: number;
+  fps: number;
+}
+
 export interface Capture {
   captureId: string;
   /** Owner of the device key that presigned it. Powers "my latest" and the owner-only rules. */
@@ -523,6 +533,9 @@ export interface Capture {
   note?: string;
   /** snip-markup: absent for an unmarked snip (and while SNIP_MARKUP is off). Note text inside is never logged. */
   markup?: CaptureMarkup;
+  /** animated-snips: both keys are absent for a still (and while ANIMATED_SNIPS is off). `animated` is always true when present. */
+  animated?: true;
+  animation?: CaptureAnimation;
   sharedWith: string[];
   sharedWithOrgIds: string[];
   sharedWithProject: boolean;
@@ -538,4 +551,4 @@ export interface Capture {
 export type CreateCaptureData = Pick<
   Capture,
   'captureId' | 'capturedByUid' | 'deviceId' | 'width' | 'height' | 'bytes' | 'sha256' | 'scale' | 'os' | 'mode' | 'sendMode'
-> & { previewBytes: number; agentBytes: number; note?: string; markup?: CaptureMarkup; expiresAt: Date };
+> & { previewBytes: number; agentBytes: number; note?: string; markup?: CaptureMarkup; animated?: true; animation?: CaptureAnimation; expiresAt: Date };

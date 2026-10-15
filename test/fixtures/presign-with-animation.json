@@ -1,0 +1,65 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/captures/{project}/presign",
+    "body": {
+      "captureId": "0199f0a2-7c3e-7000-8000-00000000c11b",
+      "width": 1280,
+      "height": 800,
+      "bytes": 50343,
+      "previewBytes": 36425,
+      "agentBytes": 11284,
+      "sha256": "0d21d426cfeb0c5833a4440a37dc75df977dab9ce50631b7eb67222d936f3c83",
+      "scale": 1,
+      "os": "mac",
+      "mode": "region",
+      "sendMode": "review",
+      "animation": {
+        "bytes": 22838,
+        "sha256": "b5e8d3064be8c9607e24fcc6f6ab4a3a997124ad42a50c9e1bc03c7e89563b46",
+        "durationMs": 3000,
+        "width": 1280,
+        "height": 800,
+        "fps": 12
+      }
+    }
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "capture": {
+        "captureId": "0199f0a2-7c3e-7000-8000-00000000c11b",
+        "status": "pending",
+        "width": 1280,
+        "height": 800,
+        "bytes": 50343,
+        "sha256": "0d21d426cfeb0c5833a4440a37dc75df977dab9ce50631b7eb67222d936f3c83",
+        "expiresAt": "2026-11-14T10:00:00.000Z",
+        "animated": true
+      },
+      "created": true,
+      "uploads": {
+        "original": {
+          "url": "<presigned PUT url for the key; 15 minutes>",
+          "key": "projAAAAAAAAAAAAAAAA/captures/0199f0a2-7c3e-7000-8000-00000000c11b/original.png",
+          "contentType": "image/png"
+        },
+        "preview": {
+          "url": "<presigned PUT url for the key; 15 minutes>",
+          "key": "projAAAAAAAAAAAAAAAA/captures/0199f0a2-7c3e-7000-8000-00000000c11b/preview.jpg",
+          "contentType": "image/jpeg"
+        },
+        "agent": {
+          "url": "<presigned PUT url for the key; 15 minutes>",
+          "key": "projAAAAAAAAAAAAAAAA/captures/0199f0a2-7c3e-7000-8000-00000000c11b/agent.webp",
+          "contentType": "image/webp"
+        },
+        "animation": {
+          "url": "<presigned PUT url for the key; 15 minutes>",
+          "key": "projAAAAAAAAAAAAAAAA/captures/0199f0a2-7c3e-7000-8000-00000000c11b/animation.mp4",
+          "contentType": "video/mp4"
+        }
+      }
+    }
+  }
+}
