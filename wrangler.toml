@@ -48,6 +48,8 @@ SYNC_DELTA = "0"
 SNIP_INDEXING = "off"
 # snip-markup: "on" lets presign accept the optional `markup` field (dropped unread otherwise). Absent or anything else is off.
 SNIP_MARKUP = "off"
+# animated-snips: "on" lets presign accept the optional `animation` field and a fourth clip upload (dropped unread otherwise). Absent or anything else is off.
+ANIMATED_SNIPS = "off"
 
 # IMPORTANT: The following secrets MUST be set via `wrangler secret put`:
 # - R2_ACCOUNT_ID (your Cloudflare account ID)
@@ -77,6 +79,7 @@ SYNC_DELTA = "1"
 SNIP_INDEXING = "on"
 # snip-markup: dark in production until the feature is released (Release: dark SNIP_MARKUP).
 SNIP_MARKUP = "on"
+ANIMATED_SNIPS = "off"
 
 # Orphan-bundle sweep (ledger F80): a bundle build's presigned-url call creates its Firestore
 # document immediately, before any bytes move; if the client's later `/bundle/complete` call never
@@ -114,6 +117,7 @@ SCRY_ENV = "staging"
 SYNC_DELTA = "1"
 SNIP_INDEXING = "on"
 SNIP_MARKUP = "on"
+ANIMATED_SNIPS = "on"
 
 # Orphan-bundle sweep (ledger F80/F91) — see the matching comment under [env.production.triggers].
 [env.staging.triggers]

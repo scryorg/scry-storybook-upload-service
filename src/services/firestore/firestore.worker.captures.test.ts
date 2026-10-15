@@ -182,6 +182,47 @@ describe('FirestoreServiceWorker captures', () => {
     expect(await createSvc().getCapture('proj1', ID)).not.toHaveProperty('markup');
   });
 
+  it('animated-snips: animated and animation are written as a boolean and a map (integerValue, stringValue, doubleValue) and read back unchanged', async () => {
+    const animation = { bytes: 22838, sha256: 'b'.repeat(64), durationMs: 3000, width: 1280, height: 800, fps: 12 };
+    const calls: Array<{ init?: RequestInit }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => { calls.push({ init }); return json(200); }));
+    const { capture } = await createSvc().createCaptureIfAbsent('proj1', { ...data, animated: true, animation });
+    expect(capture).toMatchObject({ animated: true, animation });
+    const fields = JSON.parse(String(calls[0].init?.body)).fields;
+    expect(fields.animated).toEqual({ booleanValue: true });
+    const mapped = fields.animation.mapValue.fields;
+    expect(mapped.bytes).toEqual({ integerValue: '22838' });
+    expect(mapped.durationMs).toEqual({ integerValue: '3000' });
+    expect(mapped.width).toEqual({ integerValue: '1280' });
+    expect(mapped.height).toEqual({ integerValue: '800' });
+    expect(mapped.sha256).toEqual({ stringValue: 'b'.repeat(64) });
+    expect(mapped.fps).toEqual({ doubleValue: 12 });
+    expect(Object.keys(mapped).sort()).toEqual(['bytes', 'durationMs', 'fps', 'height', 'sha256', 'width']);
+
+    // parse: a whole-number double and a fractional one both come back as numbers
+    for (const [stored, fps] of [[{ doubleValue: 12 }, 12], [{ doubleValue: 7.5 }, 7.5], [{ integerValue: '10' }, 10]] as const) {
+      const withFps = { ...fields, animation: { mapValue: { fields: { ...mapped, fps: stored } } } };
+      vi.stubGlobal('fetch', vi.fn(async () => json(200, { name: 'x', fields: withFps, updateTime: '2026-10-15T00:00:00Z' })));
+      const read = await createSvc().getCapture('proj1', ID);
+      expect(read).toMatchObject({ animated: true, animation: { ...animation, fps } });
+    }
+  });
+
+  it('animated-snips: a still capture writes neither animated nor animation and reads back without them', async () => {
+    const calls: Array<{ init?: RequestInit }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => { calls.push({ init }); return json(200); }));
+    const { capture } = await createSvc().createCaptureIfAbsent('proj1', data);
+    expect(capture).not.toHaveProperty('animated');
+    expect(capture).not.toHaveProperty('animation');
+    const fields = JSON.parse(String(calls[0].init?.body)).fields;
+    expect(fields).not.toHaveProperty('animated');
+    expect(fields).not.toHaveProperty('animation');
+    vi.stubGlobal('fetch', vi.fn(async () => json(200, { name: 'x', fields, updateTime: '2026-10-15T00:00:00Z' })));
+    const read = await createSvc().getCapture('proj1', ID);
+    expect(read).not.toHaveProperty('animated');
+    expect(read).not.toHaveProperty('animation');
+  });
+
   it('incrementCaptureCounter sends one atomic increment transform and returns the new count', async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => { calls.push({ url, init }); return json(200, { writeResults: [{ transformResults: [{ integerValue: '17' }] }] }); }));

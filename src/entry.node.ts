@@ -107,6 +107,7 @@ nodeApp.use('*', async (c, next) => {
   c.set('syncDelta', process.env.SYNC_DELTA === '1');
   c.set('snipIndexing', process.env.SNIP_INDEXING === 'on');
   c.set('snipMarkup', process.env.SNIP_MARKUP === 'on');
+  c.set('animatedSnips', process.env.ANIMATED_SNIPS === 'on');
   
   await next();
 });

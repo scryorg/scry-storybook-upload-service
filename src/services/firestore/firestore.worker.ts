@@ -22,6 +22,7 @@ import type {
   CreateCaptureData,
   CaptureMarkup,
   CaptureMarkupNote,
+  CaptureAnimation,
   CaptureOs,
   CaptureMode,
   CaptureSendMode,
@@ -134,6 +135,33 @@ function markupFromValue(value: FirestoreValue | undefined): CaptureMarkup | und
   });
   const marks = fields.marks?.mapValue?.fields;
   return { v: 1, notes, marks: { arrows: int(marks?.arrows), boxes: int(marks?.boxes), pens: int(marks?.pens) } };
+}
+
+/** animated-snips: the declared clip as a map; fps is always a doubleValue (it may be fractional), the rest are integers. */
+function animationToValue(a: CaptureAnimation): FirestoreValue {
+  return {
+    mapValue: {
+      fields: {
+        bytes: intValue(a.bytes),
+        sha256: { stringValue: a.sha256 },
+        durationMs: intValue(a.durationMs),
+        width: intValue(a.width),
+        height: intValue(a.height),
+        fps: { doubleValue: a.fps },
+      },
+    },
+  };
+}
+
+/** The reverse of animationToValue; anything incomplete reads as no animation rather than failing the capture read. */
+function animationFromValue(value: FirestoreValue | undefined): CaptureAnimation | undefined {
+  const f = value?.mapValue?.fields;
+  const sha256 = f?.sha256?.stringValue;
+  if (!f || sha256 === undefined) return undefined;
+  const num = (v: FirestoreValue | undefined): number | undefined => (v?.integerValue !== undefined ? parseInt(v.integerValue, 10) : v?.doubleValue);
+  const [bytes, durationMs, width, height, fps] = [num(f.bytes), num(f.durationMs), num(f.width), num(f.height), num(f.fps)];
+  if (bytes === undefined || durationMs === undefined || width === undefined || height === undefined || fps === undefined) return undefined;
+  return { bytes, sha256, durationMs, width, height, fps };
 }
 
 /** A Firestore REST document, as returned by get/runQuery. */
@@ -1086,6 +1114,7 @@ export class FirestoreServiceWorker implements FirestoreService {
       sendMode: data.sendMode,
       ...(data.note ? { note: data.note } : {}),
       ...(data.markup ? { markup: data.markup } : {}),
+      ...(data.animation ? { animated: true as const, animation: data.animation } : {}),
       sharedWith: [],
       sharedWithOrgIds: [],
       sharedWithProject: false,
@@ -1322,6 +1351,7 @@ export class FirestoreServiceWorker implements FirestoreService {
       sendMode: { stringValue: c.sendMode },
       ...(c.note ? { note: { stringValue: c.note } } : {}),
       ...(c.markup ? { markup: markupToValue(c.markup) } : {}),
+      ...(c.animation ? { animated: { booleanValue: true }, animation: animationToValue(c.animation) } : {}),
       sharedWith: strings(c.sharedWith),
       sharedWithOrgIds: strings(c.sharedWithOrgIds),
       sharedWithProject: { booleanValue: c.sharedWithProject },
@@ -1337,6 +1367,7 @@ export class FirestoreServiceWorker implements FirestoreService {
     const num = (v: FirestoreValue | undefined): number =>
       v?.integerValue !== undefined ? parseInt(v.integerValue, 10) : (v?.doubleValue ?? 0);
     const parsedMarkup = markupFromValue(fields.markup);
+    const parsedAnimation = animationFromValue(fields.animation);
     return {
       captureId: id,
       capturedByUid: fields.capturedByUid?.stringValue || '',
@@ -1354,6 +1385,7 @@ export class FirestoreServiceWorker implements FirestoreService {
       sendMode: (fields.sendMode?.stringValue || 'review') as CaptureSendMode,
       ...(fields.note?.stringValue ? { note: fields.note.stringValue } : {}),
       ...(parsedMarkup ? { markup: parsedMarkup } : {}),
+      ...(parsedAnimation ? { animated: true as const, animation: parsedAnimation } : {}),
       sharedWith: strings(fields.sharedWith),
       sharedWithOrgIds: strings(fields.sharedWithOrgIds),
       sharedWithProject: fields.sharedWithProject?.booleanValue === true,

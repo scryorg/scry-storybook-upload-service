@@ -1,7 +1,7 @@
 /**
  * Scry Snip capture upload routes (feature snip-capture, PR 1).
  *
- *   POST /captures/:project/presign   register a capture and get three presigned R2 PUT URLs
+ *   POST /captures/:project/presign   register a capture and get three presigned R2 PUT URLs (four with a clip)
  *   POST /captures/:project/complete  verify what was PUT, then mark the capture ready
  *
  * Guarantees this file carries:
@@ -13,6 +13,8 @@
  *  - G4 only a device key of the project reaches these routes (`apiKeyAuth` mounted on
  *    `/captures/:project/*` gives 401 for a revoked/unknown key and 403 for another project's key;
  *    the two paths are the only capture entries in `DEVICE_KEY_ROUTES`, everything else stays refused).
+ *  - animated-snips: an optional `animation` (switch ANIMATED_SNIPS) adds a fourth PUT, `animation.mp4`, and clip checks
+ *    in `complete` (mp4-check.ts). With the switch off the field is dropped before validation and a still is untouched.
  *  - G6 only the capture id (validated UUIDv7) is ever logged, and only after the key authenticated.
  *    `note`, dimensions, hashes and every other client string stay out of log lines and error bodies.
  */
@@ -22,8 +24,9 @@ import { createHash } from 'node:crypto';
 import { log, reqFields, reportError } from '../lib/log.js';
 import { DEVICE_KEY_KIND, VERIFIED_PROJECT } from '../middleware/auth.js';
 import type { AppEnv } from '../app.js';
-import type { Capture, CaptureMarkup } from '../services/firestore/firestore.types.js';
+import type { Capture, CaptureAnimation, CaptureMarkup } from '../services/firestore/firestore.types.js';
 import { HEADER_BYTES, pngDimensions, sniffImage, type ImageKind } from './image-check.js';
+import { MAGIC_BYTES, hasMp4Magic, inspectMp4, type Mp4Facts, type Mp4Result, type ReadRange } from './mp4-check.js';
 import { currentTraceContext } from '../trace-context.js';
 import { checkCompleteRate, checkPresignRate } from './rate-limit.js';
 
@@ -33,6 +36,18 @@ export const MAX_ORIGINAL_BYTES = 20 * 1024 * 1024;
 export const MAX_PREVIEW_BYTES = 2 * 1024 * 1024;
 /** Agent rendition (long edge 1280, WebP, ~70 KB budget; the cap is looser until spike F1 fixes the number). */
 export const MAX_AGENT_BYTES = 512 * 1024;
+/** The clip may be at most 15 MB (animated-snips contract `limits`). */
+export const MAX_CLIP_BYTES = 15 * 1024 * 1024;
+export const MAX_CLIP_EDGE = 1280;
+const MIN_CLIP_MS = 500;
+const MAX_CLIP_MS = 10_000;
+const MAX_CLIP_FPS = 12;
+/** Measured against the file: 100 ms of length and half a frame per second of slack, and a hard 12.5 fps ceiling. */
+const CLIP_MS_TOLERANCE = 100;
+const CLIP_FPS_TOLERANCE = 0.5;
+const CLIP_MEASURED_FPS_MAX = 12.5;
+/** The clip's width and height may differ from the original's aspect by at most 2 %. */
+const CLIP_ASPECT_TOLERANCE = 0.02;
 export const MAX_DIMENSION = 16384;
 export const MAX_NOTE_CHARS = 2000;
 export const CAPTURE_TTL_DAYS = 30;
@@ -61,6 +76,15 @@ const RENDITIONS: ReadonlyArray<Rendition> = [
 ];
 
 const keyFor = (project: string, captureId: string, r: Rendition): string => `${project}/captures/${captureId}/${r.name}`;
+/** The fourth object, present only for a capture that declared an `animation`. */
+const CLIP_NAME = 'animation.mp4';
+const CLIP_TYPE = 'video/mp4';
+const clipKeyFor = (project: string, captureId: string): string => `${project}/captures/${captureId}/${CLIP_NAME}`;
+/** Every object a capture owns: the three images, and the clip when it declared one. */
+const objectKeys = (project: string, capture: Pick<Capture, 'captureId' | 'animation'>): string[] => [
+  ...RENDITIONS.map((r) => keyFor(project, capture.captureId, r)),
+  ...(capture.animation ? [clipKeyFor(project, capture.captureId)] : []),
+];
 
 const MarkupInt = z.number().int();
 const MarkupNote = z.object({
@@ -82,6 +106,17 @@ const Markup = z.object({
   marks: z.object({ arrows: MarkupCount, boxes: MarkupCount, pens: MarkupCount }).default({ arrows: 0, boxes: 0, pens: 0 }),
 });
 
+// Each side 2..1280 and even (H.264 4:2:0), so the long edge is at most 1280. Sizes beyond bytes' cap are a 413, checked after validation.
+const ClipSide = z.number().int().min(2).max(MAX_CLIP_EDGE).refine((n) => n % 2 === 0);
+const Animation = z.object({
+  bytes: z.number().int().min(1),
+  sha256: z.string().regex(SHA256_HEX),
+  durationMs: z.number().int().min(MIN_CLIP_MS).max(MAX_CLIP_MS),
+  width: ClipSide,
+  height: ClipSide,
+  fps: z.number().min(1).max(MAX_CLIP_FPS),
+});
+
 const PresignBody = z.object({
   captureId: z.string().regex(UUID_V7),
   width: z.number().int().min(1).max(MAX_DIMENSION),
@@ -97,6 +132,7 @@ const PresignBody = z.object({
   sendMode: z.enum(['review', 'auto']),
   note: z.string().max(MAX_NOTE_CHARS).optional(),
   markup: Markup.optional(),
+  animation: Animation.optional(),
 }).superRefine((body, ctx) => {
   // Numbers run 1..k in order; positions lie inside the picture the body declares (the pixels of original.png).
   // Issues carry paths only, never values: the 400 names the field and nothing the client wrote.
@@ -110,6 +146,12 @@ const PresignBody = z.object({
     if (note.y > body.height) bad('y');
     if (halfArea || outside) bad('w');
   });
+}).superRefine((body, ctx) => {
+  // The clip keeps the picture's shape: its aspect is within 2 % of the original's. The issue names `animation`, never the numbers.
+  const clip = body.animation;
+  if (!clip) return;
+  const ratio = clip.width / clip.height / (body.width / body.height);
+  if (Math.abs(ratio - 1) > CLIP_ASPECT_TOLERANCE) ctx.addIssue({ code: 'custom', path: ['animation', 'height'], message: 'out of range' });
 });
 const CompleteBody = z.object({ captureId: z.string().regex(UUID_V7) });
 
@@ -125,6 +167,7 @@ const CaptureSummary = z.object({
   bytes: z.number(),
   sha256: z.string(),
   expiresAt: z.string(),
+  animated: z.literal(true).optional(),
   receivedAt: z.string().optional(),
 });
 
@@ -136,16 +179,18 @@ export const presignCaptureRoute = createRoute({
     'previewBytes (<= 2 MB) and agentBytes (<= 512 KB) as the exact sizes of the other two files, ' +
     'scale, os (mac|win), mode (region|window|screen), sendMode (review|auto), optional note (<= 2000 chars), ' +
     'optional markup ({ v: 1, notes: [{ n, x, y, w?, h?, text }] (<= 30, text <= 300 chars), marks: { arrows, boxes, pens } (0..500 each) }; ' +
-    'accepted and stored only while SNIP_MARKUP is on, otherwise ignored). Idempotent on captureId. ' +
-    'The three URLs sign Content-Type (image/png, image/jpeg, image/webp) and Content-Length, so the PUTs must send exactly those, and they expire after 15 minutes. ' +
+    'accepted and stored only while SNIP_MARKUP is on, otherwise ignored), ' +
+    'optional animation ({ bytes (<= 15 MB), sha256, durationMs (500..10000), width, height (even, 2..1280), fps (1..12) } of an animation.mp4 whose aspect is within 2% of the original; ' +
+    'accepted and stored only while ANIMATED_SNIPS is on, otherwise ignored). Idempotent on captureId. ' +
+    'The URLs sign Content-Type (image/png, image/jpeg, image/webp, and video/mp4 for the clip) and Content-Length, so the PUTs must send exactly those, and they expire after 15 minutes. ' +
     'Limits: 30 per minute and 2,000 per day per key.',
   request: { params: z.object({ project: z.string() }) },
   responses: {
     200: {
-      description: 'The pending capture and three presigned PUT URLs (uploads is null when the capture is already ready)',
+      description: 'The pending capture and its presigned PUT URLs: three, plus animation when the capture declared a clip (uploads is null when the capture is already ready)',
       content: {
         'application/json': {
-          schema: z.object({ capture: CaptureSummary, created: z.boolean(), uploads: z.object({ original: Upload, preview: Upload, agent: Upload }).nullable() }),
+          schema: z.object({ capture: CaptureSummary, created: z.boolean(), uploads: z.object({ original: Upload, preview: Upload, agent: Upload, animation: Upload.optional() }).nullable() }),
         },
       },
     },
@@ -153,7 +198,7 @@ export const presignCaptureRoute = createRoute({
     401: errorResponse('Missing, malformed, unknown or revoked key'),
     403: errorResponse("The key is not a device key, or belongs to another project"),
     409: errorResponse('The captureId is taken by another person, or by a capture with different declared values'),
-    413: errorResponse('The original is larger than 20 MB'),
+    413: errorResponse('The original is larger than 20 MB, or the declared clip is larger than 15 MB'),
     429: errorResponse('Per-key limit reached; Retry-After says when to retry'),
   },
 });
@@ -163,7 +208,9 @@ export const completeCaptureRoute = createRoute({
   path: '/captures/{project}/complete',
   description:
     'Device key only. JSON body: { captureId }. Checks the three R2 objects (present, sizes, magic bytes, PNG dimensions, ' +
-    'sha256 of the original, stored Content-Type and declared size of each file) and marks the capture ready. Idempotent: a ready capture answers 200 again. ' +
+    'sha256 of the original, stored Content-Type and declared size of each file) and marks the capture ready. ' +
+    'A capture that declared an animation also needs animation.mp4: silent H.264 MP4, at most 15 MB and 10 s, ' +
+    'its size, length, frame rate and sha256 matching what was declared; any refusal removes all four files. Idempotent: a ready capture answers 200 again. ' +
     'Limit: 60 per minute per key.',
   request: { params: z.object({ project: z.string() }) },
   responses: {
@@ -172,10 +219,10 @@ export const completeCaptureRoute = createRoute({
     401: errorResponse('Missing, malformed, unknown or revoked key'),
     403: errorResponse("The key is not a device key, or belongs to another project"),
     404: errorResponse('No pending capture with this id for this key owner'),
-    409: errorResponse('One or more of the three objects has not been uploaded yet'),
+    409: errorResponse('One or more of the three objects (four with a clip) has not been uploaded yet'),
     413: errorResponse('An uploaded object is larger than its limit'),
-    415: errorResponse('An uploaded object is not the image type it must be (bad bytes or a different stored Content-Type)'),
-    422: errorResponse('Declared size, dimensions or sha256 do not match what was uploaded'),
+    415: errorResponse('An uploaded object is not the image type it must be (bad bytes or a different stored Content-Type), or the clip is not an H.264 MP4'),
+    422: errorResponse('Declared size, dimensions or sha256 do not match what was uploaded, or the clip has sound, is too long, or does not match its declared shape'),
     429: errorResponse('Per-key limit reached; Retry-After says when to retry'),
   },
 });
@@ -197,6 +244,7 @@ function summary(c: Capture) {
     bytes: c.bytes,
     sha256: c.sha256,
     expiresAt: c.expiresAt.toISOString(),
+    ...(c.animation ? { animated: true as const } : {}),
     ...(c.receivedAt ? { receivedAt: c.receivedAt.toISOString() } : {}),
   };
 }
@@ -231,6 +279,14 @@ function withoutMarkupUnlessOn(raw: unknown, on: boolean): unknown {
   return rest;
 }
 
+/** animated-snips switch off: the `animation` key is removed from the parsed body unread (no 400, no 413, no store). */
+function withoutAnimationUnlessOn(raw: unknown, on: boolean): unknown {
+  if (on || typeof raw !== 'object' || raw === null || !('animation' in raw)) return raw;
+  const rest: Record<string, unknown> = { ...(raw as Record<string, unknown>) };
+  delete rest.animation;
+  return rest;
+}
+
 /** A markup with no notes and nothing drawn is stored as absent. */
 function storableMarkup(markup: PresignBodyData['markup']): CaptureMarkup | undefined {
   if (!markup) return undefined;
@@ -251,6 +307,19 @@ function badFields(error: z.ZodError): string[] {
 type PresignBodyData = z.infer<typeof PresignBody>;
 type UploadMap = Record<string, { url: string; key: string; contentType: string }>;
 
+/** Both absent, or both present with all six values equal. A retry cannot add, drop or change a clip. */
+function sameAnimation(a: CaptureAnimation | undefined, b: CaptureAnimation | undefined): boolean {
+  if (!a || !b) return !a && !b;
+  return a.bytes === b.bytes && a.sha256 === b.sha256 && a.durationMs === b.durationMs && a.width === b.width && a.height === b.height && a.fps === b.fps;
+}
+
+/** The size caps are a 413, not a 400: checked after validation, so the 400 never depends on them. */
+const overLimit = (body: PresignBodyData): boolean =>
+  body.bytes > MAX_ORIGINAL_BYTES ||
+  body.previewBytes > MAX_PREVIEW_BYTES ||
+  body.agentBytes > MAX_AGENT_BYTES ||
+  (body.animation?.bytes ?? 0) > MAX_CLIP_BYTES;
+
 /** A retry of the same presign by the same person, with the same declared values. */
 function sameDeclaration(capture: Capture, uid: string, body: PresignBodyData): boolean {
   return (
@@ -260,7 +329,8 @@ function sameDeclaration(capture: Capture, uid: string, body: PresignBodyData): 
     capture.bytes === body.bytes &&
     capture.previewBytes === body.previewBytes &&
     capture.agentBytes === body.agentBytes &&
-    capture.sha256 === body.sha256
+    capture.sha256 === body.sha256 &&
+    sameAnimation(capture.animation, body.animation)
   );
 }
 
@@ -274,6 +344,15 @@ async function presignUploads(storage: AppEnv['Variables']['storage'], project: 
       expiresIn: CAPTURE_URL_EXPIRES_SECONDS,
     });
     uploads[r.field] = { url: signed.url, key: signed.key, contentType: r.contentType };
+  }
+  if (capture.animation) {
+    // The fourth PUT signs the declared clip size, so a repeat can never widen it.
+    const signed = await storage.getPresignedCaptureUploadUrl(clipKeyFor(project, capture.captureId), {
+      contentType: CLIP_TYPE,
+      contentLength: capture.animation.bytes,
+      expiresIn: CAPTURE_URL_EXPIRES_SECONDS,
+    });
+    uploads.animation = { url: signed.url, key: signed.key, contentType: CLIP_TYPE };
   }
   return uploads;
 }
@@ -293,14 +372,15 @@ export function registerCaptures(app: OpenAPIHono<AppEnv>): void {
         return refuse(c, 429, 'rate_limited', 'Too many captures from this key; retry after the time in Retry-After');
       }
 
-      // snip-markup: with the switch off the field is dropped before validation, so an old or new client never fails on it.
-      const parsed = PresignBody.safeParse(withoutMarkupUnlessOn(await readJson(c), c.get('snipMarkup') === true));
+      // snip-markup and animated-snips: with a switch off the field is dropped before validation, so an old or new client never fails on it.
+      const raw = withoutMarkupUnlessOn(await readJson(c), c.get('snipMarkup') === true);
+      const parsed = PresignBody.safeParse(withoutAnimationUnlessOn(raw, c.get('animatedSnips') === true));
       if (!parsed.success) {
         log.warn('capture refused', reqFields(c, { err_code: 'capture_invalid_request', status: 400 }));
         return c.json({ error: 'invalid_request', message: 'The request body is not valid', fields: badFields(parsed.error) }, 400);
       }
       const body = parsed.data;
-      if (body.bytes > MAX_ORIGINAL_BYTES || body.previewBytes > MAX_PREVIEW_BYTES || body.agentBytes > MAX_AGENT_BYTES) {
+      if (overLimit(body)) {
         return refuse(c, 413, 'too_large', 'An image is larger than its limit (original 20 MB, preview 2 MB, agent 512 KB)', body.captureId);
       }
 
@@ -322,6 +402,7 @@ export function registerCaptures(app: OpenAPIHono<AppEnv>): void {
         sendMode: body.sendMode,
         ...(body.note ? { note: body.note } : {}),
         ...(markup ? { markup } : {}),
+        ...(body.animation ? { animated: true as const, animation: body.animation } : {}),
         expiresAt,
       });
 
@@ -374,11 +455,12 @@ export function registerCaptures(app: OpenAPIHono<AppEnv>): void {
         return c.json({ capture: summary(capture) }, 200);
       }
 
-      const failure = await verifyObjects(storage, key.project, capture);
+      const failure = await verifyCapture(storage, key.project, capture);
       if (failure) {
         // A rejected upload is removed so it cannot be completed later by accident; the client re-presigns and re-PUTs.
         // A missing object is not a rejection: the client simply has not finished, so nothing is deleted.
-        if (failure.status !== 409) await Promise.all(RENDITIONS.map((r) => storage.delete(keyFor(key.project, captureId, r)).catch((deleteError: unknown) => reportError(c, deleteError, 'could not delete rejected rendition', 'capture_rendition_delete_failed', { run_id: captureId }))));
+        // All four objects go when the capture has a clip, so a bad clip cannot leave its images behind.
+        if (failure.status !== 409) await Promise.all(objectKeys(key.project, capture).map((objectKey) => storage.delete(objectKey).catch((deleteError: unknown) => reportError(c, deleteError, 'could not delete rejected rendition', 'capture_rendition_delete_failed', { run_id: captureId }))));
         return refuse(c, failure.status, failure.code, failure.message, captureId);
       }
 
@@ -428,6 +510,15 @@ async function markIndexOff(c: Ctx, projectId: string, captureId: string): Promi
 type Failure = { status: 409 | 413 | 415 | 422; code: string; message: string };
 const MISSING: Failure = { status: 409, code: 'objects_missing', message: 'Upload all three images, then call complete again' };
 const NOT_AN_IMAGE: Failure = { status: 415, code: 'not_an_image', message: 'An uploaded file is not the expected image type' };
+// animated-snips: the same codes and words the images use where the contract says so, new ones for what only a clip can be.
+const MISSING_WITH_CLIP: Failure = { ...MISSING, message: 'Upload all four files, then call complete again' };
+const TOO_LARGE: Failure = { status: 413, code: 'too_large', message: 'An uploaded image is larger than its limit' };
+const SIZE_MISMATCH: Failure = { status: 422, code: 'size_mismatch', message: 'An uploaded image does not match its declared size' };
+const NOT_A_VIDEO: Failure = { status: 415, code: 'not_a_video', message: 'The uploaded clip is not an H.264 MP4' };
+const HAS_AUDIO: Failure = { status: 422, code: 'animation_has_audio', message: 'The uploaded clip has a sound track; clips must be silent' };
+const TOO_LONG: Failure = { status: 422, code: 'animation_too_long', message: 'The uploaded clip is longer than 10 seconds' };
+const BAD_SHAPE: Failure = { status: 422, code: 'animation_bad_shape', message: 'The uploaded clip does not match its declared size, length or frame rate' };
+const CLIP_HASH_MISMATCH: Failure = { status: 422, code: 'hash_mismatch', message: 'The uploaded clip does not match the declared sha256' };
 
 /** Magic bytes of each rendition against the type it must be. */
 function sniffAll(headers: Array<Uint8Array | null>): Failure | null {
@@ -445,7 +536,7 @@ const mediaType = (contentType: string | undefined): string => (contentType ?? '
 /** Size cap and stored Content-Type of each object. The PUT URL signs the type, so R2 stores exactly the one we named; anything else did not come through it. */
 function checkStoredMetadata(heads: Array<{ size: number; contentType?: string }>): Failure | null {
   for (let i = 0; i < RENDITIONS.length; i++) {
-    if (heads[i].size > RENDITIONS[i].maxBytes) return { status: 413, code: 'too_large', message: 'An uploaded image is larger than its limit' };
+    if (heads[i].size > RENDITIONS[i].maxBytes) return TOO_LARGE;
     if (heads[i].size === 0) return NOT_AN_IMAGE;
     if (mediaType(heads[i].contentType) !== RENDITIONS[i].contentType) return NOT_AN_IMAGE;
   }
@@ -470,7 +561,7 @@ async function verifyObjects(storage: AppEnv['Variables']['storage'], project: s
     const declared = declaredBytes(capture, r);
     return declared !== undefined && sizes[i] !== declared;
   });
-  if (sizeMismatch) return { status: 422, code: 'size_mismatch', message: 'An uploaded image does not match its declared size' };
+  if (sizeMismatch) return SIZE_MISMATCH;
   const dims = pngDimensions(headers[0]!);
   if (!dims) return NOT_AN_IMAGE;
   if (dims.width !== capture.width || dims.height !== capture.height) {
@@ -481,6 +572,56 @@ async function verifyObjects(storage: AppEnv['Variables']['storage'], project: s
   if (digest === null) return MISSING;
   if (digest !== capture.sha256) return { status: 422, code: 'hash_mismatch', message: 'The uploaded original does not match the declared sha256' };
   return null;
+}
+
+type Storage = AppEnv['Variables']['storage'];
+
+/** The three images, then (for a capture that declared a clip) the clip. A missing file reads "all four" only for a clip capture. */
+async function verifyCapture(storage: Storage, project: string, capture: Capture): Promise<Failure | null> {
+  const failure = (await verifyObjects(storage, project, capture)) ?? (capture.animation ? await verifyClip(storage, project, capture.captureId, capture.animation) : null);
+  return failure === MISSING && capture.animation ? MISSING_WITH_CLIP : failure;
+}
+
+/** What the box walk found against what was declared and what the contract allows. Null when the clip is fine. */
+function judgeClip(inspected: Mp4Result, clip: CaptureAnimation): Failure | null {
+  if (!inspected.ok) return inspected.reason === 'has_audio' ? HAS_AUDIO : NOT_A_VIDEO;
+  const { facts } = inspected;
+  // Both clocks are checked, so neither the movie header nor the track header can hide a long clip.
+  if (Math.max(facts.durationMs, facts.mediaDurationMs) > MAX_CLIP_MS + CLIP_MS_TOLERANCE) return TOO_LONG;
+  return clipShapeMatches(facts, clip) ? null : BAD_SHAPE;
+}
+
+function clipShapeMatches(facts: Mp4Facts, clip: CaptureAnimation): boolean {
+  return (
+    facts.width === clip.width &&
+    facts.height === clip.height &&
+    Math.max(facts.width, facts.height) <= MAX_CLIP_EDGE &&
+    facts.fps <= CLIP_MEASURED_FPS_MAX &&
+    Math.abs(facts.fps - clip.fps) <= CLIP_FPS_TOLERANCE &&
+    Math.abs(facts.durationMs - clip.durationMs) <= CLIP_MS_TOLERANCE
+  );
+}
+
+/** animation.mp4: HEAD, stored metadata, magic, declared size, box walk, then sha256. Null when everything matches. */
+async function verifyClip(storage: Storage, project: string, captureId: string, clip: CaptureAnimation): Promise<Failure | null> {
+  const key = clipKeyFor(project, captureId);
+  const head = await storage.head(key);
+  if (head === null) return MISSING;
+  if (head.size > MAX_CLIP_BYTES) return TOO_LARGE;
+  if (head.size === 0 || mediaType(head.contentType) !== CLIP_TYPE) return NOT_A_VIDEO;
+
+  const readRange: ReadRange = (offset, length) => storage.getObjectRange(key, { offset, length });
+  const magic = await readRange(0, MAGIC_BYTES);
+  if (!magic) return MISSING;
+  if (!hasMp4Magic(magic)) return NOT_A_VIDEO;
+  if (head.size !== clip.bytes) return SIZE_MISMATCH;
+
+  const shape = judgeClip(await inspectMp4(head.size, readRange), clip);
+  if (shape) return shape;
+
+  const digest = await sha256OfObject(storage, key, clip.bytes);
+  if (digest === null) return MISSING;
+  return digest === clip.sha256 ? null : CLIP_HASH_MISMATCH;
 }
 
 /** Streaming sha256 of an R2 object, read once and never held in memory. Null if the object is gone or its length changed. */

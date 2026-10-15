@@ -59,6 +59,8 @@ export type AppEnv = {
     snipIndexing?: boolean;
     /** SNIP_MARKUP: "on" lets /captures/:p/presign validate and store the optional `markup` field (snip-markup). Absent or off drops the field unread. */
     snipMarkup?: boolean;
+    /** ANIMATED_SNIPS: "on" lets /captures/:p/presign validate and store the optional `animation` field and hand out a fourth (clip) PUT URL (animated-snips). Absent or off drops the field unread. */
+    animatedSnips?: boolean;
     /** Set by a route that refused with an expected, non-failing 5xx (the flag-off 503): the request line logs at info, not error. */
     expectedRefusal?: boolean;
   } & AuthVariables;

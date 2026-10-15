@@ -1,0 +1,720 @@
+{
+ "version": 1,
+ "doc": "Shared animated-snips contract (spec-writer 2026-10-15). Sync produces `animation` + 4 files; upload validates and stores; dashboard CaptureView returns `animation` + `animationUrl`; MCP prints `expect_ss`; public route serves bytes. Switch: upload/MCP wrangler var ANIMATED_SNIPS == 'on'; dashboard config/flags.json `animated-snips` read with isOnFor. Switch off: upload drops `animation` before validation (today's responses byte-for-byte), dashboard omits the keys, MCP prints today's text, public clip route 404. 400 bodies name fields only, never values. Values here come from fixtures/clip-valid.mp4 and the stills derived from it (fixtures/fixtures.json).",
+ "limits": {
+  "maxDurationMs": 10000,
+  "durationToleranceMs": 100,
+  "minDurationMs": 500,
+  "maxFps": 12,
+  "fpsMeasuredMax": 12.5,
+  "fpsToleranceVsDeclared": 0.5,
+  "maxLongEdge": 1280,
+  "maxBytes": 15728640,
+  "aspectToleranceVsOriginal": 0.02,
+  "evenDimensions": true,
+  "maxMoovBytes": 2097152,
+  "codecs": [
+   "avc1",
+   "avc3"
+  ],
+  "brands": [
+   "isom",
+   "iso2",
+   "mp41",
+   "mp42",
+   "avc1"
+  ],
+  "audio": false,
+  "key": "{project}/captures/{captureId}/animation.mp4",
+  "contentType": "video/mp4",
+  "presignedPutSeconds": 900,
+  "signedGetSeconds": 3600,
+  "keyFrame": "middle",
+  "contactSheet": {
+   "cols": 3,
+   "rows": 2,
+   "frames": 6,
+   "frameIndex": "round(i*(n-1)/5), i=0..5",
+   "maxWidth": 1280,
+   "gutterPx": 2,
+   "gutterColour": "white",
+   "targetBytes": 71680,
+   "mcpInlineMaxBytes": 73500
+  }
+ },
+ "presign": {
+  "still_switch_any": {
+   "request": {
+    "captureId": "0199f0a2-7c3e-7000-8000-00000000c11b",
+    "width": 1280,
+    "height": 800,
+    "bytes": 50343,
+    "previewBytes": 36425,
+    "agentBytes": 11284,
+    "sha256": "0d21d426cfeb0c5833a4440a37dc75df977dab9ce50631b7eb67222d936f3c83",
+    "scale": 1,
+    "os": "mac",
+    "mode": "region",
+    "sendMode": "review"
+   },
+   "response": {
+    "status": 200,
+    "body": {
+     "capture": {
+      "captureId": "0199f0a2-7c3e-7000-8000-00000000c11b",
+      "status": "pending",
+      "width": 1280,
+      "height": 800,
+      "bytes": 50343,
+      "sha256": "0d21d426cfeb0c5833a4440a37dc75df977dab9ce50631b7eb67222d936f3c83",
+      "expiresAt": "<ISO, +30 d>"
+     },
+     "created": true,
+     "uploads": {
+      "original": {
+       "url": "<presigned R2 PUT, 900 s, signs Content-Type + Content-Length>",
+       "key": "uat-project/captures/0199f0a2-7c3e-7000-8000-00000000c11b/original.png",
+       "contentType": "image/png"
+      },
+      "preview": {
+       "url": "<presigned R2 PUT, 900 s, signs Content-Type + Content-Length>",
+       "key": "uat-project/captures/0199f0a2-7c3e-7000-8000-00000000c11b/preview.jpg",
+       "contentType": "image/jpeg"
+      },
+      "agent": {
+       "url": "<presigned R2 PUT, 900 s, signs Content-Type + Content-Length>",
+       "key": "uat-project/captures/0199f0a2-7c3e-7000-8000-00000000c11b/agent.webp",
+       "contentType": "image/webp"
+      }
+     }
+    }
+   }
+  },
+  "with_animation_switch_on": {
+   "request": {
+    "captureId": "0199f0a2-7c3e-7000-8000-00000000c11b",
+    "width": 1280,
+    "height": 800,
+    "bytes": 50343,
+    "previewBytes": 36425,
+    "agentBytes": 11284,
+    "sha256": "0d21d426cfeb0c5833a4440a37dc75df977dab9ce50631b7eb67222d936f3c83",
+    "scale": 1,
+    "os": "mac",
+    "mode": "region",
+    "sendMode": "review",
+    "animation": {
+     "bytes": 22838,
+     "sha256": "b5e8d3064be8c9607e24fcc6f6ab4a3a997124ad42a50c9e1bc03c7e89563b46",
+     "durationMs": 3000,
+     "width": 1280,
+     "height": 800,
+     "fps": 12
+    }
+   },
+   "response": {
+    "status": 200,
+    "body": {
+     "capture": {
+      "captureId": "0199f0a2-7c3e-7000-8000-00000000c11b",
+      "status": "pending",
+      "width": 1280,
+      "height": 800,
+      "bytes": 50343,
+      "sha256": "0d21d426cfeb0c5833a4440a37dc75df977dab9ce50631b7eb67222d936f3c83",
+      "expiresAt": "<ISO, +30 d>",
+      "animated": true
+     },
+     "created": true,
+     "uploads": {
+      "original": {
+       "url": "<presigned R2 PUT, 900 s, signs Content-Type + Content-Length>",
+       "key": "uat-project/captures/0199f0a2-7c3e-7000-8000-00000000c11b/original.png",
+       "contentType": "image/png"
+      },
+      "preview": {
+       "url": "<presigned R2 PUT, 900 s, signs Content-Type + Content-Length>",
+       "key": "uat-project/captures/0199f0a2-7c3e-7000-8000-00000000c11b/preview.jpg",
+       "contentType": "image/jpeg"
+      },
+      "agent": {
+       "url": "<presigned R2 PUT, 900 s, signs Content-Type + Content-Length>",
+       "key": "uat-project/captures/0199f0a2-7c3e-7000-8000-00000000c11b/agent.webp",
+       "contentType": "image/webp"
+      },
+      "animation": {
+       "url": "<presigned R2 PUT, 900 s, signs Content-Type + Content-Length>",
+       "key": "uat-project/captures/0199f0a2-7c3e-7000-8000-00000000c11b/animation.mp4",
+       "contentType": "video/mp4"
+      }
+     }
+    }
+   },
+   "put_headers": {
+    "animation": {
+     "Content-Type": "video/mp4",
+     "Content-Length": 22838
+    }
+   }
+  },
+  "with_animation_switch_off": {
+   "request": {
+    "captureId": "0199f0a2-7c3e-7000-8000-00000000c11b",
+    "width": 1280,
+    "height": 800,
+    "bytes": 50343,
+    "previewBytes": 36425,
+    "agentBytes": 11284,
+    "sha256": "0d21d426cfeb0c5833a4440a37dc75df977dab9ce50631b7eb67222d936f3c83",
+    "scale": 1,
+    "os": "mac",
+    "mode": "region",
+    "sendMode": "review",
+    "animation": {
+     "bytes": 22838,
+     "sha256": "b5e8d3064be8c9607e24fcc6f6ab4a3a997124ad42a50c9e1bc03c7e89563b46",
+     "durationMs": 3000,
+     "width": 1280,
+     "height": 800,
+     "fps": 12
+    }
+   },
+   "response": {
+    "status": 200,
+    "body": {
+     "capture": {
+      "captureId": "0199f0a2-7c3e-7000-8000-00000000c11b",
+      "status": "pending",
+      "width": 1280,
+      "height": 800,
+      "bytes": 50343,
+      "sha256": "0d21d426cfeb0c5833a4440a37dc75df977dab9ce50631b7eb67222d936f3c83",
+      "expiresAt": "<ISO, +30 d>"
+     },
+     "created": true,
+     "uploads": {
+      "original": {
+       "url": "<presigned R2 PUT, 900 s, signs Content-Type + Content-Length>",
+       "key": "uat-project/captures/0199f0a2-7c3e-7000-8000-00000000c11b/original.png",
+       "contentType": "image/png"
+      },
+      "preview": {
+       "url": "<presigned R2 PUT, 900 s, signs Content-Type + Content-Length>",
+       "key": "uat-project/captures/0199f0a2-7c3e-7000-8000-00000000c11b/preview.jpg",
+       "contentType": "image/jpeg"
+      },
+      "agent": {
+       "url": "<presigned R2 PUT, 900 s, signs Content-Type + Content-Length>",
+       "key": "uat-project/captures/0199f0a2-7c3e-7000-8000-00000000c11b/agent.webp",
+       "contentType": "image/webp"
+      }
+     }
+    }
+   },
+   "note": "identical to still_switch_any; `animation` dropped unread, no `animated` key"
+  },
+  "retry_same": {
+   "note": "same request again -> 200 created:false, same keys, fresh URLs"
+  },
+  "retry_different_animation": {
+   "change": {
+    "animation.sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "response": {
+    "status": 409,
+    "body": {
+     "error": "id_conflict",
+     "message": "<existing id_conflict message unchanged>"
+    }
+   }
+  },
+  "errors": [
+   {
+    "case": "durationMs 10001",
+    "patch": {
+     "animation.durationMs": 10001
+    },
+    "status": 400,
+    "body": {
+     "error": "invalid_request",
+     "message": "The request body is not valid",
+     "fields": [
+      "animation"
+     ]
+    }
+   },
+   {
+    "case": "durationMs 499",
+    "patch": {
+     "animation.durationMs": 499
+    },
+    "status": 400,
+    "body": {
+     "error": "invalid_request",
+     "message": "The request body is not valid",
+     "fields": [
+      "animation"
+     ]
+    }
+   },
+   {
+    "case": "fps 13",
+    "patch": {
+     "animation.fps": 13
+    },
+    "status": 400,
+    "body": {
+     "error": "invalid_request",
+     "message": "The request body is not valid",
+     "fields": [
+      "animation"
+     ]
+    }
+   },
+   {
+    "case": "width 1281",
+    "patch": {
+     "animation.width": 1281
+    },
+    "status": 400,
+    "body": {
+     "error": "invalid_request",
+     "message": "The request body is not valid",
+     "fields": [
+      "animation"
+     ]
+    }
+   },
+   {
+    "case": "odd width 1279",
+    "patch": {
+     "animation.width": 1279
+    },
+    "status": 400,
+    "body": {
+     "error": "invalid_request",
+     "message": "The request body is not valid",
+     "fields": [
+      "animation"
+     ]
+    }
+   },
+   {
+    "case": "aspect off by >2% vs original (1280x640 vs 1280x800)",
+    "patch": {
+     "animation.height": 640
+    },
+    "status": 400,
+    "body": {
+     "error": "invalid_request",
+     "message": "The request body is not valid",
+     "fields": [
+      "animation"
+     ]
+    }
+   },
+   {
+    "case": "sha256 not hex64",
+    "patch": {
+     "animation.sha256": "xyz"
+    },
+    "status": 400,
+    "body": {
+     "error": "invalid_request",
+     "message": "The request body is not valid",
+     "fields": [
+      "animation"
+     ]
+    }
+   },
+   {
+    "case": "bytes 15728641",
+    "patch": {
+     "animation.bytes": 15728641
+    },
+    "status": 413,
+    "body": {
+     "error": "too_large",
+     "message": "<existing too_large message>"
+    }
+   }
+  ],
+  "note": "When the switch is off, every case in `errors` returns the still_switch_any response instead (the field is never read)."
+ },
+ "complete": {
+  "request": {
+   "captureId": "0199f0a2-7c3e-7000-8000-00000000c11b"
+  },
+  "ok_with_animation": {
+   "files": {
+    "original.png": "keyframe-original.png",
+    "preview.jpg": "keyframe-preview.jpg",
+    "agent.webp": "agent-contact-q60.webp",
+    "animation.mp4": "clip-valid.mp4 (also clip-moov-at-end.mp4 with its own sha)"
+   },
+   "response": {
+    "status": 200,
+    "body": {
+     "capture": {
+      "captureId": "0199f0a2-7c3e-7000-8000-00000000c11b",
+      "status": "ready",
+      "width": 1280,
+      "height": 800,
+      "bytes": 50343,
+      "sha256": "0d21d426cfeb0c5833a4440a37dc75df977dab9ce50631b7eb67222d936f3c83",
+      "expiresAt": "<ISO, +30 d>",
+      "animated": true,
+      "receivedAt": "<ISO>"
+     }
+    }
+   },
+   "doc_fields": {
+    "animated": true,
+    "animation": {
+     "bytes": 22838,
+     "sha256": "b5e8d3064be8c9607e24fcc6f6ab4a3a997124ad42a50c9e1bc03c7e89563b46",
+     "durationMs": 3000,
+     "width": 1280,
+     "height": 800,
+     "fps": 12
+    }
+   }
+  },
+  "ok_still": {
+   "note": "unchanged from today; no `animated` key in summary or doc"
+  },
+  "errors": [
+   {
+    "case": "animation.mp4 not uploaded",
+    "status": 409,
+    "body": {
+     "error": "objects_missing",
+     "message": "Upload all four files, then call complete again"
+    },
+    "deletes": false
+   },
+   {
+    "case": "stored type not video/mp4 or size 0",
+    "status": 415,
+    "body": {
+     "error": "not_a_video",
+     "message": "The uploaded clip is not an H.264 MP4"
+    },
+    "deletes": true
+   },
+   {
+    "case": "clip-wrong-magic.mp4 (WebM)",
+    "status": 415,
+    "body": {
+     "error": "not_a_video",
+     "message": "The uploaded clip is not an H.264 MP4"
+    },
+    "deletes": true
+   },
+   {
+    "case": "clip-png-named-mp4.mp4",
+    "status": 415,
+    "body": {
+     "error": "not_a_video",
+     "message": "The uploaded clip is not an H.264 MP4"
+    },
+    "deletes": true
+   },
+   {
+    "case": "moov box > 2 MB or no vide track or codec not avc1/avc3",
+    "status": 415,
+    "body": {
+     "error": "not_a_video",
+     "message": "The uploaded clip is not an H.264 MP4"
+    },
+    "deletes": true
+   },
+   {
+    "case": "clip-with-audio.mp4",
+    "status": 422,
+    "body": {
+     "error": "animation_has_audio",
+     "message": "The uploaded clip has a sound track; clips must be silent"
+    },
+    "deletes": true
+   },
+   {
+    "case": "clip-too-long.mp4 (12 s)",
+    "status": 422,
+    "body": {
+     "error": "animation_too_long",
+     "message": "The uploaded clip is longer than 10 seconds"
+    },
+    "deletes": true
+   },
+   {
+    "case": "clip-too-fast.mp4 (30 fps)",
+    "status": 422,
+    "body": {
+     "error": "animation_bad_shape",
+     "message": "The uploaded clip does not match its declared size, length or frame rate"
+    },
+    "deletes": true
+   },
+   {
+    "case": "clip-too-wide.mp4 (1920x1200)",
+    "status": 422,
+    "body": {
+     "error": "animation_bad_shape",
+     "message": "The uploaded clip does not match its declared size, length or frame rate"
+    },
+    "deletes": true
+   },
+   {
+    "case": "measured duration off declared by >100 ms, dims differ, fps off by >0.5",
+    "status": 422,
+    "body": {
+     "error": "animation_bad_shape",
+     "message": "The uploaded clip does not match its declared size, length or frame rate"
+    },
+    "deletes": true
+   },
+   {
+    "case": "stored size > 15728640 (mock HEAD 15728641)",
+    "status": 413,
+    "body": {
+     "error": "too_large",
+     "message": "<existing too_large message>"
+    },
+    "deletes": true
+   },
+   {
+    "case": "stored size != animation.bytes",
+    "status": 422,
+    "body": {
+     "error": "size_mismatch",
+     "message": "<existing size_mismatch message>"
+    },
+    "deletes": true
+   },
+   {
+    "case": "sha256 of animation.mp4 != animation.sha256",
+    "status": 422,
+    "body": {
+     "error": "hash_mismatch",
+     "message": "The uploaded clip does not match the declared sha256"
+    },
+    "deletes": true
+   }
+  ],
+  "order": "existing three-file checks first (unchanged codes), then the clip: HEAD, stored metadata, magic, size, box walk, sha256",
+  "deletes_means": "all four objects deleted (original.png, preview.jpg, agent.webp, animation.mp4)",
+  "log_err_codes": [
+   "capture_not_a_video",
+   "capture_animation_has_audio",
+   "capture_animation_too_long",
+   "capture_animation_bad_shape",
+   "capture_too_large",
+   "capture_size_mismatch",
+   "capture_hash_mismatch",
+   "capture_objects_missing"
+  ]
+ },
+ "capture_doc": {
+  "path": "projects/uat-project/captures/0199f0a2-7c3e-7000-8000-00000000c11b",
+  "added_fields": {
+   "animated": true,
+   "animation": {
+    "bytes": 22838,
+    "sha256": "b5e8d3064be8c9607e24fcc6f6ab4a3a997124ad42a50c9e1bc03c7e89563b46",
+    "durationMs": 3000,
+    "width": 1280,
+    "height": 800,
+    "fps": 12
+   }
+  },
+  "still": "neither key present",
+  "writers": [
+   "firestore.node.ts create+parse",
+   "firestore.worker.ts create, REST serialise, REST parse"
+  ]
+ },
+ "dashboard": {
+  "capabilities": {
+   "route": "GET /api/captures/device/capabilities",
+   "auth": "device key (verifyDeviceKey, same as /api/captures/device/preferences)",
+   "on": {
+    "status": 200,
+    "headers": {
+     "Cache-Control": "private, no-store"
+    },
+    "body": {
+     "animatedSnips": {
+      "maxDurationMs": 10000,
+      "maxFps": 12,
+      "maxLongEdge": 1280,
+      "maxBytes": 15728640
+     }
+    }
+   },
+   "off_or_staff_for_non_staff": {
+    "status": 404,
+    "body": {
+     "error": "not_found"
+    }
+   },
+   "no_or_bad_key": {
+    "status": 401,
+    "body": "<existing verifyDeviceKey 401 body>"
+   }
+  },
+  "capture_view_added": {
+   "animation": {
+    "durationMs": 3000,
+    "width": 1280,
+    "height": 800,
+    "fps": 12,
+    "bytes": 22838
+   },
+   "animationUrl": "<signed R2 GET, 3600 s, response-content-type=video/mp4, path ends /animation.mp4>"
+  },
+  "capture_view_rule": "both keys only when the capture doc has `animation` AND isOnFor('animated-snips', caller) AND the caller passed the existing audience check; otherwise absent (not null)",
+  "ui_copy": {
+   "tile_badge": "▶ 0:03",
+   "detail_meta": "Clip · 3.0 s · 1280 × 800 · 12 fps",
+   "open_clip": "Open clip",
+   "public_footer_clip": "This is a preview clip. The original is not available on this link.",
+   "public_footer_still": "This is a preview. The original is not available on this link."
+  },
+  "public_page": {
+   "route": "GET /s/<token>",
+   "video_when": "capture has animation AND isOnFor('animated-snips', anonymous) (i.e. switch is fully on) AND SNIP_PUBLIC_LINKS_ENABLED on AND link alive",
+   "video_tag": "<video data-testid=\"public-snip-video\" class=\"shot\" src=\"/api/s/<token>/clip\" poster=\"/api/s/<token>/preview\" autoplay muted loop playsinline controls preload=\"auto\" width=\"1280\" height=\"800\"></video>",
+   "head_added": [
+    "<meta property=\"og:type\" content=\"video.other\">",
+    "<meta property=\"og:image\" content=\"https://<host>/api/s/<token>/preview\">",
+    "<meta property=\"og:image:width\" content=\"1280\">",
+    "<meta property=\"og:image:height\" content=\"800\">"
+   ],
+   "csp": "default-src 'none'; img-src 'self'; media-src 'self'; font-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+   "otherwise": "today's still page unchanged"
+  },
+  "public_clip": {
+   "route": "GET|HEAD /api/s/<token>/clip",
+   "full": {
+    "status": 200,
+    "headers": {
+     "Content-Type": "video/mp4",
+     "Content-Length": "22838",
+     "Accept-Ranges": "bytes",
+     "Cache-Control": "private, no-store",
+     "X-Robots-Tag": "noindex, nofollow",
+     "Referrer-Policy": "no-referrer",
+     "X-Content-Type-Options": "nosniff",
+     "Content-Disposition": "inline"
+    }
+   },
+   "range": {
+    "request_headers": {
+     "Range": "bytes=0-1023"
+    },
+    "status": 206,
+    "headers": {
+     "Content-Type": "video/mp4",
+     "Content-Length": "1024",
+     "Content-Range": "bytes 0-1023/22838",
+     "Accept-Ranges": "bytes",
+     "Cache-Control": "private, no-store",
+     "X-Content-Type-Options": "nosniff"
+    }
+   },
+   "open_range": {
+    "request_headers": {
+     "Range": "bytes=1024-"
+    },
+    "status": 206,
+    "headers": {
+     "Content-Range": "bytes 1024-22837/22838"
+    }
+   },
+   "unsatisfiable": {
+    "request_headers": {
+     "Range": "bytes=22838-"
+    },
+    "status": 416,
+    "headers": {
+     "Content-Range": "bytes */22838"
+    }
+   },
+   "dead": {
+    "status": 404,
+    "body": {
+     "error": "not_found"
+    },
+    "headers": "PUBLIC_HEADERS",
+    "cases": [
+     "bad token shape",
+     "unknown",
+     "expired",
+     "revoked",
+     "capture deleted",
+     "owner removed",
+     "SNIP_PUBLIC_LINKS_ENABLED off",
+     "animated-snips not fully on",
+     "still snip (no animation)",
+     "R2 object missing"
+    ],
+    "rule": "byte-identical body and headers for every case"
+   },
+   "rate_limit": "existing publicIpLimiter (120/min/IP) + new clip limiter 240/min per token; the page's 30/min per-token limiter is not charged by clip requests; 429 body unchanged"
+  }
+ },
+ "mcp": {
+  "switch": "ANIMATED_SNIPS == 'on' (wrangler.jsonc vars; staging on, production off until release)",
+  "expect_ss_on": [
+   "Picture: attached below: 6 frames of the clip in a 3 x 2 grid, left to right, top to bottom (WebP, long edge at most 1280 px).",
+   "Original, full resolution (link expires in 1 hour): <originalUrl>",
+   "Animated snip: 3.0 s clip, 1280 x 800 px, 12 fps, no sound. The original picture is the middle frame.",
+   "Clip (MP4, link expires in 1 hour): <animationUrl>"
+  ],
+  "picture_line_not_attached": "Picture: not attached (<note>). Open the clip link to see it.",
+  "line_order": "id, taken by, size, picture, original link, Animated snip, Clip link, note, markup lines (if any), app",
+  "duration_format": "seconds with one decimal (durationMs/1000, toFixed(1))",
+  "structured_on": {
+   "has_animation": true,
+   "animation": {
+    "duration_ms": 3000,
+    "width": 1280,
+    "height": 800,
+    "fps": 12,
+    "url": "<animationUrl>",
+    "url_expires_in_seconds": 3600
+   }
+  },
+  "structured_on_still": {
+   "has_animation": false,
+   "animation": null
+  },
+  "off": "today's text and structuredContent exactly; no has_animation/animation keys",
+  "analytics": "mcp_tool_call.has_animation boolean (PostHog scry_has_animation), present only when switch on"
+ },
+ "sync": {
+  "telemetry_words": {
+   "snip_taken.kind": [
+    "still",
+    "clip"
+   ],
+   "snip_sent.kind": [
+    "still",
+    "clip"
+   ],
+   "snip_sent.clip_seconds": [
+    "0-3",
+    "3-6",
+    "6-10"
+   ],
+   "snip_failed.reason_added": [
+    "clip_encode",
+    "clip_avoided",
+    "clip_too_short"
+   ]
+  },
+  "local_files": "scry-snip-xxxxxxxx.mp4 beside scry-snip-xxxxxxxx.png",
+  "fallback_when_presign_has_no_uploads.animation": "PUT the three stills only, complete, card 'Sent as a still. Clips are not on for this project yet.'"
+ }
+}

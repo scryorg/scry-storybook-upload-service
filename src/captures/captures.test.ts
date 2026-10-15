@@ -590,8 +590,8 @@ describe('guarantee-3-captures-are-not-builds', () => {
   it('the route code imports no build, queue, Milvus or image-processing module, and calls no build write', () => {
     const dir = dirname(fileURLToPath(import.meta.url));
     const imports = (file: string) => [...readFileSync(join(dir, file), 'utf8').matchAll(/^import[^;]*?from '([^']+)';/gms)].map((m) => m[1]);
-    const allowed = new Set(['@hono/zod-openapi', 'hono', 'node:crypto', '../lib/log.js', '../trace-context.js', '../middleware/auth.js', '../app.js', '../services/firestore/firestore.types.js', '../services/firestore/firestore.service.js', './image-check.js', './rate-limit.js']);
-    for (const file of ['captures.ts', 'image-check.ts', 'rate-limit.ts']) {
+    const allowed = new Set(['@hono/zod-openapi', 'hono', 'node:crypto', '../lib/log.js', '../trace-context.js', '../middleware/auth.js', '../app.js', '../services/firestore/firestore.types.js', '../services/firestore/firestore.service.js', './image-check.js', './mp4-check.js', './rate-limit.js']);
+    for (const file of ['captures.ts', 'image-check.ts', 'mp4-check.ts', 'rate-limit.ts']) {
       for (const spec of imports(file)) expect(allowed.has(spec), `${file} imports ${spec}`).toBe(true);
     }
     const src = readFileSync(join(dir, 'captures.ts'), 'utf8');
