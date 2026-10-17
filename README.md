@@ -479,6 +479,77 @@ Bindings (`wrangler.toml`): R2 `STORYBOOK_BUCKET` (`my-storybooks-{staging,produ
 and queue producer `BUILD_PROCESSING_QUEUE` (`scry-build-processing[-staging]`, consumed by
 scry-build-processing-service). Queue messages carry trace context for the downstream Langfuse trace.
 
+### Delta upload (`/delta`)
+
+Scry Sync can send only the pictures a project does not already hold, instead of one zip with every picture.
+Three calls, behind the `SYNC_DELTA` flag. Old Sync versions, the CLI and `scry import` keep using the zip routes.
+
+```
+POST /delta/:project/manifest                  open a build; answer which pictures to send
+PUT  /delta/:project/blobs/:oid?build=<id>     store one picture under its SHA-256 (once per missing picture)
+POST /delta/:project/builds/:buildId/commit    every picture is held -> queue the build
+```
+
+**Auth.** `X-API-Key` as for every other route: a project key, or a Scry Sync device key (device keys only with
+their pinned source, `x-scry-sync:other` or `x-scry-cc:other`). The key must belong to `:project`. Send
+`x-scry-request-id` to correlate logs; it is echoed on every answer and on error bodies.
+
+**Flag.** `SYNC_DELTA` (`"1"` on, anything else off) is a Worker var in `wrangler.toml`: on in `staging`, off in
+`production` and the top-level block until it is promoted. While off, all three routes answer
+`503 delta_disabled` and the client uses the zip upload. Worker vars are set by CI on every deploy, so change the
+flag in `wrangler.toml` and redeploy; a value set by hand in the Cloudflare dashboard is wiped by the next deploy.
+
+**`POST /delta/:project/manifest`**
+
+- Header `Idempotency-Key: <8-128 of A-Z a-z 0-9 _ ->`, one per sync attempt, reused on retries.
+- Body (JSON, at most 16 MiB):
+  `{ "protocol": 1, "hash": "sha256", "version": "...", "source": "<kind>:<platform>", "scf": { ...scf.json... }, "images": { "images/<name>.<ext>": { "oid": "<sha256 hex>", "size": <bytes> } } }`.
+  `scf` is exactly the `scf.json` the zip would carry; every `captures[].image` needs an `images` entry. Pictures only:
+  no `structure` or `sourceText` in the captures.
+- `201` a new build, `200` the same key and the same manifest while the build is open (fresh `objects`):
+  `{ "buildId", "buildNumber", "expiresAt", "maxBlobBytes", "objects": [ { "oid", "size", "actions"?: { "upload": { "href", "header", "expires_at" } }, "error"?: { "code", "message" } } ] }`.
+  This is the Git LFS batch shape: an object with `actions.upload` is missing and must be sent, one with neither
+  `actions` nor `error` is already held, one with `error` is refused on its own (its capture is skipped). The client
+  PUTs to `href` as given and never builds blob URLs itself.
+- If the build was failed (expired or swept), the same `Idempotency-Key` opens a NEW build (`201`); pictures already
+  stored are not listed as missing again.
+
+**`PUT /delta/:project/blobs/:oid?build=<buildId>`** raw picture bytes, `Content-Length` required, at most 20 MiB.
+The server hashes the body; `201 { "oid", "size" }` when stored, `200` when it was already held. A PUT also pushes
+the build deadline out by another 60 minutes. PNG, JPEG and WebP only.
+
+**`POST /delta/:project/builds/:buildId/commit`** empty body. `202 { "buildId", "buildNumber", "queued": true }`
+and the build is queued to build-processing with format `scf-delta` (pictures are read from the blob store, not a
+zip); a repeat answers `200 { "buildId", "message": "Build already accepted" }`.
+
+**Errors.** Bodies are `{ "error": "<code>", "message": "...", "request_id": "..." }`.
+
+| Status | `error` | Meaning / what the client does |
+|---|---|---|
+| 400 | `unsupported_protocol` | `protocol` is not 1 or `hash` is not `sha256`; client falls back to the zip upload |
+| 400 | `delta_pictures_only` | captures carry `structure` or `sourceText`; remove them or upload as a zip |
+| 400 | `invalid_manifest`, `invalid_request`, `invalid_source`, `invalid_idempotency_key`, `invalid_oid` | malformed request; not retryable as sent |
+| 401 / 403 | (auth errors above), `device_key_source` | missing or wrong key; a device key used with a source other than its own |
+| 404 | `build_not_found` | no such build in this project |
+| 409 | `missing_blobs` | commit before every listed picture arrived; body has `missing: [oid, ...]` (first 1000). PUT those and commit again |
+| 409 | `build_not_open` | the build failed or expired (no PUT for 60 minutes); call the manifest again with the same `Idempotency-Key` |
+| 409 | `idempotency_conflict` | same `Idempotency-Key` with a different manifest; use a new key |
+| 409 | `not_requested` | a PUT for a picture the named build did not ask for |
+| 411 | `length_required` | PUT without `Content-Length` |
+| 413 | `manifest_too_large`, `too_many_pictures`, `too_many_new_bytes`, `too_large` | list over 16 MiB, over 10,000 pictures, over 1 GiB of new picture bytes, or one picture over 20 MiB |
+| 422 | `hash_mismatch`, `size_mismatch`, `bad_type` | the bytes are not what the manifest declared; nothing is stored |
+| 429 | `rate_limited` | too many calls from this key; wait `Retry-After` seconds |
+| 503 | `delta_disabled` | `SYNC_DELTA` is off; client uses the zip upload |
+
+**Storage and retention.** Pictures are content-addressed and project-scoped at `_blobs/<project>/<oid>` in
+`STORYBOOK_BUCKET`; the manifest is stored beside the build at `<project>/<version>/builds/<n>/scf.json` and
+`images.json`. A daily clean-up (inside the hourly cron, 03:00 UTC hour) deletes pictures older than 30 days that no
+source's latest build and no build of the last 30 days lists. To stay safe against a manifest being opened while it
+runs, each manifest writes a marker at `_blobuse/<project>/touch`; the clean-up skips a project whose marker is
+newer than its snapshot (2 minute grace) and re-checks the marker every 50 deletes. Any error or unreadable
+picture list skips that project and deletes nothing there. Log lines (`delta manifest`, `delta blob`, `delta commit`,
+`delta gc`) carry counts only (`delta.items`, `delta.bytes`, `delta.items_skipped`), never names or hashes.
+
 ### Authentication
 
 Protected endpoints require an `X-API-Key` header with a valid API key:
