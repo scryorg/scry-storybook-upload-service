@@ -22,6 +22,7 @@ import { createRoute, z, type OpenAPIHono } from '@hono/zod-openapi';
 import type { Context } from 'hono';
 import { createHash } from 'node:crypto';
 import { log, reqFields, reportError } from '../lib/log.js';
+import { sendClipSignal } from './clip-signal.js';
 import { DEVICE_KEY_KIND, VERIFIED_PROJECT } from '../middleware/auth.js';
 import type { AppEnv } from '../app.js';
 import type { Capture, CaptureAnimation, CaptureMarkup } from '../services/firestore/firestore.types.js';
@@ -468,6 +469,7 @@ export function registerCaptures(app: OpenAPIHono<AppEnv>): void {
       if (!ready) return refuse(c, 404, 'not_found', 'No pending capture with this id', captureId);
       log.info('capture completed', reqFields(c, { run_id: captureId, status: 200 }));
       await enqueueCaptureIndex(c, key.project, captureId, ready.capturedByUid);
+      signalClipboard(c, ready.capturedByUid);
       return c.json({ capture: summary(ready) }, 200);
     } catch (error) {
       reportError(c, error, 'capture complete failed', 'capture_complete_failed');
@@ -495,6 +497,21 @@ async function enqueueCaptureIndex(c: Ctx, projectId: string, captureId: string,
     await queue.send({ type: 'capture-index', projectId, captureId, requestId: c.var.requestId, ...(trace ? { trace } : {}) });
   } catch (error) {
     reportError(c, error, 'capture index enqueue failed', 'capture_index_enqueue_failed', { run_id: captureId });
+  }
+}
+
+/**
+ * sync-clipboard-push: after the answer, tell the signal Worker this person has something new. Only the call that
+ * made the capture ready gets here (a repeat, a refusal or a lost race returns earlier). Never fails or delays complete.
+ */
+function signalClipboard(c: Ctx, ownerUid: string | undefined): void {
+  const config = c.var.clipSignal;
+  if (!config || !ownerUid) return;
+  const send = sendClipSignal(config, ownerUid, reqFields(c));
+  try {
+    c.executionCtx.waitUntil(send);
+  } catch {
+    // No execution context (not a Worker request): the send is already running and cannot throw; let it finish on its own.
   }
 }
 
