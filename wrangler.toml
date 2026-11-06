@@ -132,6 +132,16 @@ preview_bucket_name = "my-storybooks-staging"
 queue = "scry-build-processing-staging"
 binding = "BUILD_PROCESSING_QUEUE"
 
+# sync-clipboard-push: calls the clipboard signal Worker directly (a fetch to a hostname in our own zone may not reach another Worker).
+[[env.staging.services]]
+binding = "CLIP_SIGNAL"
+service = "scry-clipboard-signal-staging"
+
+# sync-clipboard-push: calls the clipboard signal Worker directly (a fetch to a hostname in our own zone may not reach another Worker).
+[[env.production.services]]
+binding = "CLIP_SIGNAL"
+service = "scry-clipboard-signal-production"
+
 # Schema-v1 log lines are shipped to the central R2 store by the scry-logs tail consumer
 # (log-standardization): staging ships to scry-logs-staging, production to scry-logs.
 [[env.staging.tail_consumers]]

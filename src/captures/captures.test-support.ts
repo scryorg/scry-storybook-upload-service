@@ -6,6 +6,7 @@ import { Hono } from 'hono';
 import { vi } from 'vitest';
 import { app, type AppEnv } from '../app.js';
 import { R2S3StorageService } from '../services/storage/storage.worker.js';
+import type { ClipSignalConfig } from './clip-signal.js';
 import type { ApiKeyService } from '../services/apikey/apikey.service.js';
 import type { FirestoreService } from '../services/firestore/firestore.service.js';
 import type { Capture, CreateCaptureData } from '../services/firestore/firestore.types.js';
@@ -133,7 +134,7 @@ const KEYS: Record<string, { valid: boolean; apiKey?: Record<string, unknown> }>
   [CI_KEY]: { valid: true, apiKey: { id: 'ciKey1', name: 'CI', prefix: 'scry_proj_', kind: 'ci', createdBy: 'uid-ada' } },
 };
 
-export function setup(opts: { snipIndexing?: boolean; snipMarkup?: boolean; animatedSnips?: boolean } = {}) {
+export function setup(opts: { snipIndexing?: boolean; snipMarkup?: boolean; animatedSnips?: boolean; clipSignal?: ClipSignalConfig } = {}) {
   const bucket = new FakeR2();
   const storage = new R2S3StorageService(bucket as never, {
     accountId: 'acct123',
@@ -160,6 +161,7 @@ export function setup(opts: { snipIndexing?: boolean; snipMarkup?: boolean; anim
     if (opts.snipIndexing !== undefined) c.set('snipIndexing', opts.snipIndexing);
     if (opts.snipMarkup !== undefined) c.set('snipMarkup', opts.snipMarkup);
     if (opts.animatedSnips !== undefined) c.set('animatedSnips', opts.animatedSnips);
+    if (opts.clipSignal) c.set('clipSignal', opts.clipSignal);
     await next();
   });
   server.route('/', app);

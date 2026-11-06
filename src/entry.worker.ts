@@ -19,6 +19,7 @@ import {
 import type { StorageService } from './services/storage/storage.service.js';
 import { mintRequestId } from './lib/request-id.js';
 import { gcDue, runBlobGc } from './delta/gc.js';
+import { clipSignalConfig } from './captures/clip-signal.js';
 import { requestIdMiddleware, errorHandler } from './middleware/request-id.js';
 import { configureLog, log, type LogBindings } from './lib/log.js';
 
@@ -80,6 +81,11 @@ type Bindings = StampBindings & {
   // animated-snips: "on" lets presign validate and store the optional `animation` field and sign a fourth PUT for the clip;
   // anything else drops it unread. A wrangler.toml var per environment: staging "on", production "off", absent means off.
   ANIMATED_SNIPS?: string;
+
+  // sync-clipboard-push: service binding to the signal Worker (wrangler.toml per environment) and the secret that lets
+  // this service send a signal (`wrangler secret put CLIP_SIGNAL_SEND_SECRET --env <env>`). Either missing sends nothing.
+  CLIP_SIGNAL?: Fetcher;
+  CLIP_SIGNAL_SEND_SECRET?: string;
 };
 
 // Create a new Hono instance specifically for the Worker, extending the shared AppEnv.
@@ -188,6 +194,8 @@ workerApp.use('*', async (c, next) => {
   c.set('snipIndexing', c.env.SNIP_INDEXING === 'on');
   c.set('snipMarkup', c.env.SNIP_MARKUP === 'on');
   c.set('animatedSnips', c.env.ANIMATED_SNIPS === 'on');
+  const clipSignal = clipSignalConfig(c.env.CLIP_SIGNAL, c.env.CLIP_SIGNAL_SEND_SECRET);
+  if (clipSignal) c.set('clipSignal', clipSignal);
 
   await next();
 });

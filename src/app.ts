@@ -29,6 +29,7 @@ import {
   isDeviceKeySource,
   type AuthVariables,
 } from './middleware/auth.js';
+import type { ClipSignalConfig } from './captures/clip-signal.js';
 import { dashboardDoor } from './middleware/dashboard-door.js';
 import { extractGitContext, normalizeCoverageInput } from './coverage/coverage.js';
 import { parseMultipartFormData } from './utils/multipart.js';
@@ -61,6 +62,8 @@ export type AppEnv = {
     snipMarkup?: boolean;
     /** ANIMATED_SNIPS: "on" lets /captures/:p/presign validate and store the optional `animation` field and hand out a fourth (clip) PUT URL (animated-snips). Absent or off drops the field unread. */
     animatedSnips?: boolean;
+    /** CLIP_SIGNAL service binding + CLIP_SIGNAL_SEND_SECRET: /captures/:p/complete signals the signal Worker after a snip is ready (sync-clipboard-push). Absent sends nothing. */
+    clipSignal?: ClipSignalConfig;
     /** Set by a route that refused with an expected, non-failing 5xx (the flag-off 503): the request line logs at info, not error. */
     expectedRefusal?: boolean;
   } & AuthVariables;

@@ -23,3 +23,6 @@ SENTRY_DSN=https://your-public-key@o0.ingest.sentry.io/0
 SENTRY_ENVIRONMENT=development
 # Optional: Set release version for source map association
 # SENTRY_RELEASE=storybook-upload-service@1.0.0
+
+# sync-clipboard-push: lets this service send a clipboard signal (the CLIP_SIGNAL service binding comes from wrangler.toml; unset = send nothing)
+CLIP_SIGNAL_SEND_SECRET=your-clip-signal-send-secret
